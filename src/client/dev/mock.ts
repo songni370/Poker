@@ -754,6 +754,62 @@ function scenarioFullRing(): MockSnapshot {
   }
 }
 
+/**
+ * 旁观者视角：本人没有座位，桌上有空位（第 5 项需求的落座流程）。
+ * self.seat = null → 牌桌渲染空位按钮与买入弹窗。
+ */
+function scenarioSpectating(): MockSnapshot {
+  const maxSeats = 9
+  const entries: (SeatPublic | null)[] = []
+  for (let index = 0; index < maxSeats; index += 1) {
+    if (index > 2) {
+      entries.push(null)
+      continue
+    }
+    const committed = index === 1 ? 10 : 20
+    entries.push(
+      seatAt(index, {
+        stack: stackOf(index),
+        committedStreet: committed,
+        committedHand: committed,
+        lastAction: index > 0 ? 'call' : null,
+      }),
+    )
+  }
+  const seats = seatsFrom(entries, maxSeats)
+  markBlinds(seats, 0, 1, 2)
+  const state = buildState({
+    phase: 'preflop',
+    street: 'preflop',
+    board: [],
+    seats,
+    maxSeats,
+    buttonSeat: 0,
+    actingSeat: 1,
+    potTotal: 30,
+    currentBet: 20,
+    minRaise: 20,
+    handNo: 3,
+  })
+  return { state, self: { playerId: 'spectator', seat: null, holeCards: [], legalActions: [] } }
+}
+
+/** 已离座但保留座位：self.seat 仍是本人的座位，座位面板显示「已离座」，可以坐回。 */
+function scenarioAway(): MockSnapshot {
+  const base = scenarioFlop()
+  const heroSeat = base.self.seat
+  if (heroSeat === null) return base
+  const seat = base.state.seats[heroSeat]
+  if (seat) {
+    seat.away = true
+    seat.folded = true
+    seat.lastAction = 'fold'
+    base.state.seats[heroSeat] = seat
+  }
+  base.self = { ...base.self, holeCards: [], legalActions: [] }
+  return base
+}
+
 /* ────────────────────────────── 场景表 ────────────────────────────── */
 
 export interface MockSnapshot {
@@ -788,6 +844,8 @@ export const MOCK_SCENARIOS: Record<string, MockScenario> = {
   empty: scenarioEmpty(),
   headsUp: scenarioHeadsUp(),
   fullRing: scenarioFullRing(),
+  spectating: scenarioSpectating(),
+  away: scenarioAway(),
   closed: { error: 'room_closed' },
   kicked: { error: 'unauthorized', detail: '你已被主持人移出房间。' },
   full: { error: 'room_full' },

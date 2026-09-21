@@ -34,6 +34,8 @@ export interface BuildAppOptions {
   clientDir?: string
   /** 同时开放的房间上限，默认取 MAX_ROOMS 或 3。 */
   maxRooms?: number
+  /** 掉线宽限期（毫秒），测试里可传极小值验证「超时自动释放座位」。 */
+  seatReleaseMs?: number
 }
 
 export interface BuiltApp {
@@ -49,7 +51,10 @@ export async function buildApp(handle: DbHandle, options: BuildAppOptions = {}):
   const startedAt = Date.now()
 
   const repo = new Repo(handle.db)
-  const rooms = new RoomManager(repo, options.maxRooms ?? Number(process.env.MAX_ROOMS ?? DEFAULT_MAX_ROOMS))
+  const rooms = new RoomManager(repo, {
+    maxRooms: options.maxRooms ?? Number(process.env.MAX_ROOMS ?? DEFAULT_MAX_ROOMS),
+    ...(options.seatReleaseMs === undefined ? {} : { seatReleaseMs: options.seatReleaseMs }),
+  })
   rooms.startSweeper()
   // 第 4 阶段：进程重启后从 SQLite 快照恢复未关闭房间（含牌局与牌堆位置）。
   const recovery = rooms.restoreRooms()

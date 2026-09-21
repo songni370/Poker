@@ -6,6 +6,8 @@ import type { SeatPublic } from '../../shared/protocol.ts'
 import CommunityCards from './CommunityCards.vue'
 import PlayerSeat from './PlayerSeat.vue'
 
+const emit = defineEmits<{ pickSeat: [seat: number] }>()
+
 const props = withDefaults(
   defineProps<{
     /** 座位数组，下标即座位号，空位为 null。 */
@@ -31,6 +33,10 @@ const props = withDefaults(
     street?: 'preflop' | 'flop' | 'turn' | 'river' | null
     /** 系统提示（如「XX 超时自动弃牌」）。 */
     notice?: string
+    /** 本人是否可以挑座位（旁观中、或离座保留座位时）：空位会渲染成可点按钮。 */
+    canPickSeat?: boolean
+    /** 本人保留的座位号（离座后仍属于本人）：点它表示坐回。 */
+    reservedSeat?: number | null
   }>(),
   {
     board: () => [],
@@ -47,6 +53,8 @@ const props = withDefaults(
     highlightCards: () => [],
     street: null,
     notice: '',
+    canPickSeat: false,
+    reservedSeat: null,
   },
 )
 
@@ -187,6 +195,31 @@ const tableStatus = computed(() => {
           />
         </div>
 
+        <!-- 空位：旁观者/离座者可以点它落座（买入确认在牌桌页面弹窗里做）。 -->
+        <div
+          v-else-if="canPickSeat"
+          class="seat-slot"
+          :class="{ 'is-side-seat': isSideSeat(index) }"
+          :style="seatStyle(index)"
+        >
+          <button
+            type="button"
+            class="seat-empty"
+            :class="{ 'is-reserved': reservedSeat === index }"
+            :aria-label="
+              reservedSeat === index
+                ? `坐回 ${String(index + 1)} 号座位（座位为你保留）`
+                : `坐到 ${String(index + 1)} 号座位`
+            "
+            :title="reservedSeat === index ? '这个座位为你保留，点击坐回' : '点击选择这个座位并买入'"
+            @click="emit('pickSeat', index)"
+          >
+            <i :class="reservedSeat === index ? 'pi pi-user' : 'pi pi-plus'" aria-hidden="true" />
+            <span class="num">{{ index + 1 }}</span>
+            <span class="seat-empty-label">{{ reservedSeat === index ? '坐回' : '入座' }}</span>
+          </button>
+        </div>
+
         <!-- 本轮下注：朝桌心方向显示筹码与数额。data-seat 供几何探针区分「自己的筹码」与「别人的」。 -->
         <div
           v-if="seat && seat.committedStreet > 0"
@@ -323,6 +356,61 @@ const tableStatus = computed(() => {
   position: absolute;
   z-index: 2;
   transform: translate(-50%, -50%);
+}
+
+/* 空位：可点的座位槽。描边虚线 + 「入座」文字，键盘可达（是真正的 button）。 */
+.seat-empty {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  width: var(--seat-w, 144px);
+  padding: 6px 8px;
+  border: 1px dashed rgba(212, 177, 106, 0.45);
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.24);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease-out, color 0.15s ease-out, background 0.15s ease-out;
+}
+
+.seat-empty:hover,
+.seat-empty:focus-visible {
+  border-color: var(--gold);
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.34);
+}
+
+/* 本人保留的座位：金色实线，一眼看出「这是我的位置」。 */
+.seat-empty.is-reserved {
+  border-style: solid;
+  border-color: var(--gold-soft);
+  color: var(--gold);
+}
+
+.seat-empty-label {
+  font-size: 0.68rem;
+}
+
+/* 紧凑布局下的空位按钮：只留「+ 座位号」，高度与座位面板对齐，避免相邻空位互相压住。 */
+@media (max-height: 430px) {
+  .seat-empty {
+    gap: 0;
+    padding: 2px 6px;
+    font-size: 0.74rem;
+  }
+
+  .seat-empty-label {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) and (orientation: portrait) {
+  .seat-empty {
+    padding: 4px 6px;
+    font-size: 0.78rem;
+  }
 }
 
 /* 本人座位压在桌沿下沿，视觉上最靠近底部操作区。 */

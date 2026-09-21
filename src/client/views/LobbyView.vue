@@ -2,10 +2,11 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import Button from 'primevue/button'
+import InputNumber from 'primevue/inputnumber'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import Select from 'primevue/select'
-import { NICKNAME_MAX, ROOM_NAME_MAX, TABLE_RULES } from '../../shared/poker.ts'
+import { NICKNAME_MAX, ROOM_NAME_MAX, TABLE_RULES, minBuyInFor } from '../../shared/poker.ts'
 import { SessionError, connectRoom, createRoom as apiCreateRoom, joinRoom as apiJoinRoom } from '../net/session.ts'
 import { useRoomStore } from '../stores/room.ts'
 
@@ -41,6 +42,8 @@ const nickname = ref(room.nickname)
 const roomName = ref('')
 const joinCode = ref('')
 const maxSeats = ref(6)
+/** 房主自定义买入上限：买入下限固定为 10 个大盲，步进等于小盲（服务端同样校验）。 */
+const buyInMax = ref(TABLE_RULES.startingStack)
 const error = ref('')
 const busy = ref(false)
 
@@ -56,6 +59,10 @@ function problem(): string | null {
   if (!name) return '请先填写昵称，其他玩家会看到这个名字。'
   if (name.length > NICKNAME_MAX) return `昵称最多 ${String(NICKNAME_MAX)} 个字符。`
   if (roomName.value.trim().length > ROOM_NAME_MAX) return `房间名最多 ${String(ROOM_NAME_MAX)} 个字符。`
+  const buyIn = Number(buyInMax.value)
+  if (!Number.isFinite(buyIn) || buyIn < minBuyInFor(TABLE_RULES.bigBlind) || buyIn > TABLE_RULES.maxBuyInLimit) {
+    return `买入上限需在 ${String(minBuyInFor(TABLE_RULES.bigBlind))}–${String(TABLE_RULES.maxBuyInLimit)} 之间。`
+  }
   return null
 }
 
@@ -77,10 +84,11 @@ async function createRoom(): Promise<void> {
       nickname: nickname.value.trim(),
       roomName: roomName.value.trim() || undefined,
       maxSeats: maxSeats.value,
+      buyInMax: buyInMax.value,
     })
     room.setCredentials(credentials)
     connectRoom(credentials)
-    await router.push({ name: 'room', params: { roomId: credentials.roomId } })
+    await router.push({ name: 'table', params: { roomId: credentials.roomId } })
   } catch (cause) {
     error.value = describe(cause)
   } finally {
@@ -105,7 +113,7 @@ async function joinRoom(): Promise<void> {
     const credentials = await apiJoinRoom(code, { nickname: nickname.value.trim() })
     room.setCredentials(credentials)
     connectRoom(credentials)
-    await router.push({ name: 'room', params: { roomId: credentials.roomId } })
+    await router.push({ name: 'table', params: { roomId: credentials.roomId } })
   } catch (cause) {
     error.value = describe(cause)
   } finally {
@@ -121,8 +129,8 @@ async function joinRoom(): Promise<void> {
         <p class="mark">私人牌局 · 邀请制</p>
         <h1>开一桌德州</h1>
         <p class="lede">
-          2–9 人、盲注 {{ TABLE_RULES.smallBlind }}/{{ TABLE_RULES.bigBlind }}、起始筹码
-          {{ TABLE_RULES.startingStack }}。筹码是虚拟分数，不可充值、不可兑换、不可转让。
+          2–9 人、盲注 {{ TABLE_RULES.smallBlind }}/{{ TABLE_RULES.bigBlind }}、买入上限由主持人设定
+          （默认 {{ TABLE_RULES.startingStack }}）。筹码是虚拟分数，不可充值、不可兑换、不可转让。
         </p>
       </header>
 
@@ -133,7 +141,7 @@ async function joinRoom(): Promise<void> {
       <div class="grid">
         <section class="panel" aria-labelledby="create-title">
           <h2 id="create-title" class="panel-title">创建房间</h2>
-          <p class="hint">你是主持人，人齐后由你开局。</p>
+          <p class="hint">你是主持人：进桌后先选座位买入，人齐后由你开局。</p>
 
           <label class="field" for="nickname">
             <span class="label">你的昵称</span>
@@ -170,6 +178,23 @@ async function joinRoom(): Promise<void> {
             />
           </label>
 
+          <label class="field" for="buy-in-max">
+            <span class="label">买入上限</span>
+            <InputNumber
+              input-id="buy-in-max"
+              v-model="buyInMax"
+              :min="minBuyInFor(TABLE_RULES.bigBlind)"
+              :max="TABLE_RULES.maxBuyInLimit"
+              :step="TABLE_RULES.smallBlind"
+              :use-grouping="false"
+              fluid
+            />
+          </label>
+          <p class="hint">
+            玩家落座时在 {{ minBuyInFor(TABLE_RULES.bigBlind) }}–{{ buyInMax || TABLE_RULES.startingStack }}
+            之间选买入额（步进 {{ TABLE_RULES.smallBlind }} 筹码）。
+          </p>
+
           <p v-if="roomLimitText" class="hint" role="status">
             {{ roomLimitText }}<template v-if="roomLimitReached">，已满：等其中一桌结束或关闭后再开新桌</template>
           </p>
@@ -180,7 +205,7 @@ async function joinRoom(): Promise<void> {
             @click="createRoom"
           >
             <i class="pi pi-plus" aria-hidden="true" />
-            <span>创建并进入等待区</span>
+            <span>创建牌桌</span>
           </Button>
         </section>
 

@@ -58,7 +58,10 @@ export class TestClient {
     const tail = this.messages.slice(fromIndex)
     const seen = tail.map((message) => message.type).join(',')
     const failure = tail.find((message) => message.type === 'room.error')
-    const reason = failure && failure.type === 'room.error' ? ` / 服务端错误：${failure.error.code} ${failure.error.message}` : ''
+    const reason =
+      failure && failure.type === 'room.error' && failure.error
+        ? ` / 服务端错误：${failure.error.code} ${failure.error.message}`
+        : ''
     throw new Error(`等待服务端消息超时（从下标 ${String(fromIndex)} 起收到：${seen || '无'}${reason}）`)
   }
 
@@ -87,13 +90,16 @@ export interface TestServer {
   stop: () => Promise<void>
 }
 
-export async function startTestServer(options: { dbPath?: string; maxRooms?: number } = {}): Promise<TestServer> {
+export async function startTestServer(
+  options: { dbPath?: string; maxRooms?: number; seatReleaseMs?: number } = {},
+): Promise<TestServer> {
   const dir = options.dbPath ? null : mkdtempSync(join(tmpdir(), 'poker-test-'))
   const dbPath = options.dbPath ?? join(dir!, 'poker.sqlite')
   const handle = openDatabase(dbPath)
   const { app, rooms } = await buildApp(handle, {
     clientDir: join(tmpdir(), 'no-client-dir'),
     ...(options.maxRooms === undefined ? {} : { maxRooms: options.maxRooms }),
+    ...(options.seatReleaseMs === undefined ? {} : { seatReleaseMs: options.seatReleaseMs }),
   })
   await app.listen({ host: '127.0.0.1', port: 0 })
   const address = app.server.address()

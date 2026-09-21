@@ -2,7 +2,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Button from 'primevue/button'
+import Dialog from 'primevue/dialog'
 import Drawer from 'primevue/drawer'
+import InputNumber from 'primevue/inputnumber'
 import InputText from 'primevue/inputtext'
 import Menu from 'primevue/menu'
 import type { MenuItem } from 'primevue/menuitem'
@@ -11,8 +13,12 @@ import type { ActionType, Card } from '../../shared/poker.ts'
 import { STREET_NAMES, TABLE_RULES, formatCard } from '../../shared/poker.ts'
 import type { ChatMessage } from '../../shared/protocol.ts'
 import { CHAT_MAX_LENGTH } from '../../shared/protocol.ts'
+import { NICKNAME_MAX } from '../../shared/poker.ts'
 import {
+  SessionError,
   connectRoom,
+  fetchRoomInfo,
+  joinRoom as apiJoinRoom,
   loadCredentials,
   nextRequestId,
   sendChat,
@@ -110,8 +116,9 @@ async function applyScenario(name: string): Promise<void> {
 }
 
 /**
- * 接入优先级：本地有房间凭证 → 真实 WebSocket；否则仅在开发模式下用模拟场景；
- * 生产环境两者都没有时回到错误页，绝不展示假牌局。
+ * 接入优先级：本地有房间凭证 → 真实 WebSocket；否则开发模式用模拟场景；
+ * 生产环境没有凭证时**不再跳错误页**：邀请链接直接落在牌桌上，
+ * 这里给出「填昵称加入」面板，加入后先是旁观者，再自己选座买入。
  */
 onMounted(() => {
   const credentials = room.credentials?.roomId === props.roomId ? room.credentials : loadCredentials(props.roomId)
@@ -120,9 +127,52 @@ onMounted(() => {
     connectRoom(credentials)
     return
   }
-  if (isDev) void applyScenario(scenario.value)
-  else void router.push({ name: 'error', query: { kind: 'room', code: 'unauthorized' } })
+  if (isDev) {
+    void applyScenario(scenario.value)
+    return
+  }
+  void loadJoinInfo()
 })
+
+/* ───────────── 邀请链接：未加入时的「填昵称进桌」 ───────────── */
+
+const joining = ref(false)
+const joinNickname = ref('')
+const joinError = ref('')
+const joinInfo = ref<{ roomName: string; seated: number; maxSeats: number; status: string } | null>(null)
+const joinInfoError = ref('')
+
+/** 先取公开信息（房间名/人数），失败就给出可执行的提示，而不是白屏。 */
+async function loadJoinInfo(): Promise<void> {
+  try {
+    const info = await fetchRoomInfo(props.roomId)
+    joinInfo.value = info
+  } catch (cause) {
+    joinInfoError.value =
+      cause instanceof SessionError && cause.code === 'room_not_found'
+        ? '这个房间不存在或已经解散，请向房主要一条新的邀请链接。'
+        : '暂时连不上服务器，请稍后重试。'
+  }
+}
+
+async function submitJoin(): Promise<void> {
+  joinError.value = ''
+  const nickname = joinNickname.value.trim()
+  if (!nickname) {
+    joinError.value = '请先填写昵称。'
+    return
+  }
+  joining.value = true
+  try {
+    const credentials = await apiJoinRoom(props.roomId, { nickname })
+    room.setCredentials(credentials)
+    connectRoom(credentials)
+  } catch (cause) {
+    joinError.value = cause instanceof SessionError ? cause.message : '加入失败，请稍后重试。'
+  } finally {
+    joining.value = false
+  }
+}
 
 // 开发模式下切换场景时仍然可以预览；连上真实房间后不再干预。
 watch(scenario, (name) => {
@@ -655,18 +705,115 @@ const freeSeats = computed(() => {
 
 const freeSeatText = computed(() => freeSeats.value.map((seat) => `${String(seat + 1)} 号`).join('、'))
 
-function takeSeatAt(seat: number): void {
-  if (!sendCommand({ type: 'seat.take', requestId: nextRequestId(), seat })) {
+/* 落座前先确认买入额：房主定上限，下限 10 个大盲，步进 = 小盲（服务端同样校验）。 */
+const buyInOpen = ref(false)
+const buyInSeat = ref<number | null>(null)
+const buyInAmount = ref(0)
+
+const buyInMin = computed(() => game.state?.buyInMin ?? 0)
+const buyInMax = computed(() => game.state?.buyInMax ?? 0)
+const buyInStep = computed(() => game.state?.buyInStep ?? TABLE_RULES.smallBlind)
+
+/** 打开买入弹窗：默认给满上限（最少点击），下限/上限/步进都来自服务端。 */
+function openBuyIn(seat: number): void {
+  buyInSeat.value = seat
+  buyInAmount.value = buyInMax.value || TABLE_RULES.startingStack
+  buyInOpen.value = true
+}
+
+function confirmBuyIn(): void {
+  const seat = buyInSeat.value
+  if (seat === null) return
+  const amount = Math.round(Number(buyInAmount.value) / buyInStep.value) * buyInStep.value
+  if (!sendCommand({ type: 'seat.take', requestId: nextRequestId(), seat, buyIn: amount })) {
     announcement.value = '尚未连接到服务器，入座请求未发送。'
     return
   }
-  announcement.value = `正在坐到 ${String(seat + 1)} 号座位。`
+  announcement.value = `正在坐到 ${String(seat + 1)} 号座位，买入 ${String(amount)} 筹码。`
+  buyInOpen.value = false
+  buyInSeat.value = null
+}
+
+function takeSeatAt(seat: number): void {
+  openBuyIn(seat)
 }
 
 function takeFreeSeat(): void {
   const seat = firstFreeSeat.value
   if (seat === null) return
-  takeSeatAt(seat)
+  openBuyIn(seat)
+}
+
+/* ── 座位挑选（旁观者与离座者） ── */
+
+/** 本人离座但座位仍被保留（只有本人能坐回）。 */
+const mySeatAway = computed(() => game.mySeat?.away ?? false)
+
+/** 本人保留的座位号（离座后仍是本人的座位；没离座则为 null）。 */
+const myReservedSeat = computed(() => (mySeatAway.value ? (game.self?.seat ?? null) : null))
+
+/** 能不能在桌面上挑座位：未入座（旁观）或已离座但保留座位。 */
+const canPickSeat = computed(() => Boolean(game.self) && (!game.isSeated || mySeatAway.value))
+
+/** 点桌面空位：自己保留的座位直接坐回（筹码还在就没必要再买入），其他空位走买入确认。 */
+function onPickSeat(seat: number): void {
+  if (myReservedSeat.value === seat) {
+    resit()
+    return
+  }
+  openBuyIn(seat)
+}
+
+/* ── 坐回保留座位 / 离座 / 退出房间（第 6 项） ── */
+
+/** 本人保留座位里的筹码：>0 直接坐回，=0 说明输光了，需要重新买入。 */
+const myReservedStack = computed(() => game.mySeat?.stack ?? 0)
+
+function resit(): void {
+  const seat = game.self?.seat
+  if (seat === null || seat === undefined) return
+  if (myReservedStack.value > 0) {
+    if (!sendCommand({ type: 'seat.take', requestId: nextRequestId(), seat })) {
+      announcement.value = '尚未连接到服务器，坐回请求未发送。'
+      return
+    }
+    announcement.value = `正在坐回 ${String(seat + 1)} 号座位。`
+    return
+  }
+  // 筹码为 0：走买入弹窗，重新买入后再入座。
+  openBuyIn(seat)
+}
+
+/** 本手里还在牌局中（未弃牌）：离座会同时弃牌，先让玩家确认。 */
+const inLiveHand = computed(() => Boolean(game.mySeat?.inHand && !game.mySeat.folded && !mySeatAway.value))
+const leaveSeatOpen = ref(false)
+const exitRoomOpen = ref(false)
+
+function requestLeaveSeat(): void {
+  if (inLiveHand.value) {
+    leaveSeatOpen.value = true
+    return
+  }
+  leaveSeat()
+}
+
+function leaveSeat(): void {
+  leaveSeatOpen.value = false
+  if (!sendCommand({ type: 'seat.leave', requestId: nextRequestId() })) {
+    announcement.value = '尚未连接到服务器，离座请求未发送。'
+    return
+  }
+  announcement.value = '已离座，座位与筹码为你保留，随时可以坐回。'
+}
+
+function exitRoom(): void {
+  exitRoomOpen.value = false
+  if (!sendCommand({ type: 'room.leave', requestId: nextRequestId() })) {
+    announcement.value = '尚未连接到服务器，退出请求未发送。'
+    return
+  }
+  room.clear()
+  void router.push({ name: 'lobby' })
 }
 
 function submitAction(payload: { action: ActionType; amount?: number }): void {
@@ -686,6 +833,9 @@ function submitAction(payload: { action: ActionType; amount?: number }): void {
   announcement.value = sent ? '已提交动作，等待服务端裁定。' : '尚未连接到服务器，动作未发送。'
 }
 
+/** 是否已经开过手：决定按钮文案是「开始牌局」还是「开始下一手」。 */
+const hasPlayedHand = computed(() => (game.state?.handNo ?? 0) > 0)
+
 /** 主持人开始下一手（结算后无需回到等待区）。 */
 const canStartNextHand = computed(
   () => room.isHost && !!game.state && (game.state.phase === 'waiting' || game.state.phase === 'settlement'),
@@ -697,15 +847,52 @@ function startNextHand(): void {
   }
 }
 
-async function leaveTable(): Promise<void> {
-  await router.push({ name: 'room', params: { roomId: props.roomId } })
-}
-
 
 </script>
 
 <template>
   <div class="table-view">
+    <!-- 邀请链接落地页：还没加入这个房间，先填昵称进桌（进去后是旁观者，自己选座买入）。
+         开发模式的模拟场景用 game.state 判定，不会被这块面板挡住。 -->
+    <main v-if="!room.hasCredentials && !game.state" id="main" class="join-gate">
+      <section class="panel join-card" aria-labelledby="join-gate-title">
+        <p class="mark">私人牌局 · 邀请制</p>
+        <h1 id="join-gate-title" class="join-title">
+          {{ joinInfo ? `加入「${joinInfo.roomName}」` : '加入这桌牌局' }}
+        </h1>
+        <p v-if="joinInfo" class="hint">
+          已入座 {{ joinInfo.seated }}/{{ joinInfo.maxSeats }} · 进桌后先旁观，点空位确认买入即可落座。
+        </p>
+        <p v-else-if="joinInfoError" class="join-error" role="alert">{{ joinInfoError }}</p>
+        <p v-else class="hint">正在读取房间信息…</p>
+
+        <label class="field" for="join-nickname">
+          <span class="label">你的昵称</span>
+          <InputText
+            id="join-nickname"
+            v-model="joinNickname"
+            :maxlength="NICKNAME_MAX"
+            placeholder="例如：小满"
+            autocomplete="nickname"
+            fluid
+            @keyup.enter="submitJoin"
+          />
+        </label>
+        <p v-if="joinError" class="join-error" role="alert">{{ joinError }}</p>
+        <div class="join-actions">
+          <Button :disabled="joining || Boolean(joinInfoError)" @click="submitJoin">
+            <i class="pi pi-sign-in" aria-hidden="true" />
+            <span>进入牌桌</span>
+          </Button>
+          <Button text :title="'回到大厅'" @click="router.push({ name: 'lobby' })">
+            <i class="pi pi-home" aria-hidden="true" />
+            <span>回大厅</span>
+          </Button>
+        </div>
+      </section>
+    </main>
+
+    <template v-else>
     <ConnectionBanner />
 
     <!-- 顶部：房间名、盲注、连接状态、设置与退出（规格书 §3.3）。 -->
@@ -785,13 +972,13 @@ async function leaveTable(): Promise<void> {
       <Button
         v-if="canStartNextHand"
         size="small"
-        :title="'开始下一手牌'"
+        :title="hasPlayedHand ? '开始下一手牌' : '开始第一手牌'"
         @click="startNextHand"
       >
         <i class="pi pi-play" aria-hidden="true" />
-        <span>开始下一手</span>
+        <span>{{ hasPlayedHand ? '开始下一手' : '开始牌局' }}</span>
       </Button>
-      <Button size="small" outlined aria-label="退出" :title="'回到等待区'" @click="leaveTable">
+      <Button size="small" outlined aria-label="退出房间" :title="'退出房间（释放座位）'" @click="exitRoomOpen = true">
         <i class="pi pi-sign-out" aria-hidden="true" />
         <span>退出</span>
       </Button>
@@ -825,6 +1012,9 @@ async function leaveTable(): Promise<void> {
         :highlight-cards="highlightCards"
         :street="game.state.street"
         :notice="noticeText"
+        :can-pick-seat="canPickSeat"
+        :reserved-seat="myReservedSeat"
+        @pick-seat="onPickSeat"
       />
       <!-- 加载中 / 场景不可用。 -->
       <p v-else-if="!unavailable" class="loading" role="status">
@@ -839,7 +1029,7 @@ async function leaveTable(): Promise<void> {
 
     <!-- 底部：本人底牌、剩余筹码、倒计时、下注控件与动作区。 -->
     <footer v-if="!unavailable" class="hero">
-      <div v-if="game.isSeated" class="hero-cards">
+      <div v-if="game.isSeated && !mySeatAway" class="hero-cards">
         <span class="hero-label">你的底牌</span>
         <div class="cards">
           <PlayingCard v-for="card in myCards" :key="card" size="lg" upright :card="card" />
@@ -849,14 +1039,30 @@ async function leaveTable(): Promise<void> {
           <span class="muted">筹码</span>
           <b class="num">{{ myStack }}</b>
         </span>
+        <span class="hero-seat-actions">
+          <Button size="small" text :title="'离座（座位与筹码为你保留）'" @click="requestLeaveSeat">
+            <i class="pi pi-sign-out" aria-hidden="true" />
+            <span>离座</span>
+          </Button>
+          <Button size="small" text :title="'退出房间（释放座位）'" @click="exitRoomOpen = true">
+            <i class="pi pi-times" aria-hidden="true" />
+            <span>退出房间</span>
+          </Button>
+        </span>
       </div>
 
       <!-- 观战者：只显示公开信息与入座入口，绝不渲染任何玩家的底牌。 -->
       <section v-else-if="game.self" class="spectator" aria-labelledby="spectator-state">
         <p id="spectator-state" class="spectator-state">
-          <i class="pi pi-eye" aria-hidden="true" />
-          <b>观战中</b>
-          <span class="muted">你正在旁观这桌牌局，只能看到已经公开的牌。</span>
+          <i :class="mySeatAway ? 'pi pi-user-minus' : 'pi pi-eye'" aria-hidden="true" />
+          <b>{{ mySeatAway ? '已离座' : '观战中' }}</b>
+          <span class="muted">
+            {{
+              mySeatAway
+                ? `座位与筹码保留着（${String((game.self.seat ?? 0) + 1)} 号位），随时可以坐回。`
+                : '你正在旁观这桌牌局，只能看到已经公开的牌。'
+            }}
+          </span>
         </p>
 
         <p class="spectator-seats">
@@ -865,8 +1071,8 @@ async function leaveTable(): Promise<void> {
           <span v-if="freeSeats.length > 0" class="muted">· 空位：{{ freeSeatText }}</span>
         </p>
 
-        <!-- 空位可选：观战者自己挑座位，而不是只能坐第一个。 -->
-        <div v-if="freeSeats.length > 0" class="spectator-seat-picker">
+        <!-- 空位可选：观战者自己挑座位，而不是只能坐第一个。离座者只看自己的座位。 -->
+        <div v-if="freeSeats.length > 0 && !mySeatAway" class="spectator-seat-picker">
           <span id="seat-picker-label" class="muted">选择座位</span>
           <div class="seat-picker" role="group" aria-labelledby="seat-picker-label">
             <Button
@@ -885,6 +1091,15 @@ async function leaveTable(): Promise<void> {
 
         <div class="spectator-actions">
           <Button
+            v-if="mySeatAway"
+            :title="`坐回 ${String((game.self.seat ?? 0) + 1)} 号座位`"
+            @click="resit"
+          >
+            <i class="pi pi-user-plus" aria-hidden="true" />
+            <span>坐回 {{ (game.self.seat ?? 0) + 1 }} 号位</span>
+          </Button>
+          <Button
+            v-else
             :disabled="firstFreeSeat === null"
             :title="firstFreeSeat === null ? '座位已满，等有人离座' : `坐到 ${String(firstFreeSeat + 1)} 号座位`"
             @click="takeFreeSeat"
@@ -892,20 +1107,23 @@ async function leaveTable(): Promise<void> {
             <i class="pi pi-user-plus" aria-hidden="true" />
             <span>{{ firstFreeSeat === null ? '入座' : `入座 ${firstFreeSeat + 1} 号位` }}</span>
           </Button>
-          <Button outlined :title="'回到等待区'" @click="leaveTable">
-            <i class="pi pi-arrow-left" aria-hidden="true" />
-            <span>回等待区</span>
+          <Button outlined :title="'退出房间（释放座位）'" @click="exitRoomOpen = true">
+            <i class="pi pi-times" aria-hidden="true" />
+            <span>退出房间</span>
           </Button>
         </div>
 
-        <p v-if="firstFreeSeat === null" class="hint" role="status">座位已满，等有人离座。</p>
+        <p v-if="mySeatAway" class="hint" role="status">
+          座位为你保留着，点「坐回 {{ (game.self.seat ?? 0) + 1 }} 号位」就能接着玩。
+        </p>
+        <p v-else-if="firstFreeSeat === null" class="hint" role="status">座位已满，等有人离座。</p>
         <p v-else class="hint spectator-tip">入座后即可参与下一手牌；观战期间不下注、不行动。</p>
       </section>
 
       <p v-else class="hint">正在载入你的座位信息…</p>
 
       <ActionBar
-        v-if="game.isSeated"
+        v-if="game.isSeated && !mySeatAway"
         class="hero-actions"
         :legal-actions="game.myLegalActions"
         :pot-total="potTotal"
@@ -1153,6 +1371,100 @@ async function leaveTable(): Promise<void> {
       @close="closeResult"
       @history="openDrawer('history')"
     />
+
+    <!-- 买入确认：房主定的上限 + 服务端校验的下限/步进 -->
+    <Dialog
+      v-model:visible="buyInOpen"
+      modal
+      :header="buyInSeat === null ? '确认买入' : `买入并入座 ${String(buyInSeat + 1)} 号位`"
+      :style="{ width: 'min(92vw, 380px)' }"
+      @hide="buyInSeat = null"
+    >
+      <div class="buyin">
+        <p class="buyin-line">
+          <span class="muted">买入额</span>
+          <b class="num">{{ buyInAmount }}</b>
+          <span class="muted">筹码</span>
+        </p>
+        <InputNumber
+          v-model="buyInAmount"
+          :min="buyInMin"
+          :max="buyInMax"
+          :step="buyInStep"
+          :use-grouping="false"
+          show-buttons
+          fluid
+          aria-label="买入筹码数量"
+        />
+        <div class="buyin-quick">
+          <Button size="small" outlined :title="`最小买入 ${String(buyInMin)}`" @click="buyInAmount = buyInMin">
+            <span>最小 {{ buyInMin }}</span>
+          </Button>
+          <Button
+            size="small"
+            outlined
+            :title="`一半 ${String(Math.round(buyInMax / 2))}`"
+            @click="buyInAmount = Math.round(buyInMax / 2 / buyInStep) * buyInStep"
+          >
+            <span>一半</span>
+          </Button>
+          <Button size="small" outlined :title="`上限 ${String(buyInMax)}`" @click="buyInAmount = buyInMax">
+            <span>上限 {{ buyInMax }}</span>
+          </Button>
+        </div>
+        <p class="hint">
+          买入范围 {{ buyInMin }}–{{ buyInMax }}，步进 {{ buyInStep }}。筹码是虚拟分数，不可充值、不可兑换。
+        </p>
+      </div>
+      <template #footer>
+        <Button text :title="'取消'" @click="buyInOpen = false"><span>取消</span></Button>
+        <Button :title="'确认买入并入座'" @click="confirmBuyIn">
+          <i class="pi pi-check" aria-hidden="true" />
+          <span>确认买入</span>
+        </Button>
+      </template>
+    </Dialog>
+
+    <!-- 离座确认（本手仍在牌局中会同时弃牌） -->
+    <Dialog
+      v-model:visible="leaveSeatOpen"
+      modal
+      header="离座并弃牌？"
+      :style="{ width: 'min(92vw, 380px)' }"
+    >
+      <p class="hint">
+        你还在这一手里。离座会同时弃牌，已投入的筹码留在底池。
+        座位与筹码会为你保留，随时可以坐回。
+      </p>
+      <template #footer>
+        <Button text :title="'继续打这一手'" @click="leaveSeatOpen = false"><span>继续打</span></Button>
+        <Button severity="danger" :title="'离座并弃牌'" @click="leaveSeat">
+          <i class="pi pi-sign-out" aria-hidden="true" />
+          <span>离座并弃牌</span>
+        </Button>
+      </template>
+    </Dialog>
+
+    <!-- 退出房间确认：真正释放座位（与「离座」不同，会销毁座位里的筹码） -->
+    <Dialog
+      v-model:visible="exitRoomOpen"
+      modal
+      header="退出房间？"
+      :style="{ width: 'min(92vw, 380px)' }"
+    >
+      <p class="hint">
+        退出会释放你的座位并离开这个房间（座位里的筹码不再保留）。
+        只想暂时离开的话请用「离座」——座位与筹码都会留着。
+      </p>
+      <template #footer>
+        <Button text :title="'取消'" @click="exitRoomOpen = false"><span>取消</span></Button>
+        <Button severity="danger" :title="'退出房间'" @click="exitRoom">
+          <i class="pi pi-times" aria-hidden="true" />
+          <span>退出房间</span>
+        </Button>
+      </template>
+    </Dialog>
+    </template>
   </div>
 </template>
 

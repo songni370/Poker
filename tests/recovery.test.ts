@@ -45,10 +45,14 @@ class TestClient {
     this.socket.close()
   }
 
-  async waitFor(predicate: (message: ServerMessage) => boolean, timeoutMs = 5000): Promise<ServerMessage> {
+  async waitFor(
+    predicate: (message: ServerMessage) => boolean,
+    timeoutMs = 5000,
+    fromIndex = 0,
+  ): Promise<ServerMessage> {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
-      const found = this.messages.find(predicate)
+      const found = this.messages.slice(fromIndex).find(predicate)
       if (found) return found
       await delay(20)
     }

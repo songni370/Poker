@@ -89,7 +89,7 @@ const retryTarget = computed(() => {
   const id = room.roomId ?? (typeof route.query.roomId === 'string' ? route.query.roomId : null)
   if (!id) return null
   if (kind.value === 'full' || kind.value === 'kicked') {
-    return { name: 'room', params: { roomId: id } }
+    return { name: 'table', params: { roomId: id } }
   }
   return null
 })

@@ -4,8 +4,10 @@ import type { RouteRecordRaw } from 'vue-router'
 /**
  * 路由表（规格书 §3.2）。
  *   /                 大厅：品牌主视觉 + 创建 / 加入房间
- *   /room/:roomId     房间等待区
- *   /table/:roomId    核心实时牌桌
+ *   /table/:roomId    核心实时牌桌（也是邀请链接的落地页：先旁观，自己选座买入）
+ *
+ * 第 5 项需求删掉了「等候页」：填完昵称直接进牌桌，此时还没落座，
+ * 桌子上会显示空位，点空位确认买入后才入座。
  *   /error            链接过期 / 房间已满 / 被移出 / 版本不兼容
  *   /:pathMatch(.*)   兜底 → 链接无效
  *
@@ -17,13 +19,6 @@ export const routes: RouteRecordRaw[] = [
     name: 'lobby',
     component: () => import('./views/LobbyView.vue'),
     meta: { title: '开一桌 · Poker Room' },
-  },
-  {
-    path: '/room/:roomId',
-    name: 'room',
-    component: () => import('./views/RoomView.vue'),
-    props: true,
-    meta: { title: '房间等待区 · Poker Room' },
   },
   {
     path: '/table/:roomId',

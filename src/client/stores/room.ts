@@ -35,9 +35,9 @@ export const useRoomStore = defineStore('room', () => {
   const isHost = computed(() => credentials.value?.isHost ?? false)
   const hasCredentials = computed(() => credentials.value !== null)
 
-  /** 邀请链接（同源路径，第 3 阶段可直接分享）。 */
+  /** 邀请链接：直接落在牌桌上（先旁观，自己选座买入）。 */
   const inviteUrl = computed(() =>
-    credentials.value ? `${window.location.origin}/room/${credentials.value.roomId}` : '',
+    credentials.value ? `${window.location.origin}/table/${credentials.value.roomId}` : '',
   )
 
   return {

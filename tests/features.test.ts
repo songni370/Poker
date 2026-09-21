@@ -425,3 +425,152 @@ test('聊天 @ 提醒：只认房间内真实昵称、排除自己；房间事�
     '重连后 @ 提及信息也应保留',
   )
 })
+
+/* ───────────── 第 5/6 项需求：落座买入、离座保留座位、退出释放座位 ───────────── */
+
+test('落座买入：买入额按房主上限/下限/步进收敛，离座保留座位，退出才释放', async (t) => {
+  const server = await startTestServer()
+  t.after(server.stop)
+
+  // 房主把买入上限定成 1000（下限仍是 10 个大盲 = 200，步进 = 小盲 10）
+  const host = (
+    await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '甲', maxSeats: 3, buyInMax: 1000 })
+  ).data
+  const guest = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '乙' })).data
+
+  const a = new TestClient(server.wsUrl)
+  const b = new TestClient(server.wsUrl)
+  t.after(() => {
+    a.close()
+    b.close()
+  })
+  await Promise.all([a.open(), b.open()])
+  a.send(joinCommand(host))
+  const snapshot = await a.waitFor((message) => message.type === 'room.snapshot')
+  assert.ok(snapshot.type === 'room.snapshot')
+  // 加入即旁观：没有座位，但能拿到本桌买入范围
+  assert.equal(snapshot.self.seat, null, '加入后先是旁观者')
+  assert.equal(snapshot.state.buyInMax, 1000, '房主自定义的买入上限应下发给客户端')
+  assert.equal(snapshot.state.buyInMin, 200, '买入下限 = 10 个大盲')
+  assert.equal(snapshot.state.buyInStep, 10, '买入步进 = 小盲')
+
+  b.send(joinCommand(guest))
+  await b.waitFor((message) => message.type === 'room.snapshot')
+
+  // 405 → 按步进（小盲 10）收到 410；5000 → 收到本桌上限 1000
+  // （协议层还会挡掉超过 maxBuyInLimit=20000 的值，那是「请求格式不正确」而不是收敛）
+  await takeSeat(a, 0, 405)
+  assert.equal(a.lastState()!.seats[0]!.stack, 410, '买入额应按小盲步进取整')
+  await takeSeat(b, 1, 5000)
+  assert.equal(b.lastState()!.seats[1]!.stack, 1000, '高于本桌上限应收到上限')
+
+  // 离座：座位与筹码保留，只有本人能坐回
+  b.send({ type: 'seat.leave', requestId: rid() })
+  const awayState = await b.waitFor(
+    (message) =>
+      message.type !== 'room.error' && 'state' in message && message.state.seats[1]?.away === true,
+  )
+  assert.ok(awayState.type !== 'room.error')
+  const c = new TestClient(server.wsUrl)
+  t.after(() => c.close())
+  await c.open()
+  const late = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '丙' })).data
+  c.send(joinCommand(late))
+  await c.waitFor((message) => message.type === 'room.snapshot')
+  c.send({ type: 'seat.take', requestId: rid(), seat: 1, buyIn: 500 })
+  const rejected = await c.waitFor((message) => message.type === 'room.error')
+  assert.ok(rejected.type === 'room.error')
+  assert.equal(rejected.error?.code, 'seat_taken', '保留的座位不能被别人占')
+
+  // 本人坐回：筹码照旧（1000），买入额被忽略
+  await takeSeat(b, 1, 500)
+  assert.equal(b.lastState()!.seats[1]!.stack, 1000, '坐回保留座位时筹码照旧')
+
+  // 退出房间：真正释放座位，别人可以落座
+  b.send({ type: 'room.leave', requestId: rid() })
+  await delay(150)
+  await takeSeat(c, 1, 5)
+  assert.equal(c.lastState()!.seats[1]!.stack, 200, '低于下限应收到下限')
+  assert.equal(c.lastState()!.seats[1]!.playerId, late.playerId)
+})
+
+test('离座/退出发生在手牌中：先自动弃牌并结算，筹码留在池里，退出等本手结束才移除', async (t) => {
+  const server = await startTestServer()
+  t.after(server.stop)
+
+  const host = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '甲', maxSeats: 2 })).data
+  const guest = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '乙' })).data
+  const a = new TestClient(server.wsUrl)
+  const b = new TestClient(server.wsUrl)
+  t.after(() => {
+    a.close()
+    b.close()
+  })
+  await Promise.all([a.open(), b.open()])
+  a.send(joinCommand(host))
+  await a.waitFor((message) => message.type === 'room.snapshot')
+  b.send(joinCommand(guest))
+  await b.waitFor((message) => message.type === 'room.snapshot')
+  await takeSeat(a, 0)
+  await takeSeat(b, 1)
+  a.send({ type: 'game.start', requestId: rid() })
+  await a.waitFor((message) => message.type === 'hand.started')
+
+  // 乙在本手里离座：必须自动弃牌并让本手立刻结算（否则牌局会卡住）
+  b.send({ type: 'seat.leave', requestId: rid() })
+  const settled = await a.waitFor((message) => message.type === 'hand.settled')
+  assert.ok(settled.type === 'hand.settled')
+  assert.equal(settled.result?.showdown, false, '弃牌结束本手不应进入摊牌')
+  assert.equal(b.lastState()!.seats[1]!.away, true, '离座后座位仍为乙保留')
+  assert.ok((b.lastState()!.seats[1]!.stack ?? 0) > 0, '离座不没收筹码')
+
+  // 乙退出房间：本手已结束，座位立刻释放
+  b.send({ type: 'room.leave', requestId: rid() })
+  await delay(150)
+  assert.equal(a.lastState()!.seats[1], null, '退出房间后座位应被释放')
+})
+
+test('掉线超过宽限期自动释放座位；宽限期内重连则保留', async (t) => {
+  const server = await startTestServer({ seatReleaseMs: 200 })
+  t.after(server.stop)
+
+  const host = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '甲', maxSeats: 3 })).data
+  const guest = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '乙' })).data
+  const a = new TestClient(server.wsUrl)
+  const b = new TestClient(server.wsUrl)
+  await Promise.all([a.open(), b.open()])
+  a.send(joinCommand(host))
+  await a.waitFor((message) => message.type === 'room.snapshot')
+  b.send(joinCommand(guest))
+  await b.waitFor((message) => message.type === 'room.snapshot')
+  await takeSeat(a, 0)
+  await takeSeat(b, 1)
+
+  // 乙掉线：超过 200ms 的宽限期后座位被释放
+  b.close()
+  const released = await a.waitFor(
+    (message) => message.type === 'room.player_left' && message.state.seats[1] === null,
+    5000,
+  )
+  assert.ok(released.type === 'room.player_left')
+
+  // 乙重新连上并再次落座（座位刚被释放，所以这次是全新的座位与买入）
+  const b2 = new TestClient(server.wsUrl)
+  t.after(() => b2.close())
+  await b2.open()
+  b2.send(joinCommand(guest))
+  await b2.waitFor((message) => message.type === 'connection.recovered')
+  await takeSeat(b2, 1)
+
+  // 这次在宽限期内重连：座位必须保留
+  b2.close()
+  await delay(60)
+  const again = new TestClient(server.wsUrl)
+  t.after(() => again.close())
+  await again.open()
+  again.send(joinCommand(guest))
+  await again.waitFor((message) => message.type === 'connection.recovered')
+  await delay(350)
+  assert.equal(again.lastState()?.seats[1]?.playerId, guest.playerId, '宽限期内重连应保留座位')
+  a.close()
+})

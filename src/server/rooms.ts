@@ -298,10 +298,18 @@ export class RoomManager {
   private readonly rooms = new Map<string, RoomRuntime>()
   private readonly repo: Repo
   private readonly maxRooms: number
+  /** 掉线宽限期（毫秒）：超时释放座位。做成实例参数，测试里可以用很短的值。 */
+  private readonly seatReleaseMs: number
 
-  constructor(repo: Repo, maxRooms = Number(process.env.MAX_ROOMS ?? DEFAULT_MAX_ROOMS)) {
+  constructor(
+    repo: Repo,
+    options: { maxRooms?: number; seatReleaseMs?: number } = {},
+  ) {
+    const maxRooms = options.maxRooms ?? Number(process.env.MAX_ROOMS ?? DEFAULT_MAX_ROOMS)
     this.repo = repo
     this.maxRooms = Number.isInteger(maxRooms) && maxRooms > 0 ? maxRooms : DEFAULT_MAX_ROOMS
+    const release = options.seatReleaseMs ?? SEAT_RELEASE_MS
+    this.seatReleaseMs = Number.isFinite(release) && release > 0 ? release : SEAT_RELEASE_MS
     this.repo.pruneReceipts()
   }
 
@@ -578,7 +586,7 @@ export class RoomManager {
           notice: `${member.nickname} 掉线超过宽限期，座位已释放`,
         })
       })
-    }, SEAT_RELEASE_MS)
+    }, this.seatReleaseMs)
     timer.unref?.()
     room.seatReleaseTimers.set(playerId, timer)
   }
@@ -600,6 +608,10 @@ export class RoomManager {
     }
 
     let eventType: ServerEventType = 'hand.state_changed'
+    /** 本手是否在跑：用于在任何命令之后检测「本手刚刚结束」。
+     *  离座 / 退出房间现在也会自动弃牌并可能直接结算本手，不能只靠 game.action 分支补结算。 */
+    const handWasRunning = room.table.isHandRunning()
+    const boardBeforeCommand = room.table.publicState().board.length
     let notice: string | undefined
     let result: HandResultPublic | undefined
     /** 全下摊牌时需要补发的中间公共牌张数（例如 0 → 3 → 4 → 5）。 */
@@ -711,11 +723,7 @@ export class RoomManager {
             result = settled
             eventType = 'hand.settled'
             revealSteps = this.revealStepsFor(settled, boardBefore)
-            const winners = settled.winners.map((winner) => {
-              const winnerMember = room.members.get(winner.playerId)
-              return `${winnerMember?.nickname ?? winner.playerId} +${winner.amount}${winner.handName ? `（${winner.handName}）` : ''}`
-            })
-            notice = `第 ${settled.handNo} 手结算：${winners.join('、')}`
+            notice = this.settlementNotice(room, settled)
           } else if (room.table.publicState().actingSeat !== null && state.actingSeat !== room.table.publicState().actingSeat) {
             eventType = 'turn.started'
           }
@@ -723,6 +731,18 @@ export class RoomManager {
         }
         default:
           throw new CommandError('bad_request')
+      }
+
+      // 任何命令都可能让本手结束（例如离座自动弃牌后只剩一人）：统一在这里补结算，
+      // 否则客户端永远收不到 hand.settled，手牌记录也不会落库。
+      if (!result && handWasRunning && !room.table.isHandRunning()) {
+        const settled = room.table.publicState().result
+        if (settled) {
+          result = settled
+          eventType = 'hand.settled'
+          revealSteps = this.revealStepsFor(settled, boardBeforeCommand)
+          notice = this.settlementNotice(room, settled)
+        }
       }
 
       // 房间事件（入座/离座/开局/结算…）同时进聊天流，聊天面板因此也是房间日志。
@@ -753,6 +773,16 @@ export class RoomManager {
       }
       this.sendError(room, playerId, code, error instanceof Error ? error.message : undefined)
     }
+  }
+
+  /** 结算文案：第 N 手结算：昵称 +筹码（牌型）。 */
+  private settlementNotice(room: RoomRuntime, settled: HandResultPublic): string {
+    const winners = settled.winners.map((winner) => {
+      const winnerMember = room.members.get(winner.playerId)
+      const hand = winner.handName ? `（${winner.handName}）` : ''
+      return `${winnerMember?.nickname ?? winner.playerId} +${winner.amount}${hand}`
+    })
+    return `第 ${settled.handNo} 手结算：${winners.join('、')}`
   }
 
   /**
