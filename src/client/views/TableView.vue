@@ -4,6 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import Button from 'primevue/button'
 import Drawer from 'primevue/drawer'
 import InputText from 'primevue/inputtext'
+import Menu from 'primevue/menu'
+import type { MenuItem } from 'primevue/menuitem'
 import Select from 'primevue/select'
 import type { ActionType, Card } from '../../shared/poker.ts'
 import { STREET_NAMES, TABLE_RULES, formatCard } from '../../shared/poker.ts'
@@ -239,6 +241,41 @@ watch(
 const drawerOpen = ref(false)
 const drawerSection = ref<'rules' | 'history' | 'chat'>('rules')
 
+/* ── 中等宽度收纳：顶栏按钮太多会折行（实测 ≤1000px 时顶栏从 61px 变 121px），
+ * 把「规则 / 历史 / 聊天 / 提示音」收进「更多」菜单，退出与开始下一手始终露在外面。 ── */
+const moreMenu = ref<InstanceType<typeof Menu> | null>(null)
+
+const moreItems = computed<MenuItem[]>(() => [
+  { label: '规则摘要', icon: 'pi pi-book', command: () => openDrawer('rules') },
+  {
+    label: game.history.length > 0 ? `手牌历史（${String(game.history.length)} 手）` : '手牌历史',
+    icon: 'pi pi-list',
+    command: () => openDrawer('history'),
+  },
+  {
+    label: chat.unread > 0 ? `聊天（${String(chat.unread)} 条未读）` : '聊天',
+    icon: 'pi pi-comments',
+    command: () => openDrawer('chat'),
+  },
+  {
+    label: `提示音：${soundEnabled.value ? '开' : '关'}`,
+    icon: soundEnabled.value ? 'pi pi-volume-up' : 'pi pi-volume-off',
+    command: () => toggleSound(),
+  },
+])
+
+/** 「更多」按钮的无障碍名称要带上未读与手数，折叠后信息不能丢。 */
+const moreAria = computed(() => {
+  const parts = ['更多操作']
+  if (game.history.length > 0) parts.push(`${String(game.history.length)} 手历史`)
+  if (chat.unread > 0) parts.push(`${String(chat.unread)} 条未读聊天`)
+  return parts.join('，')
+})
+
+function toggleMore(event: Event): void {
+  moreMenu.value?.toggle(event)
+}
+
 function openDrawer(section: 'rules' | 'history' | 'chat'): void {
   drawerSection.value = section
   drawerOpen.value = true
@@ -277,6 +314,8 @@ function chatIso(at: number): string | undefined {
 
 /** 抽屉是否正停在聊天分节：决定未读是否清零、消息是否即时标记已读。 */
 const chatPanelVisible = computed(() => drawerOpen.value && drawerSection.value === 'chat')
+/** 打开面板那一刻的第一条未读消息 id：用于「以下为新消息」分隔线（记住后不再随未读清零而消失）。 */
+const unreadBoundaryId = ref<string | null>(null)
 
 const chatText = ref('')
 const chatError = ref('')
@@ -343,16 +382,70 @@ const chatAria = computed(() =>
 )
 const chatTitle = computed(() => (chat.unread > 0 ? `聊天（${String(chat.unread)} 条未读）` : '聊天'))
 
-// 打开聊天面板即清零未读；面板开着时新消息也直接算已读。
+/**
+ * 打开面板时把「第一条未读」记下来，用于渲染「以下为新消息」分隔线。
+ * 必须在 markRead 之前取，否则未读数已被清零。
+ */
 watch(
   chatPanelVisible,
   (visible) => {
-    if (!visible) return
+    if (!visible) {
+      unreadBoundaryId.value = null
+      return
+    }
+    const boundary = chat.messages[chat.messages.length - chat.unread]
+    unreadBoundaryId.value = chat.unread > 0 && boundary ? boundary.id : null
     chat.markRead()
     void scrollChatToBottom()
   },
   { immediate: true },
 )
+
+/** 相邻消息间隔超过这个值就补一个时间分隔。 */
+const CHAT_GAP_MS = 5 * 60 * 1000
+
+type ChatRow =
+  | { kind: 'day'; key: string; label: string }
+  | { kind: 'gap'; key: string; label: string }
+  | { kind: 'unread'; key: string }
+  | { kind: 'message'; key: string; message: ChatMessage }
+
+function chatDayKey(at: number): string {
+  const date = new Date(at)
+  return `${String(date.getFullYear())}-${String(date.getMonth() + 1)}-${String(date.getDate())}`
+}
+
+function chatDayLabel(at: number): string {
+  const date = new Date(at)
+  const today = new Date()
+  const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000)
+  if (chatDayKey(at) === chatDayKey(today.getTime())) return '今天'
+  if (chatDayKey(at) === chatDayKey(yesterday.getTime())) return '昨天'
+  return chatDayFormat.format(date)
+}
+
+/**
+ * 聊天渲染行：日期分隔 + 间隔较久时的时间分隔 + 未读分隔线 + 消息本身。
+ * 分组只影响展示，消息数组仍是服务端下发的原始顺序。
+ */
+const chatRows = computed<ChatRow[]>(() => {
+  const rows: ChatRow[] = []
+  let previous: ChatMessage | null = null
+  let previousDay = ''
+  for (const message of chat.messages) {
+    const day = chatDayKey(message.at)
+    if (day !== previousDay) {
+      rows.push({ kind: 'day', key: `day-${day}`, label: chatDayLabel(message.at) })
+      previousDay = day
+    } else if (previous && message.at - previous.at > CHAT_GAP_MS) {
+      rows.push({ kind: 'gap', key: `gap-${message.id}`, label: chatTime(message.at) })
+    }
+    if (unreadBoundaryId.value === message.id) rows.push({ kind: 'unread', key: 'unread-divider' })
+    rows.push({ kind: 'message', key: message.id, message })
+    previous = message
+  }
+  return rows
+})
 
 watch(
   () => chat.count,
@@ -424,12 +517,29 @@ const firstFreeSeat = computed<number | null>(() => {
   return null
 })
 
+/** 所有空座位号（观战者可以自己挑，而不是只能坐第一个）。 */
+const freeSeats = computed(() => {
+  const seats: number[] = []
+  for (let index = 0; index < maxSeats.value; index += 1) {
+    if (!game.seats[index]) seats.push(index)
+  }
+  return seats
+})
+
+const freeSeatText = computed(() => freeSeats.value.map((seat) => `${String(seat + 1)} 号`).join('、'))
+
+function takeSeatAt(seat: number): void {
+  if (!sendCommand({ type: 'seat.take', requestId: nextRequestId(), seat })) {
+    announcement.value = '尚未连接到服务器，入座请求未发送。'
+    return
+  }
+  announcement.value = `正在坐到 ${String(seat + 1)} 号座位。`
+}
+
 function takeFreeSeat(): void {
   const seat = firstFreeSeat.value
   if (seat === null) return
-  if (!sendCommand({ type: 'seat.take', requestId: nextRequestId(), seat })) {
-    announcement.value = '尚未连接到服务器，入座请求未发送。'
-  }
+  takeSeatAt(seat)
 }
 
 function submitAction(payload: { action: ActionType; amount?: number }): void {
@@ -494,17 +604,24 @@ async function leaveTable(): Promise<void> {
         <Select v-model="scenario" :options="scenarioOptions" option-label="label" option-value="value" size="small" />
       </label>
 
-      <Button size="small" text aria-label="规则" :title="'查看规则摘要'" @click="openDrawer('rules')">
+      <Button
+        size="small"
+        text
+        class="bar-secondary"
+        aria-label="规则"
+        :title="'查看规则摘要'"
+        @click="openDrawer('rules')"
+      >
         <i class="pi pi-book" aria-hidden="true" />
         <span>规则</span>
       </Button>
-      <Button size="small" text :aria-label="historyAria" :title="'查看手牌历史'" @click="openDrawer('history')">
+      <Button size="small" text class="bar-secondary" :aria-label="historyAria" :title="'查看手牌历史'" @click="openDrawer('history')">
         <i class="pi pi-list" aria-hidden="true" />
         <span>历史</span>
         <!-- 手数只在宽屏显示，窄屏交给 aria-label 说明。 -->
         <span v-if="game.history.length > 0" class="count-chip count-chip--history num" aria-hidden="true">{{ game.history.length }}</span>
       </Button>
-      <Button size="small" text :aria-label="chatAria" :title="chatTitle" @click="openDrawer('chat')">
+      <Button size="small" text class="bar-secondary" :aria-label="chatAria" :title="chatTitle" @click="openDrawer('chat')">
         <i class="pi pi-comments" aria-hidden="true" />
         <span>聊天</span>
         <!-- 未读数：数字 + aria-label 双重说明，不靠颜色或红点单独表意。 -->
@@ -513,6 +630,7 @@ async function leaveTable(): Promise<void> {
       <Button
         size="small"
         text
+        class="bar-secondary"
         :aria-label="soundAria"
         :aria-pressed="soundEnabled"
         :title="`${soundAria}，点击切换`"
@@ -521,6 +639,22 @@ async function leaveTable(): Promise<void> {
         <i :class="soundEnabled ? 'pi pi-volume-up' : 'pi pi-volume-off'" aria-hidden="true" />
         <span>提示音：{{ soundEnabled ? '开' : '关' }}</span>
       </Button>
+      <Button
+        size="small"
+        text
+        class="bar-more"
+        :aria-label="moreAria"
+        :title="'更多操作（规则 / 历史 / 聊天 / 提示音）'"
+        aria-haspopup="true"
+        aria-controls="bar-more-menu"
+        @click="toggleMore"
+      >
+        <i class="pi pi-ellipsis-h" aria-hidden="true" />
+        <span>更多</span>
+        <span v-if="chat.unread > 0" class="count-chip count-chip--unread num" aria-hidden="true">{{ unreadText }}</span>
+      </Button>
+      <Menu id="bar-more-menu" ref="moreMenu" :model="moreItems" :popup="true" />
+
       <Button
         v-if="canStartNextHand"
         size="small"
@@ -603,8 +737,26 @@ async function leaveTable(): Promise<void> {
         <p class="spectator-seats">
           <span class="muted">已入座</span>
           <b class="num">{{ occupiedCount }}/{{ maxSeats }}</b>
-          <span v-if="firstFreeSeat !== null" class="muted">· 空位：{{ firstFreeSeat + 1 }} 号座位</span>
+          <span v-if="freeSeats.length > 0" class="muted">· 空位：{{ freeSeatText }}</span>
         </p>
+
+        <!-- 空位可选：观战者自己挑座位，而不是只能坐第一个。 -->
+        <div v-if="freeSeats.length > 0" class="spectator-seat-picker">
+          <span id="seat-picker-label" class="muted">选择座位</span>
+          <div class="seat-picker" role="group" aria-labelledby="seat-picker-label">
+            <Button
+              v-for="seat in freeSeats"
+              :key="seat"
+              size="small"
+              outlined
+              :aria-label="`坐到 ${String(seat + 1)} 号座位`"
+              :title="`坐到 ${String(seat + 1)} 号座位`"
+              @click="takeSeatAt(seat)"
+            >
+              <span class="num">{{ seat + 1 }}</span>
+            </Button>
+          </div>
+        </div>
 
         <div class="spectator-actions">
           <Button
@@ -613,7 +765,7 @@ async function leaveTable(): Promise<void> {
             @click="takeFreeSeat"
           >
             <i class="pi pi-user-plus" aria-hidden="true" />
-            <span>入座</span>
+            <span>{{ firstFreeSeat === null ? '入座' : `入座 ${firstFreeSeat + 1} 号位` }}</span>
           </Button>
           <Button outlined :title="'回到等待区'" @click="leaveTable">
             <i class="pi pi-arrow-left" aria-hidden="true" />
@@ -748,20 +900,30 @@ async function leaveTable(): Promise<void> {
             @scroll.passive="onChatScroll"
           >
             <ol v-if="chat.count > 0" class="chat-msgs">
-              <li
-                v-for="message in chat.messages"
-                :key="message.id"
-                class="chat-msg"
-                :class="{ 'is-own': isOwnMessage(message) }"
-              >
-                <p class="chat-meta">
-                  <span class="chat-who">{{ isOwnMessage(message) ? '你' : message.nickname }}</span>
-                  <time class="chat-time num" :datetime="chatIso(message.at)" :title="chatFullTime(message.at)">
-                    {{ chatTime(message.at) }}
-                  </time>
-                </p>
-                <p class="chat-text">{{ message.text }}</p>
-              </li>
+              <template v-for="row in chatRows" :key="row.key">
+                <li v-if="row.kind === 'day'" class="chat-day">
+                  <span>{{ row.label }}</span>
+                </li>
+                <li v-else-if="row.kind === 'gap'" class="chat-gap">
+                  <span class="num">{{ row.label }}</span>
+                </li>
+                <li v-else-if="row.kind === 'unread'" class="chat-unread" role="separator">
+                  <span>以下为新消息</span>
+                </li>
+                <li v-else class="chat-msg" :class="{ 'is-own': isOwnMessage(row.message) }">
+                  <p class="chat-meta">
+                    <span class="chat-who">{{ isOwnMessage(row.message) ? '你' : row.message.nickname }}</span>
+                    <time
+                      class="chat-time num"
+                      :datetime="chatIso(row.message.at)"
+                      :title="chatFullTime(row.message.at)"
+                    >
+                      {{ chatTime(row.message.at) }}
+                    </time>
+                  </p>
+                  <p class="chat-text">{{ row.message.text }}</p>
+                </li>
+              </template>
             </ol>
             <p v-else class="hint chat-empty">还没有人说话</p>
           </div>
@@ -1429,4 +1591,94 @@ async function leaveTable(): Promise<void> {
     padding-bottom: 0;
   }
 }
+/*
+ * 中等宽度收纳：顶栏 6 个按钮在 ≤1000px 会折成两行（实测顶栏 61px → 121px）。
+ * ≤1100px 时把二级操作收进「更多」菜单，只保留「开始下一手」与「退出」。
+ */
+.bar-more {
+  display: none;
+}
+
+@media (max-width: 1100px) {
+  .bar-more {
+    display: inline-flex;
+  }
+
+  .bar .bar-secondary {
+    display: none;
+  }
+}
+/*
+ * 更窄（≤820px）：连收纳后的顶栏也放不下，隐藏「阶段」与连接状态文案
+ * （阶段在牌桌中央已有显示；连接异常时 ConnectionBanner 会明确提示），
+ * 并限制房间名宽度，保证盲注、手数、更多、开始下一手、退出都在一行内。
+ */
+@media (max-width: 820px) {
+  .bar .stat--stage,
+  .bar .link-state {
+    display: none;
+  }
+
+  .bar-title {
+    max-width: 26vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+/* 观战者选座：一排小号按钮，窄屏可横向滚动而不换行。 */
+.spectator-seat-picker {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}
+
+.seat-picker {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.seat-picker :deep(.p-button) {
+  min-width: 40px;
+  padding-inline: 8px;
+}
+
+/* 聊天分组：日期 / 时间间隔 / 未读分隔线。 */
+.chat-day,
+.chat-gap,
+.chat-unread {
+  list-style: none;
+  text-align: center;
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin: 6px 0 2px;
+}
+
+.chat-day span,
+.chat-gap span {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+}
+
+.chat-unread {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--gold);
+}
+
+.chat-unread::before,
+.chat-unread::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.45;
+}
+
 </style>

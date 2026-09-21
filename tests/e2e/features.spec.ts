@@ -67,6 +67,18 @@ test('聊天：房主发言对手能看到，刷新后仍能看到历史，未�
   await guest.waitForTimeout(500) // 等抽屉滑入动画结束再截图
   await guest.screenshot({ path: 'artifacts/e2e/07-chat-drawer.png' })
 
+  // 关掉抽屉后再来一条消息：重新打开时应出现「以下为新消息」分隔线
+  await guest.locator('.p-drawer-close, [aria-label="Close"]').first().click().catch(() => guest.keyboard.press('Escape'))
+  await guest.waitForTimeout(300)
+  await host.getByPlaceholder('说点什么…').fill('第二条消息')
+  await host.getByRole('button', { name: '发送' }).click()
+  await guest.waitForTimeout(300)
+  await openDrawerSection(guest, '聊天')
+  await expect(guest.getByText('以下为新消息')).toBeVisible()
+  await expect(guest.getByText('第二条消息')).toBeVisible()
+  await guest.waitForTimeout(400)
+  await guest.screenshot({ path: 'artifacts/e2e/09-chat-unread-divider.png' })
+
   // 刷新后聊天历史仍在（服务端下发 chatHistory）
   await guest.reload()
   await guest.waitForURL(/\/table\//)
@@ -111,6 +123,10 @@ test('观战：座位满仍可进入观战，看不到底牌也没有操作区�
   await guest.waitForURL(/\/room\//)
   await guest.getByRole('button', { name: '离座' }).click()
 
+  // 空位出现后，观战面板应给出可选座位（不再只能坐第一个）
+  await expect(watcher.getByRole('group', { name: '选择座位' })).toBeVisible({ timeout: 10_000 })
+  await watcher.screenshot({ path: 'artifacts/e2e/10-spectator-seat-picker.png' })
+
   const seatButton = watcher.getByRole('button', { name: '入座' })
   await expect(seatButton).toBeEnabled({ timeout: 10_000 })
   await seatButton.click()
@@ -120,4 +136,40 @@ test('观战：座位满仍可进入观战，看不到底牌也没有操作区�
   await hostContext.close()
   await guestContext.close()
   await watcherContext.close()
+})
+
+test('中等宽度顶栏收纳：只留「更多」与「退出」，菜单里仍能找到聊天/历史/规则/提示音', async ({ browser }) => {
+  const hostContext = await browser.newContext({ viewport: { width: 900, height: 700 } })
+  const guestContext = await browser.newContext({ viewport: { width: 900, height: 700 } })
+  const host = await hostContext.newPage()
+  const guest = await guestContext.newPage()
+  const errors = [...watchErrors(host), ...watchErrors(guest)]
+
+  const roomId = await createRoom(host, `收纳${String(Date.now() % 1000)}`, 2)
+  await joinRoom(guest, roomId, `陪练${String(Date.now() % 1000)}`)
+  await host.getByRole('button', { name: '开始牌局' }).click()
+  await host.waitForURL(/\/table\//)
+
+  // 顶栏必须保持一行（修复前 900px 会折成两行，61px → 121px）
+  const barBox = await host.locator('.bar').boundingBox()
+  expect(barBox?.height ?? 0).toBeLessThan(80)
+
+  // 二级操作被收起，只剩「更多」与「退出」
+  await expect(host.getByRole('button', { name: '更多操作' })).toBeVisible()
+  await expect(host.getByRole('button', { name: /^聊天/ })).toBeHidden()
+  await expect(host.getByRole('button', { name: '规则', exact: true })).toBeHidden()
+
+  // 通过菜单仍可进入聊天
+  await host.getByRole('button', { name: '更多操作' }).click()
+  const menu = host.getByRole('menu').or(host.locator('.p-menu'))
+  await expect(menu.first()).toBeVisible()
+  await expect(menu.first().getByText('规则摘要')).toBeVisible()
+  await expect(menu.first().getByText(/手牌历史|聊天|提示音/).first()).toBeVisible()
+  await host.screenshot({ path: 'artifacts/e2e/11-bar-more-menu.png' })
+  await menu.first().getByText(/^聊天/).first().click()
+  await expect(host.getByPlaceholder('说点什么…')).toBeVisible()
+
+  expect(errors).toEqual([])
+  await hostContext.close()
+  await guestContext.close()
 })
