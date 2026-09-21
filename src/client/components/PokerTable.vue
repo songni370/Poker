@@ -11,15 +11,12 @@ const props = withDefaults(
     /** 座位数组，下标即座位号，空位为 null。 */
     seats: readonly (SeatPublic | null)[]
     maxSeats: number
-    buttonSeat?: number | null
     board?: readonly Card[]
     potTotal?: number
     pots?: readonly { amount: number; eligiblePlayerIds: readonly string[] }[]
     currentBet?: number
     /** 本人座位号；用于把本人固定放在桌面下沿中央。 */
     heroSeat?: number | null
-    /** 本人底牌；只发给本人渲染。 */
-    heroCards?: readonly Card[]
     /** 本人 playerId，用于标记。 */
     heroPlayerId?: string | null
     actingPlayerId?: string | null
@@ -36,13 +33,11 @@ const props = withDefaults(
     notice?: string
   }>(),
   {
-    buttonSeat: null,
     board: () => [],
     potTotal: 0,
     pots: () => [],
     currentBet: 0,
     heroSeat: null,
-    heroCards: () => [],
     heroPlayerId: null,
     actingPlayerId: null,
     remainingRatio: 1,
@@ -63,19 +58,11 @@ const RY = 41
 function polarFor(index: number): { angle: number } {
   const total = Math.max(props.maxSeats, 2)
   const hero = props.heroSeat ?? -1
-  const offset = hero >= 0 ? hero + total / 2 : 0
+  // 本人固定在下沿中央（angle = +90°）：以本人座位为起点排序，其余人顺时针铺开。
+  // 早先写成 hero + total / 2，实际把本人放到了上沿中央（与注释不符，也让本人的下注筹码
+  // 落在自己的座位面板上）；现在按注释修正。
+  const offset = hero >= 0 ? hero : 0
   return { angle: ((index - offset) / total) * Math.PI * 2 + Math.PI / 2 }
-}
-
-/** 庄家按钮贴着对应座位的面板外沿，与座位一起旋转对齐。 */
-function dealerStyle(index: number): Record<string, string> {
-  const { angle } = polarFor(index)
-  const dx = -Math.cos(angle) * RX * 0.12
-  const dy = -Math.sin(angle) * RY * 0.12
-  const x = 50 + RX * Math.cos(angle) + dx
-  const y = 50 + RY * Math.sin(angle) + dy
-  const rotate = Math.round((Math.atan2(y - 50, x - 50) * 180) / Math.PI)
-  return { left: `${String(x)}%`, top: `${String(y)}%`, transform: `translate(-50%, -50%) rotate(${String(rotate)}deg)` }
 }
 
 function seatStyle(index: number): Record<string, string> {
@@ -122,6 +109,16 @@ const potBreakdownText = computed(() =>
  */
 function isSideSeat(index: number): boolean {
   return Math.abs(Math.cos(polarFor(index).angle)) >= 0.85
+}
+
+/**
+ * 正对本人（环的最上沿）的那个座位：它的状态行/进度条落在面板「朝向桌心」的一侧，
+ * 正好是下注筹码与底池所在的位置（实测全下时筹码压住「全下」文字 9×22px）。
+ * 这一个座位的状态行不画：全下/断线/弃牌状态由面板里的 ALL IN 标记、断线图标、
+ * 面板淡化给出，下注额由筹码给出，完整状态仍在 aria-label 里。
+ */
+function isCenterTop(index: number): boolean {
+  return Math.sin(polarFor(index).angle) <= -0.9
 }
 
 /**
@@ -172,13 +169,16 @@ const tableStatus = computed(() => {
         <div
           v-if="seat"
           class="seat-slot"
-          :class="{ 'is-hero-slot': index === heroSeat, 'is-side-seat': isSideSeat(index) }"
+          :class="{
+            'is-hero-slot': index === heroSeat,
+            'is-side-seat': isSideSeat(index),
+            'is-center-top': isCenterTop(index),
+          }"
           :style="seatStyle(index)"
         >
           <PlayerSeat
             :seat="seat"
             :is-hero="seat.playerId === heroPlayerId"
-            :hole-cards="seat.playerId === heroPlayerId ? heroCards : []"
             :is-acting="seat.playerId === actingPlayerId"
             :is-winner="winnerPlayerIds.includes(seat.playerId)"
             :remaining-ratio="seat.playerId === actingPlayerId ? remainingRatio : 1"
@@ -199,11 +199,6 @@ const tableStatus = computed(() => {
         </div>
       </template>
 
-      <!-- 庄家按钮。 -->
-      <div v-if="buttonSeat !== null && buttonSeat !== undefined" class="dealer" :style="dealerStyle(buttonSeat)">
-        <span aria-hidden="true">D</span>
-        <span class="sr-only">庄家位</span>
-      </div>
     </div>
 
     <!-- 系统提示（超时弃牌、断线等）不遮挡牌面。 -->
@@ -335,6 +330,12 @@ const tableStatus = computed(() => {
   z-index: 3;
 }
 
+/* 正对本人那个座位的状态行/进度条会让位给下注筹码与底池（见 isCenterTop 注释）。 */
+.seat-slot.is-center-top :deep(.status),
+.seat-slot.is-center-top :deep(.timer) {
+  display: none;
+}
+
 .bet {
   position: absolute;
   z-index: 4;
@@ -368,20 +369,6 @@ const tableStatus = computed(() => {
   border-radius: 50%;
   background: var(--gold);
   box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.35);
-}
-
-.dealer {
-  position: absolute;
-  z-index: 5;
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: var(--gold);
-  color: var(--bg);
-  font-size: 0.68rem;
-  font-weight: 700;
 }
 
 .notice {

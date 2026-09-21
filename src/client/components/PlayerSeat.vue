@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { Card } from '../../shared/poker.ts'
 import { ACTION_NAMES } from '../../shared/poker.ts'
 import type { SeatPublic } from '../../shared/protocol.ts'
 import PlayingCard from './PlayingCard.vue'
@@ -8,9 +7,7 @@ import PlayingCard from './PlayingCard.vue'
 const props = withDefaults(
   defineProps<{
     seat: SeatPublic
-    /** 只对本人传底牌；他人永远是背面。 */
-    holeCards?: readonly Card[]
-    /** 是否为本人座位（决定是否显示牌面与「你」标记）。 */
+    /** 是否为本人座位（决定是否显示「你」标记与角标位置）。 */
     isHero?: boolean
     /** 是否正在行动（光环 + YOUR TURN + 进度条三重提示）。 */
     isActing?: boolean
@@ -24,7 +21,6 @@ const props = withDefaults(
     turnSeconds?: number
   }>(),
   {
-    holeCards: () => [],
     isHero: false,
     isActing: false,
     isWinner: false,
@@ -34,8 +30,12 @@ const props = withDefaults(
   },
 )
 
-/** 手牌张数：本人用真实底牌，其他玩家只按 holeCardCount 画背面。 */
-const cardCount = computed(() => (props.isHero ? props.holeCards.length : props.seat.holeCardCount))
+/**
+ * 手牌张数：本人座位不画牌（正面背面都不画），其余玩家按 holeCardCount 画背面。
+ * 本人底牌只在底部操作区显示：那里牌更大、不会被桌沿或筹码挡住，
+ * 也避免同一份底牌在屏幕上出现两次。
+ */
+const cardCount = computed(() => (props.isHero ? 0 : props.seat.holeCardCount))
 
 const statusText = computed(() => {
   if (!props.seat.connected) return '已断线'
@@ -52,6 +52,20 @@ const roleText = computed(() => {
   if (props.seat.isSmallBlind) return '小盲'
   if (props.seat.isBigBlind) return '大盲'
   return ''
+})
+
+/**
+ * 庄家 / 盲位角标（D、SB、BB）。
+ * 位置从「桌面上的庄家按钮」搬到座位面板内：桌面按钮会压住底牌背面或底池
+ * （实测 740×360 压住底池 6.9×22px），面板内角标则永远只占面板自己的空间。
+ * 双人桌时同一座位可能既是庄家又是小盲，所以是一组角标。
+ */
+const roleBadges = computed(() => {
+  const badges: { key: string; label: string; tone: 'dealer' | 'blind' }[] = []
+  if (props.seat.isDealer) badges.push({ key: 'dealer', label: 'D', tone: 'dealer' })
+  if (props.seat.isSmallBlind) badges.push({ key: 'sb', label: 'SB', tone: 'blind' })
+  if (props.seat.isBigBlind) badges.push({ key: 'bb', label: 'BB', tone: 'blind' })
+  return badges
 })
 
 const avatarText = computed(() => props.seat.nickname.slice(0, 1) || '?')
@@ -84,18 +98,13 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   >
     <!-- 底牌：本人正面，其他人按手牌张数画背面。 -->
     <div v-if="cardCount > 0" class="cards">
-      <template v-if="isHero">
-        <PlayingCard v-for="card in holeCards" :key="card" size="sm" upright :card="card" :dimmed="seat.folded" />
-      </template>
-      <template v-else>
-        <PlayingCard
-          v-for="index in cardCount"
-          :key="`back-${String(index)}`"
-          size="sm"
-          hidden
-          :dimmed="seat.folded"
-        />
-      </template>
+      <PlayingCard
+        v-for="index in cardCount"
+        :key="`back-${String(index)}`"
+        size="sm"
+        hidden
+        :dimmed="seat.folded"
+      />
     </div>
 
     <div class="panel">
@@ -108,6 +117,13 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
           <span v-if="isHero" class="tag tag--hero">你</span>
         </span>
         <span class="stack num">{{ seat.stack }}</span>
+      </span>
+
+      <!-- 庄家 / 盲位：角标文字只是视觉，完整说法在 aria-label（庄家位 / 小盲 / 大盲）。 -->
+      <span v-if="roleBadges.length > 0" class="role-badges" aria-hidden="true">
+        <span v-for="badge in roleBadges" :key="badge.key" class="role-badge" :class="`role-badge--${badge.tone}`">
+          {{ badge.label }}
+        </span>
       </span>
 
       <span v-if="!seat.connected" class="flag flag--off" aria-hidden="true">
@@ -271,6 +287,40 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
 }
 
 /*
+ * 庄家 / 盲位角标：绝对定位在面板内（面板是 position: relative）。
+ * 默认压在头像左上角（头像只是装饰圆），头像被隐藏的紧凑布局改贴右上角内边距，
+ * 两种情况都不会碰到座位上的底牌背面或别人面板里的文字。
+ */
+.role-badges {
+  position: absolute;
+  left: 3px;
+  top: 2px;
+  display: flex;
+  gap: 2px;
+  pointer-events: none;
+}
+
+.role-badge {
+  min-width: 13px;
+  padding: 0 3px;
+  border-radius: 5px;
+  font-size: 0.56rem;
+  font-weight: 700;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.role-badge--dealer {
+  background: var(--gold);
+  color: var(--bg);
+}
+
+.role-badge--blind {
+  background: color-mix(in srgb, var(--action) 82%, black);
+  color: #ffffff;
+}
+
+/*
  * 本人座位不重复显示「YOUR TURN + 进度条」：底部操作区已经有更大的同一套提示
  *（文本 + 秒数 + 整条进度条），环上这块省下来给别人面板留净空——
  * 单挑（2 人桌）时本人的下注筹码正好落在这一行上（实测压住 YOUR TURN 约 14×41px）。
@@ -402,6 +452,12 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   .seat .status,
   .seat .timer {
     display: none;
+  }
+
+  /* 头像没了，角标改贴面板右上角，不压昵称与筹码。 */
+  .role-badges {
+    left: auto;
+    right: 3px;
   }
 
   .name {

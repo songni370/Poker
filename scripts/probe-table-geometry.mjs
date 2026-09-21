@@ -90,7 +90,9 @@ for (const mock of MOCKS) {
           seat: index + 1,
           hero: el.classList.contains('is-hero-slot'),
           box: local(el),
+          cards: el.querySelectorAll('.cards').length,
         })),
+        tableHOffset: table.top,
         header: local(document.querySelector('.bar')),
         stage: local(document.querySelector('.stage')),
         footer: local(document.querySelector('.hero')),
@@ -148,6 +150,13 @@ for (const mock of MOCKS) {
         if (!cover.box || cover.ownSeat === ownerSeat) continue
         const hit = overlap(text.box, cover.box)
         if (hit) issues.push(`${cover.label}压住文字 ${text.label} ${String(hit.v)}×${String(hit.h)}px`)
+      }
+    }
+    if (data.footer && data.footer.top < (data.stage?.bottom ?? 0)) {
+      for (const seat of data.seats) {
+        if (!seat.box) continue
+        const hit = overlap({ top: seat.box.top + data.tableHOffset, bottom: seat.box.bottom + data.tableHOffset, left: seat.box.left, right: seat.box.right }, data.footer)
+        if (hit) issues.push(`座位${String(seat.seat)}${seat.hero ? '(你)' : ''}伸进底部操作区 ${String(hit.v)}px`)
       }
     }
     if (data.scrollX > 0) warnings.push(`横向溢出 ${String(data.scrollX)}px`)

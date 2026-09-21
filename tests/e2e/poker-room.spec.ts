@@ -256,7 +256,18 @@ test('牌桌小屏几何：740×360 / 844×390 / 390×844 无横向溢出且座�
       })
       const table = box(document.querySelector('.table'))
       const board = box(document.querySelector('.board .row'))
+      const heroSlot = document.querySelector('.seat-slot.is-hero-slot')
+      const heroBox = heroSlot ? heroSlot.getBoundingClientRect() : null
       return {
+        // 本人座位：底部中央（x 居中、y 在桌面下半部分）、且桌面上不画本人底牌
+        hero: heroBox && table
+          ? {
+              centeredX: Math.abs(heroBox.left + heroBox.width / 2 - (table.left + table.width / 2)) < 12,
+              belowMiddle: heroBox.top > table.top + table.height / 2,
+              seatCards: heroSlot?.querySelectorAll('.cards').length ?? -1,
+              roleBadges: heroSlot?.querySelectorAll('.role-badge').length ?? -1,
+            }
+          : null,
         overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
         overflowY: document.documentElement.scrollHeight - document.documentElement.clientHeight,
         collisions,
@@ -279,6 +290,13 @@ test('牌桌小屏几何：740×360 / 844×390 / 390×844 无横向溢出且座�
     expect(result.collisions, `${width}×${height} 座位面板不应压住底池/公共牌：${result.collisions.join('；')}`).toEqual([])
     expect(result.boardInsideTable, `${width}×${height} 公共牌应完全落在桌面内`).toBe(true)
     expect(result.seatCount).toBeGreaterThanOrEqual(2)
+    // 第 4 项：本人座位固定在底部中央，且桌面上不再画本人底牌（底部操作区才有）
+    expect(result.hero, `${width}×${height} 应能找到本人座位`).not.toBeNull()
+    expect(result.hero?.centeredX, `${width}×${height} 本人座位应左右居中`).toBe(true)
+    expect(result.hero?.belowMiddle, `${width}×${height} 本人座位应在桌面下半部分`).toBe(true)
+    expect(result.hero?.seatCards, `${width}×${height} 桌面上的本人座位不应画底牌`).toBe(0)
+    // 第 1 项：庄家/盲位角标画在座位面板里（不占用桌面、不会压住底牌）
+    expect(result.hero?.roleBadges, `${width}×${height} 庄家/盲位角标应在座位面板内`).toBeGreaterThan(0)
     // 小屏不画桌面中央的浮动下注筹码（会压住公共牌或自己的筹码数字），
     // 本轮下注改由座位面板右下角的角标给出（盲注已经下过，所以至少有 1 个）。
     await expect(host.locator('.table .bet:visible')).toHaveCount(0)
