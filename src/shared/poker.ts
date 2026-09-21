@@ -1,0 +1,119 @@
+/**
+ * 扑克基础类型与显示文案（客户端与服务端共用）。
+ * 筹码一律为整数 chips，虚拟且不可兑换。
+ */
+
+export const SUITS = ['s', 'h', 'd', 'c'] as const
+export type Suit = (typeof SUITS)[number]
+
+export const RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A'] as const
+export type Rank = (typeof RANKS)[number]
+
+/** 牌用两字符表示：A♠ = 'As'、10♦ = 'Td'。 */
+export type Card = `${Rank}${Suit}`
+
+export const SUIT_SYMBOL: Record<Suit, string> = { s: '♠', h: '♥', d: '♦', c: '♣' }
+export const SUIT_NAME: Record<Suit, string> = { s: '黑桃', h: '红桃', d: '方块', c: '梅花' }
+export const RANK_LABEL: Record<Rank, string> = {
+  '2': '2',
+  '3': '3',
+  '4': '4',
+  '5': '5',
+  '6': '6',
+  '7': '7',
+  '8': '8',
+  '9': '9',
+  T: '10',
+  J: 'J',
+  Q: 'Q',
+  K: 'K',
+  A: 'A',
+}
+
+/** 2 → 2 … A → 14；A 亦可作 1 用于 A-2-3-4-5（不循环）。 */
+export function rankValue(rank: Rank): number {
+  return RANKS.indexOf(rank) + 2
+}
+
+export function isRedSuit(suit: Suit): boolean {
+  return suit === 'h' || suit === 'd'
+}
+
+export function parseCard(value: string): Card {
+  const rank = value[0] as Rank
+  const suit = value[1] as Suit
+  if (!RANKS.includes(rank) || !SUITS.includes(suit)) throw new Error(`非法牌面：${value}`)
+  return `${rank}${suit}` as Card
+}
+
+export function isCard(value: unknown): value is Card {
+  return typeof value === 'string' && value.length === 2 && isParsedCard(value)
+}
+
+function isParsedCard(value: string): boolean {
+  return (RANKS as readonly string[]).includes(value[0]!) && (SUITS as readonly string[]).includes(value[1]!)
+}
+
+export function formatCard(card: Card): string {
+  const rank = card[0] as Rank
+  const suit = card[1] as Suit
+  return `${RANK_LABEL[rank]}${SUIT_SYMBOL[suit]}`
+}
+
+/** 牌型由弱到强；索引即强度，可直接比较。 */
+export const HAND_CATEGORIES = [
+  'high_card',
+  'pair',
+  'two_pair',
+  'trips',
+  'straight',
+  'flush',
+  'full_house',
+  'quads',
+  'straight_flush',
+] as const
+export type HandCategory = (typeof HAND_CATEGORIES)[number]
+
+export const HAND_CATEGORY_NAMES: Record<HandCategory, string> = {
+  high_card: '高牌',
+  pair: '一对',
+  two_pair: '两对',
+  trips: '三条',
+  straight: '顺子',
+  flush: '同花',
+  full_house: '葫芦',
+  quads: '四条',
+  straight_flush: '同花顺',
+}
+
+/** 底牌/公共牌的公开描述（不含任何未公开信息）。 */
+export type Street = 'preflop' | 'flop' | 'turn' | 'river'
+export const STREET_NAMES: Record<Street, string> = {
+  preflop: '翻牌前',
+  flop: '翻牌',
+  turn: '转牌',
+  river: '河牌',
+}
+
+export type ActionType = 'fold' | 'check' | 'call' | 'bet' | 'raise' | 'all_in'
+export const ACTION_NAMES: Record<ActionType, string> = {
+  fold: '弃牌',
+  check: '过牌',
+  call: '跟注',
+  bet: '下注',
+  raise: '加注',
+  all_in: '全下',
+}
+
+/** 首版固定桌规（规格书 §4）。 */
+export const TABLE_RULES = {
+  minSeats: 2,
+  maxSeats: 9,
+  startingStack: 2000,
+  smallBlind: 10,
+  bigBlind: 20,
+  turnSeconds: 20,
+} as const
+
+export const ROOM_NAME_MAX = 24
+export const NICKNAME_MAX = 12

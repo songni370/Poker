@@ -1,0 +1,9 @@
+node_modules/
+dist/
+data/
+.env
+.env.local
+.skill-sources/
+*.log
+.DS_Store
+.npm-cache/
