@@ -73,13 +73,15 @@ for (const mock of MOCKS) {
         pots: local(document.querySelector('.pots')),
         street: local(document.querySelector('.table .board .street')),
         board: local(document.querySelector('.table .board .row')),
+        dealer: local(document.querySelector('.table .dealer')),
+        dealerSeat: 0,
         chips: [...document.querySelectorAll('.bet')].map((el) => ({
           seat: Number(el.dataset.seat ?? 0),
           box: local(el),
           text: el.textContent.trim(),
         })),
         // 可读文字：被别的元素压住才算问题（几何重叠本身不算）
-        texts: [...document.querySelectorAll('.table .seat-slot .name, .table .seat-slot .stack, .table .seat-slot .status, .table .board .street, .table .board .card, .table .pot')].map((el) => ({
+        texts: [...document.querySelectorAll('.table .seat-slot .cards, .table .seat-slot .name, .table .seat-slot .stack, .table .seat-slot .status, .table .board .street, .table .board .card, .table .pot')].map((el) => ({
           label: `${el.className.split(' ')[0]}「${el.textContent.trim().slice(0, 6)}」`,
           owner: el.closest('.seat-slot') ? [...document.querySelectorAll('.seat-slot')].indexOf(el.closest('.seat-slot')) : -1,
           box: local(el),
@@ -137,6 +139,7 @@ for (const mock of MOCKS) {
       // 面板只跟自己座位比较（面板不会挡住它自己的文字）。
       ...data.chips.map((chip) => ({ label: `筹码${chip.text}`, box: chip.box, ownSeat: -1 })),
       ...data.seats.map((seat) => ({ label: `座位${String(seat.seat)}面板`, box: seat.box, ownSeat: seat.seat })),
+      { label: '庄家按钮', box: data.dealer, ownSeat: (data.dealerSeat ?? 0) + 1 },
     ]
     for (const text of data.texts) {
       if (!text.box) continue

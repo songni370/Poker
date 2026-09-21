@@ -200,17 +200,40 @@ const overlayVisible = ref(false)
 const resultDismissed = ref(false)
 const result = computed(() => game.state?.lastResult ?? null)
 
+/**
+ * 已经确认过的结算手牌（handId），按房间存在 sessionStorage。
+ * 刷新页面时不会为「自己已经点过知道了」的那一手再弹一次结算。
+ */
+const RESULT_SEEN_KEY = 'poker.resultSeen'
+function seenKey(roomId: string): string {
+  return `${RESULT_SEEN_KEY}:${roomId}`
+}
+const seenResultHandId = ref<string | null>(sessionStorage.getItem(seenKey(props.roomId)))
+
+/**
+ * 【坑】这两个 watch 的 getter 必须返回字符串/布尔这类原始值，不能返回数组。
+ * 返回数组时每次求值都是新数组，`Object.is` 永不相等 —— 于是**任何**状态广播
+ * （别人加入、断线、重连、甚至超时提示）都会重跑回调：结算被标记成「未确认」、
+ * 叠层重新弹出。实测：一个人刷新页面，全桌所有人都会再弹一次结算叠层。
+ */
 watch(
-  () => [game.state?.handNo, game.state?.phase] as const,
+  () => `${String(game.state?.handNo ?? -1)}:${game.state?.phase ?? ''}`,
   () => {
     resultDismissed.value = false
   },
 )
 
 watch(
-  () => [game.state?.phase, Boolean(game.state?.lastResult)] as const,
-  ([phase, hasResult]) => {
-    overlayVisible.value = Boolean(hasResult) && (phase === 'showdown' || phase === 'settlement') && !resultDismissed.value
+  () =>
+    `${String(game.state?.handNo ?? -1)}:${game.state?.phase ?? ''}:${String(Boolean(game.state?.lastResult))}`,
+  () => {
+    const state = game.state
+    const hasResult = Boolean(state?.lastResult)
+    const handId = state?.lastResult?.handId ?? null
+    const settled = state?.phase === 'showdown' || state?.phase === 'settlement'
+    // 本人已经确认过这一手的结算（例如刷新前点过「知道了」）就不再弹。
+    const alreadySeen = handId !== null && handId === seenResultHandId.value
+    overlayVisible.value = hasResult && settled && !resultDismissed.value && !alreadySeen
   },
   { immediate: true },
 )
@@ -218,6 +241,15 @@ watch(
 function closeResult(): void {
   resultDismissed.value = true
   overlayVisible.value = false
+  const handId = result.value?.handId ?? null
+  if (handId) {
+    seenResultHandId.value = handId
+    try {
+      sessionStorage.setItem(seenKey(props.roomId), handId)
+    } catch {
+      // 隐私模式等场景下写不了 sessionStorage：只是刷新后会再弹一次，不影响牌局。
+    }
+  }
 }
 
 /** 屏幕阅读器公告：超时弃牌、断线等系统提示与行动倒计时。 */

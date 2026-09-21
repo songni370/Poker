@@ -23,7 +23,13 @@ const props = withDefaults(
 const rank = computed<Rank | null>(() => (props.card ? (props.card[0] as Rank) : null))
 const suit = computed<Suit | null>(() => (props.card ? (props.card[1] as Suit) : null))
 const red = computed(() => (suit.value ? isRedSuit(suit.value) : false))
-/** 花色字形（♠♥♦♣），与文字标签一起保证颜色不是唯一区分手段。 */
+
+/**
+ * 牌面文字：点数用「2–10 / J / Q / K / A」，10 就是两个字符的 10（不是 T）。
+ * RANK_LABEL 与 aria-label 共用同一份映射，屏幕阅读器读到的也是 10。
+ */
+const rankText = computed(() => (rank.value ? RANK_LABEL[rank.value] : ''))
+/** 花色字形（♠♥♦♣）：颜色之外的第二重区分手段。 */
 const suitSymbol = computed(() => (suit.value ? SUIT_SYMBOL[suit.value] : ''))
 
 /** 屏幕阅读器可读的完整牌面，如「黑桃 A」「红桃 10」。 */
@@ -31,30 +37,18 @@ const label = computed(() =>
   rank.value && suit.value ? `${SUIT_NAME[suit.value]} ${RANK_LABEL[rank.value]}` : '盖住的牌',
 )
 
-/* 七段数字：小尺寸下比文字字形更清晰，且不需要额外字体。 */
-const SEGMENTS: Record<string, readonly string[]> = {
-  '2': ['a', 'b', 'd', 'e', 'g'],
-  '3': ['a', 'b', 'c', 'd', 'g'],
-  '4': ['b', 'c', 'f', 'g'],
-  '5': ['a', 'c', 'd', 'f', 'g'],
-  '6': ['a', 'c', 'd', 'e', 'f', 'g'],
-  '7': ['a', 'b', 'c'],
-  '8': ['a', 'b', 'c', 'd', 'e', 'f', 'g'],
-  '9': ['a', 'b', 'c', 'd', 'f', 'g'],
-  T: ['a', 'b', 'c', 'e', 'f', 'g'],
-  J: ['b', 'c', 'd', 'e'],
-  Q: ['a', 'b', 'c', 'e', 'f', 'g'],
-  K: ['b', 'c', 'e', 'f', 'g'],
-  A: ['a', 'b', 'c', 'e', 'f', 'g'],
-}
-
-const segments = computed<readonly string[]>(() => (rank.value ? SEGMENTS[rank.value] : []))
+/** 十点用两位数字：角标要略窄一点，避免在 26px 的座位上顶到牌边。 */
+const isTen = computed(() => rank.value === 'T')
 </script>
 
 <template>
   <span
     class="card"
-    :class="[`card--${size}`, red ? 'is-red' : 'is-black', { 'is-hidden': hidden || !card, 'is-dim': dimmed }]"
+    :class="[
+      `card--${size}`,
+      red ? 'is-red' : 'is-black',
+      { 'is-hidden': hidden || !card, 'is-dim': dimmed, 'is-ten': isTen, 'is-upright': upright },
+    ]"
     role="img"
     :aria-label="hidden || !card ? '盖住的牌' : label"
   >
@@ -83,19 +77,21 @@ const segments = computed<readonly string[]>(() => (rank.value ? SEGMENTS[rank.v
     </span>
 
     <template v-else>
-      <!-- 左上角标始终正向：座位上的牌可能整张朝上，这两个角一定可读。 -->
+      <!--
+        牌面：左上角「点数 + 花色」角标 + 中央大花色 + 右下角镜像角标。
+        点数用真实字形而不是七段数码：26px 的座位牌上，七段数字的 8/9/6 几乎分不出来，
+        而且 10 会被画成 T。字号随牌宽缩放（--cw），12–58px 各档都做过截图核对。
+      -->
       <span class="corner corner--tl" aria-hidden="true">
-        <span class="pip">
-          <span v-for="seg in segments" :key="`t-${seg}`" class="seg" :class="`seg-${seg}`" />
-        </span>
+        <span class="rank">{{ rankText }}</span>
         <span class="suit">{{ suitSymbol }}</span>
       </span>
 
+      <span class="pip" aria-hidden="true">{{ suitSymbol }}</span>
+
       <!-- 右下角标：桌上的牌朝向桌心（rotate 180），操作区的牌保持正向。 -->
       <span class="corner corner--br" :class="{ 'corner--br-flat': upright }" aria-hidden="true">
-        <span class="pip">
-          <span v-for="seg in segments" :key="`b-${seg}`" class="seg" :class="`seg-${seg}`" />
-        </span>
+        <span class="rank">{{ rankText }}</span>
         <span class="suit">{{ suitSymbol }}</span>
       </span>
     </template>
@@ -131,6 +127,8 @@ const segments = computed<readonly string[]>(() => (rank.value ? SEGMENTS[rank.v
   box-shadow: 0 2px 5px rgba(0, 0, 0, 0.45);
   overflow: hidden;
   transition: opacity 0.2s ease-out;
+  /* 牌面文字全部用等宽数字，点数变化不跳位。 */
+  font-variant-numeric: tabular-nums;
 }
 
 .card--sm {
@@ -153,24 +151,27 @@ const segments = computed<readonly string[]>(() => (rank.value ? SEGMENTS[rank.v
   opacity: 0.42;
 }
 
-/* 角标：左上角是主索引，右下角镜像；旋转仅用于牌角，不影响可读性。 */
+/*
+ * 角标：点在上、花色在下，紧贴左上角；字号按牌宽等比缩放。
+ * 10 是两位数，字号略收一点并压紧字距，避免在 26px 的牌上顶出边界。
+ */
 .corner {
   position: absolute;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1px;
-  line-height: 1;
+  line-height: 0.92;
+  font-weight: 700;
 }
 
 .corner--tl {
-  top: 8%;
-  left: 9%;
+  top: 5%;
+  left: 8%;
 }
 
 .corner--br {
-  right: 9%;
-  bottom: 8%;
+  right: 8%;
+  bottom: 5%;
   transform: rotate(180deg);
 }
 
@@ -179,77 +180,45 @@ const segments = computed<readonly string[]>(() => (rank.value ? SEGMENTS[rank.v
   transform: none;
 }
 
-/* 牌桌座位上的小牌：角标不旋转，避免小尺寸下字形难辨。 */
-@media (max-width: 1100px) {
-  .corner--br {
-    transform: none;
-  }
+.rank {
+  font-family: var(--font-sans);
+  font-size: calc(var(--cw) * 0.38);
+  letter-spacing: -0.06em;
+}
+
+.is-ten .rank {
+  font-size: calc(var(--cw) * 0.32);
+  letter-spacing: -0.08em;
 }
 
 .suit {
   font-size: calc(var(--cw) * 0.26);
 }
 
-/* 七段数字：2.5:5 的比例，段宽随牌宽缩放。 */
+/*
+ * 中央大花色：小尺寸下也能一眼认出花色（配合角标与颜色三重区分）。
+ * 正中对齐，并收小到 0.42 牌宽——再大就会顶到右下角的镜像角标。
+ */
 .pip {
-  position: relative;
-  display: block;
-  width: calc(var(--cw) * 0.26);
-  height: calc(var(--cw) * 0.44);
-}
-
-.seg {
   position: absolute;
-  background: currentColor;
-  border-radius: 1px;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: calc(var(--cw) * 0.42);
+  line-height: 1;
+  opacity: 0.92;
 }
 
-.seg-a,
-.seg-d,
-.seg-g {
-  left: 12%;
-  width: 76%;
-  height: 13%;
+/* 26px 的座位牌：中央花色再收一点，保证角标完整。 */
+.card--sm .pip {
+  font-size: calc(var(--cw) * 0.38);
 }
 
-.seg-a {
-  top: 0;
-}
-
-.seg-g {
-  top: 43.5%;
-}
-
-.seg-d {
-  bottom: 0;
-}
-
-.seg-b,
-.seg-c,
-.seg-e,
-.seg-f {
-  width: 15%;
-  height: 33%;
-}
-
-.seg-b,
-.seg-c {
-  right: 0;
-}
-
-.seg-e,
-.seg-f {
-  left: 0;
-}
-
-.seg-b,
-.seg-f {
-  top: 6%;
-}
-
-.seg-c,
-.seg-e {
-  bottom: 6%;
+/* 牌桌上朝向桌心的牌：小尺寸下右下角标不旋转，字形更清楚。 */
+@media (max-width: 1100px) {
+  .corner--br {
+    transform: none;
+  }
 }
 
 /* 背面。 */
