@@ -31,7 +31,8 @@ npm run dev        # 客户端 http://localhost:5173 · 服务端 http://localho
 | `npm run typecheck` | `vue-tsc`（客户端）+ `tsc`（服务端） |
 | `npm run lint` | ESLint |
 | `npm test` | Node 内置测试运行器（原生跑 TypeScript，无额外框架） |
-| `npm run e2e` | Playwright + 真实 Chrome 端到端：单端口部署验收、两个独立浏览器上下文打完一手（含**摊牌前不泄露对手底牌**断言与**对局中刷新恢复**）、手机横屏无横向溢出 |
+| `npm run e2e` | Playwright + 真实 Chrome 端到端（先 build，并重置 `data/e2e.sqlite`）：单端口部署验收、两个独立浏览器上下文打完一手（含**摊牌前不泄露对手底牌**断言与**对局中刷新恢复**）、手机横屏无横向溢出、**牌桌小屏几何**、聊天（含**同人连续发言分组**）、观战与观战选座、顶栏收纳 |
+| `npm run probe:table` | 牌桌几何探针（需先 `npm run dev`）：打印各视口下座位面板与底池/边池/公共牌/下注筹码的重叠像素，改小屏布局前后各跑一次 |
 | `npm run check:deploy` | 对已启动的服务做单进程部署自检（网页/API/WebSocket 同端口、无外部服务依赖） |
 | `npm run backup` | SQLite 备份与恢复演练（独立库：备份 → 校验 → 删除原库 → 恢复 → 重启验证） |
 

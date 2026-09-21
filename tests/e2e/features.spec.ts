@@ -38,6 +38,35 @@ async function openDrawerSection(page: Page, name: '规则' | '历史' | '聊天
   await page.getByRole('button', { name: new RegExp(`^${name}`) }).first().click()
 }
 
+/** 双方只用过牌/跟注，保证走到摊牌。返回是否出现结算叠层。 */
+async function playUntilSettled(pages: Page[], timeoutMs = 45_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    for (const page of pages) {
+      if (await page.getByRole('button', { name: '知道了' }).isVisible().catch(() => false)) return true
+      for (const pattern of [/^过牌/, /^跟注/]) {
+        const button = page.getByRole('button', { name: pattern })
+        if ((await button.count()) === 0) continue
+        if (!(await button.first().isEnabled().catch(() => false))) continue
+        await button.first().click()
+        await page.waitForTimeout(120)
+        break
+      }
+    }
+    await pages[0]!.waitForTimeout(120)
+  }
+  return false
+}
+
+/** 关掉结算叠层，让底部与顶栏恢复可点。 */
+async function dismissResult(page: Page): Promise<void> {
+  const known = page.getByRole('button', { name: '知道了' })
+  if (await known.isVisible().catch(() => false)) {
+    await known.click()
+    await known.waitFor({ state: 'hidden' })
+  }
+}
+
 test('聊天：房主发言对手能看到，刷新后仍能看到历史，未读数在按钮上可读', async ({ browser }) => {
   const hostContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
   const guestContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
@@ -110,6 +139,71 @@ test('聊天：房主发言对手能看到，刷新后仍能看到历史，未�
   await guest.waitForURL(/\/table\//)
   await openDrawerSection(guest, '聊天')
   await expect(guest.getByText(text)).toBeVisible()
+
+  expect(errors).toEqual([])
+  await hostContext.close()
+  await guestContext.close()
+})
+
+test('聊天分组：同一个人连续发言只显示一次昵称，@ 提醒另起一组', async ({ browser }) => {
+  const hostContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const guestContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const host = await hostContext.newPage()
+  const guest = await guestContext.newPage()
+  const errors = [...watchErrors(host), ...watchErrors(guest)]
+
+  const hostName = `分组${String(Date.now() % 1000)}`
+  const guestName = `听众${String(Date.now() % 1000)}`
+  const roomId = await createRoom(host, hostName, 2)
+  await joinRoom(guest, roomId, guestName)
+  await host.getByRole('button', { name: '开始牌局' }).click()
+  await host.waitForURL(/\/table\//)
+  await guest.waitForURL(/\/table\//)
+
+  // 同一个人连发三条（间隔很短，必须折叠成一组）
+  await openDrawerSection(host, '聊天')
+  for (const line of ['第一句', '第二句', '第三句']) {
+    await host.getByPlaceholder('说点什么…').fill(line)
+    await host.getByRole('button', { name: '发送' }).click()
+    await expect(host.getByText(line)).toBeVisible()
+  }
+
+  // 自己的消息靠右，三条都在
+  const ownMessages = host.locator('.chat-msg.is-own')
+  await expect(ownMessages).toHaveCount(3)
+  // 组首有昵称与时间，其余两条标记为「组内后续」
+  await expect(ownMessages.nth(0).locator('.chat-meta')).toHaveCount(1)
+  await expect(ownMessages.nth(1)).toHaveClass(/is-continuation/)
+  await expect(ownMessages.nth(2)).toHaveClass(/is-continuation/)
+  await expect(ownMessages.nth(1).locator('.chat-meta')).toHaveCount(0)
+  await expect(ownMessages.nth(2).locator('.chat-meta')).toHaveCount(0)
+  // 分组只影响视觉：屏幕阅读器仍要听到后两条是谁说的
+  await expect(ownMessages.nth(1)).toContainText('你')
+  // 三条共用一个组首昵称，页面上「你」只出现一次（没有逐条重复）
+  await expect(host.locator('.chat-msg .chat-who')).toHaveCount(1)
+  await host.screenshot({ path: 'artifacts/e2e/14-chat-grouping.png' })
+
+  // 别人插话后，同一个人再发言要重新起一组
+  await openDrawerSection(guest, '聊天')
+  await guest.getByPlaceholder('说点什么…').fill('插一句')
+  await guest.getByRole('button', { name: '发送' }).click()
+  await expect(host.getByText('插一句')).toBeVisible()
+  await host.getByPlaceholder('说点什么…').fill('第四句')
+  await host.getByRole('button', { name: '发送' }).click()
+  await expect(host.getByText('第四句')).toBeVisible()
+  await expect(host.locator('.chat-msg.is-own')).toHaveCount(4)
+  await expect(host.locator('.chat-msg.is-own').nth(3)).not.toHaveClass(/is-continuation/)
+  await expect(host.locator('.chat-msg.is-own').nth(3).locator('.chat-meta')).toHaveCount(1)
+
+  // @ 提醒即使紧跟在自己的发言后面，也要单独成组（组首才有的「提到了你」标记）
+  await host.getByPlaceholder('说点什么…').fill(`@${guestName} 到你了`)
+  await host.getByRole('button', { name: '发送' }).click()
+  const ownMention = host.locator('.chat-msg.is-own').nth(4)
+  await expect(ownMention).not.toHaveClass(/is-continuation/)
+  await expect(ownMention.locator('.chat-meta')).toHaveCount(1)
+  // 被提到的人在客人那边：标记只对本人显示
+  await expect(guest.locator('.chat-msg.is-mention').first()).toHaveClass(/is-mention/)
+  await expect(guest.locator('.chat-mention-tag').first()).toHaveText('提到了你')
 
   expect(errors).toEqual([])
   await hostContext.close()
@@ -194,6 +288,87 @@ test('中等宽度顶栏收纳：只留「更多」与「退出」，菜单里�
   await host.screenshot({ path: 'artifacts/e2e/11-bar-more-menu.png' })
   await menu.first().getByText(/^聊天/).first().click()
   await expect(host.getByPlaceholder('说点什么…')).toBeVisible()
+
+  expect(errors).toEqual([])
+  await hostContext.close()
+  await guestContext.close()
+})
+
+/**
+ * 观战选座在窄屏必须保持「一排」：9 人桌最多 8 个空位，换行会把底部区域撑成两行，
+ * 牌桌被挤掉一截。这里验证 390×844 竖屏下 8 个座位按钮同排（可横向滚动），
+ * 并且不产生横向页面溢出。
+ */
+test('观战选座：9 人桌 8 个空位在窄屏仍是一排，不换行也不横向溢出', async ({ browser }) => {
+  const hostContext = await browser.newContext({ viewport: { width: 1280, height: 720 } })
+  const guestContext = await browser.newContext({ viewport: { width: 1280, height: 720 } })
+  const host = await hostContext.newPage()
+  const guest = await guestContext.newPage()
+  const errors = [...watchErrors(host), ...watchErrors(guest)]
+
+  const roomId = await createRoom(host, `选座${String(Date.now() % 1000)}`, 9)
+  await joinRoom(guest, roomId, `陪练${String(Date.now() % 1000)}`)
+  await host.getByRole('button', { name: '开始牌局' }).click()
+  await host.waitForURL(/\/table\//)
+  await guest.waitForURL(/\/table\//)
+
+  // 先把这一手打完：手牌进行中离座的玩家要等本手结束才真正离开座位（筹码还在池里），
+  // 那时才能重新入座，所以观战选座要在结算之后验证。
+  expect(await playUntilSettled([host, guest])).toBe(true)
+
+  // 客人离座（等待区）后回到牌桌 → 成为观战者，9 人桌只剩 1 个座位被占
+  await dismissResult(guest)
+  await guest.getByRole('button', { name: '退出' }).click()
+  await guest.waitForURL(/\/room\//)
+  await guest.getByRole('button', { name: '离座' }).click()
+  await guest.goto(`/table/${roomId}`)
+  await expect(guest.getByText('观战中')).toBeVisible({ timeout: 10_000 })
+  // 快照里仍带着上一手的结算结果，重新进桌会再弹一次结算叠层（模态遮罩会挡住选座按钮）。
+  await dismissResult(guest)
+
+  await guest.setViewportSize({ width: 390, height: 844 })
+  await guest.waitForTimeout(300)
+
+  const picker = guest.getByRole('group', { name: '选择座位' })
+  await expect(picker).toBeVisible()
+  const buttons = picker.getByRole('button')
+  await expect(buttons).toHaveCount(8)
+
+  const boxes = await picker.locator('.p-button').evaluateAll((nodes) =>
+    nodes.map((node) => {
+      const rect = node.getBoundingClientRect()
+      return { top: Math.round(rect.top), height: Math.round(rect.height), width: Math.round(rect.width) }
+    }),
+  )
+  // 同排：所有按钮的纵向位置一致（换行会让 top 出现第二个值）
+  expect(new Set(boxes.map((box) => box.top)).size, `座位按钮应排在同一行：${JSON.stringify(boxes)}`).toBe(1)
+  // 触控目标不被压小
+  boxes.forEach((box) => {
+    expect(box.width).toBeGreaterThanOrEqual(40)
+    expect(box.height).toBeGreaterThanOrEqual(32)
+  })
+
+  // 容器是一排（可横向滚动），并且整页不横向溢出
+  const layout = await guest.evaluate(() => {
+    const list = document.querySelector('.seat-picker')
+    const seatRow = document.querySelector('.spectator-seat-picker')
+    return {
+      wrap: list ? getComputedStyle(list).flexWrap : '',
+      scrollable: list ? list.scrollWidth > list.clientWidth : false,
+      overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      rowHeight: Math.round(seatRow?.getBoundingClientRect().height ?? 0),
+    }
+  })
+  expect(layout.wrap).toBe('nowrap')
+  expect(layout.scrollable).toBe(true)
+  expect(layout.overflowX).toBe(0)
+  // 一排的高度：按钮 40px + 内边距，远小于换行后的两排
+  expect(layout.rowHeight).toBeLessThan(64)
+  await guest.screenshot({ path: 'artifacts/e2e/15-spectator-seat-picker-narrow.png' })
+
+  // 仍然可以按座位号入座
+  await buttons.nth(4).click()
+  await expect(guest.getByText('观战中')).toBeHidden({ timeout: 10_000 })
 
   expect(errors).toEqual([])
   await hostContext.close()

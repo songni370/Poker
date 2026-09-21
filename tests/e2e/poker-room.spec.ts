@@ -21,11 +21,15 @@ function watchErrors(page: Page): string[] {
   return errors
 }
 
-async function createRoom(page: Page, nickname: string, roomName: string): Promise<string> {
+async function createRoom(page: Page, nickname: string, roomName: string, maxSeats?: number): Promise<string> {
   await page.goto('/')
   await expect(page.getByRole('heading', { name: '开一桌德州' })).toBeVisible()
   await page.getByPlaceholder('例如：小满').fill(nickname)
   await page.getByPlaceholder('例如：周五夜局').fill(roomName)
+  if (maxSeats !== undefined) {
+    await page.locator('.p-select, [role="combobox"]').first().click()
+    await page.getByRole('option', { name: `${String(maxSeats)} 人桌` }).click()
+  }
   await page.getByRole('button', { name: '创建并进入等待区' }).click()
   await page.waitForURL(/\/room\//)
   const roomId = new URL(page.url()).pathname.split('/room/')[1]!
@@ -211,4 +215,74 @@ test('手机横屏无溢出：844×390 与 740×360 不出现横向滚动', asyn
 
   expect(errors).toEqual([])
   await context.close()
+})
+
+/**
+ * 牌桌几何回归（规格书 §3.4「小屏不遮挡手牌、玩家下注、底池和操作」）。
+ *
+ * 这一条专门守住「矮屏紧凑环形布局」：740×360 时桌面只有 ~118px 高，
+ * 修复前本人座位面板会压住底池、公共牌区与座位面板只差几像素。
+ * 用 9 人桌上限的房间开局，座位锚点与 9 人满桌一致（座位数决定环形角度）。
+ */
+test('牌桌小屏几何：740×360 / 844×390 / 390×844 无横向溢出且座位不压中央区', async ({ browser }) => {
+  const hostContext = await browser.newContext({ viewport: { width: 1280, height: 720 } })
+  const guestContext = await browser.newContext({ viewport: { width: 1280, height: 720 } })
+  const host = await hostContext.newPage()
+  const guest = await guestContext.newPage()
+  const errors = [...watchErrors(host), ...watchErrors(guest)]
+
+  const roomId = await createRoom(host, `几何${String(Date.now() % 1000)}`, '几何回归', 9)
+  await joinRoom(guest, roomId, `陪练${String(Date.now() % 1000)}`)
+  await host.getByRole('button', { name: '开始牌局' }).click()
+  await host.waitForURL(/\/table\//)
+  await guest.waitForURL(/\/table\//)
+  await expect(host.locator('.table')).toBeVisible()
+
+  /** 采集：横向溢出量、每个座位面板与中央块（底池/公共牌）的重叠。 */
+  async function geometry(page: Page) {
+    return page.evaluate(() => {
+      const box = (el: Element | null) => (el ? el.getBoundingClientRect() : null)
+      const overlap = (a: DOMRect, b: DOMRect) => {
+        const v = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)
+        const h = Math.min(a.right, b.right) - Math.max(a.left, b.left)
+        return v > 0.5 && h > 0.5 ? { v: Math.round(v), h: Math.round(h) } : null
+      }
+      const center = box(document.querySelector('.center'))
+      const collisions: string[] = []
+      document.querySelectorAll('.seat-slot').forEach((slot, index) => {
+        if (!center) return
+        const hit = overlap(slot.getBoundingClientRect(), center)
+        if (hit) collisions.push(`座位${String(index + 1)} 压住中央区 ${String(hit.v)}×${String(hit.h)}px`)
+      })
+      const table = box(document.querySelector('.table'))
+      const board = box(document.querySelector('.board .row'))
+      return {
+        overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        overflowY: document.documentElement.scrollHeight - document.documentElement.clientHeight,
+        collisions,
+        tableH: Math.round(table?.height ?? 0),
+        boardInsideTable: Boolean(table && board && board.top >= table.top && board.bottom <= table.bottom),
+        seatCount: document.querySelectorAll('.seat-slot').length,
+      }
+    })
+  }
+
+  for (const [width, height] of [
+    [740, 360],
+    [844, 390],
+    [390, 844],
+  ] as const) {
+    await host.setViewportSize({ width, height })
+    await host.waitForTimeout(250)
+    const result = await geometry(host)
+    expect(result.overflowX, `${width}×${height} 牌桌不应横向溢出`).toBe(0)
+    expect(result.collisions, `${width}×${height} 座位面板不应压住底池/公共牌：${result.collisions.join('；')}`).toEqual([])
+    expect(result.boardInsideTable, `${width}×${height} 公共牌应完全落在桌面内`).toBe(true)
+    expect(result.seatCount).toBeGreaterThanOrEqual(2)
+    await host.screenshot({ path: `artifacts/e2e/13-table-geometry-${width}x${height}.png` })
+  }
+
+  expect(errors).toEqual([])
+  await hostContext.close()
+  await guestContext.close()
 })

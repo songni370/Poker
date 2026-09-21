@@ -371,6 +371,15 @@ function mentionsMe(message: ChatMessage): boolean {
   return chat.mentionsMe(message, myPlayerId.value)
 }
 
+/**
+ * 消息里有没有 @ 提醒（服务端已把昵称解析成 playerId）。
+ * 分组时按「任何 @ 提醒」断开，而不是只按「提到了我」：
+ * 否则同一条消息在发送方和接收方会落进不同的分组，带 @ 的话被并进上一条里很容易漏看。
+ */
+function hasMention(message: ChatMessage): boolean {
+  return (message.mentions?.length ?? 0) > 0
+}
+
 /** 被 @ 到的玩家一览（排除自己）；没有别人时菜单为空。 */
 const mentionItems = computed<MenuItem[]>(() =>
   game.seats
@@ -447,7 +456,8 @@ type ChatRow =
   | { kind: 'day'; key: string; label: string }
   | { kind: 'gap'; key: string; label: string }
   | { kind: 'unread'; key: string }
-  | { kind: 'message'; key: string; message: ChatMessage }
+  /** groupStart=false：与上一条同人消息同组，只显示正文（昵称/时间由组首给出）。 */
+  | { kind: 'message'; key: string; message: ChatMessage; groupStart: boolean }
 
 function chatDayKey(at: number): string {
   const date = new Date(at)
@@ -466,6 +476,10 @@ function chatDayLabel(at: number): string {
 /**
  * 聊天渲染行：日期分隔 + 间隔较久时的时间分隔 + 未读分隔线 + 消息本身。
  * 分组只影响展示，消息数组仍是服务端下发的原始顺序。
+ *
+ * 同一个人连续发言会折叠成一组：只有组首显示昵称与时间，后续只显示正文。
+ * 连续发言的判定必须够保守——日期分隔、时间分隔、未读分隔线、系统消息、
+ * @ 提醒、搜索过滤后的相邻关系都会打断分组，否则会把不相干的话并成一组。
  */
 const chatRows = computed<ChatRow[]>(() => {
   const query = chatQuery.value.trim().toLowerCase()
@@ -478,22 +492,43 @@ const chatRows = computed<ChatRow[]>(() => {
   const rows: ChatRow[] = []
   let previous: ChatMessage | null = null
   let previousDay = ''
+  /** 当前分组的组首消息；为 null 表示下一条必须重新起组。 */
+  let groupAnchor: ChatMessage | null = null
   for (const message of source) {
-    // 搜索时不再插入日期/间隔/未读分隔，避免与过滤结果互相干扰。
+    // 搜索时不再插入日期/间隔/未读分隔，也不做分组：过滤后的相邻关系是假象，
+    // 每条结果都带上昵称更好读。
     if (query) {
-      rows.push({ kind: 'message', key: message.id, message })
+      rows.push({ kind: 'message', key: message.id, message, groupStart: true })
       previous = message
+      groupAnchor = null
       continue
     }
     const day = chatDayKey(message.at)
     if (day !== previousDay) {
       rows.push({ kind: 'day', key: `day-${day}`, label: chatDayLabel(message.at) })
       previousDay = day
+      groupAnchor = null
     } else if (previous && message.at - previous.at > CHAT_GAP_MS) {
       rows.push({ kind: 'gap', key: `gap-${message.id}`, label: chatTime(message.at) })
+      groupAnchor = null
     }
-    if (unreadBoundaryId.value === message.id) rows.push({ kind: 'unread', key: 'unread-divider' })
-    rows.push({ kind: 'message', key: message.id, message })
+    if (unreadBoundaryId.value === message.id) {
+      rows.push({ kind: 'unread', key: 'unread-divider' })
+      groupAnchor = null
+    }
+
+    const grouped =
+      groupAnchor !== null &&
+      groupAnchor.kind === 'user' &&
+      message.kind === 'user' &&
+      groupAnchor.playerId === message.playerId &&
+      !hasMention(groupAnchor) &&
+      !hasMention(message)
+
+    rows.push({ kind: 'message', key: message.id, message, groupStart: !grouped })
+    if (message.kind !== 'user') groupAnchor = null
+    else if (!grouped) groupAnchor = message
+    // grouped 为真时保持原组首，继续把后续同人消息并进同一组。
     previous = message
   }
   return rows
@@ -997,9 +1032,14 @@ async function leaveTable(): Promise<void> {
                 <li
                   v-else
                   class="chat-msg"
-                  :class="{ 'is-own': isOwnMessage(row.message), 'is-mention': mentionsMe(row.message) }"
+                  :class="{
+                    'is-own': isOwnMessage(row.message),
+                    'is-mention': mentionsMe(row.message),
+                    'is-continuation': !row.groupStart,
+                  }"
                 >
-                  <p class="chat-meta">
+                  <!-- 组首：昵称 + 提及标记 + 时间。 -->
+                  <p v-if="row.groupStart" class="chat-meta">
                     <span class="chat-who">{{ isOwnMessage(row.message) ? '你' : row.message.nickname }}</span>
                     <span v-if="mentionsMe(row.message)" class="chat-mention-tag">提到了你</span>
                     <time
@@ -1009,6 +1049,10 @@ async function leaveTable(): Promise<void> {
                     >
                       {{ chatTime(row.message.at) }}
                     </time>
+                  </p>
+                  <!-- 组内后续消息：视觉上共用组首的昵称，但屏幕阅读器仍要听到是谁说的。 -->
+                  <p v-else class="sr-only">
+                    {{ isOwnMessage(row.message) ? '你' : row.message.nickname }}，{{ chatFullTime(row.message.at) }}
                   </p>
                   <p class="chat-text">{{ row.message.text }}</p>
                 </li>
@@ -1410,7 +1454,8 @@ async function leaveTable(): Promise<void> {
 
 .chat-msgs {
   display: grid;
-  gap: 6px;
+  /* 组内贴紧、组间留白：间距本身承担「这是一组」的表达，不需要额外装饰。 */
+  gap: 2px;
   margin: 0;
   padding: var(--space-1);
   list-style: none;
@@ -1424,6 +1469,15 @@ async function leaveTable(): Promise<void> {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--bg-elevated);
+}
+
+/* 同一个人连续发言：组首与上一条拉开距离，组内后续消息紧贴组首。 */
+.chat-msg:not(.is-continuation) {
+  margin-top: 6px;
+}
+
+.chat-msg:first-child {
+  margin-top: 0;
 }
 
 /* 自己的消息：靠右 + 「你」标记 + 左侧描边，不只靠颜色区分。 */
@@ -1731,21 +1785,34 @@ async function leaveTable(): Promise<void> {
   }
 }
 
-/* 观战者选座：一排小号按钮，窄屏可横向滚动而不换行。 */
+/* 观战者选座：一排小号按钮。窄屏（9 人桌最多 8 个空位）改为横向滚动，
+ * 不换行——换行会把底部区域撑高，把牌桌挤掉一截（紧凑标签的通用规则：宁可滚动不折行）。 */
 .spectator-seat-picker {
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.spectator-seat-picker > .muted {
+  flex: none;
 }
 
 .seat-picker {
   display: flex;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
   gap: 6px;
-  flex-wrap: wrap;
+  min-width: 0;
+  padding-bottom: 2px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
 }
 
 .seat-picker :deep(.p-button) {
+  /* 触控目标不参与收缩：宁可横向滚动，也不把按钮压到 40px 以下。 */
+  flex: 0 0 auto;
   min-width: 40px;
   padding-inline: 8px;
 }

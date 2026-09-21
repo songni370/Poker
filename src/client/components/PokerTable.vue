@@ -91,9 +91,10 @@ function seatStyle(index: number): Record<string, string> {
   // y 方向的半径由 CSS 变量控制，小屏时自动收窄，避免座位越出桌面。
   // x 方向额外用 clamp 按「座位面板自身宽度的一半」收边：锚点是百分比而面板是固定宽度，
   // 窄屏时最左/最右的座位必然顶出桌子，造成横向溢出。
+  // 注意括号：上限必须是 100% - (半宽 + 4px)，漏掉括号会退化成 100% - 半宽 + 4px（多出 4px）。
   const edge = 'var(--seat-w, 144px) / 2 + 4px'
   return {
-    left: `clamp(calc(${edge}), calc(50% + var(--seat-anchor-x, ${String(RX)}%) * ${String(Math.cos(angle))}), calc(100% - ${edge}))`,
+    left: `clamp(calc(${edge}), calc(50% + var(--seat-anchor-x, ${String(RX)}%) * ${String(Math.cos(angle))}), calc(100% - (${edge})))`,
     top: `calc(50% + var(--seat-anchor-y, ${String(RY)}%) * ${String(Math.sin(angle))})`,
   }
 }
@@ -105,6 +106,21 @@ function chipStyle(index: number): Record<string, string> {
 
 /** 已入座人数：用于空桌引导与状态播报。 */
 const seatedCount = computed(() => props.seats.filter(Boolean).length)
+
+/** 边池明细的中文读法（屏幕阅读器用；视觉上由 .pots 行展示）。 */
+const potBreakdownText = computed(() =>
+  props.pots
+    .map((pot, index) => `${index === 0 ? '主池' : `边池${String(index)}`} ${String(pot.amount)}`)
+    .join('，'),
+)
+
+/**
+ * 横向贴边的座位（|cos| 接近 1，如 9 人桌的 ±10°/±30° 位）。
+ * 竖屏窄屏上它们正好落在公共牌所在的水平带上，需要单独收窄面板（见 .is-side-seat 样式）。
+ */
+function isSideSeat(index: number): boolean {
+  return Math.abs(Math.cos(polarFor(index).angle)) >= 0.85
+}
 
 /** 桌面中央的一句话状态，用 aria-live 播报给屏幕阅读器。 */
 const tableStatus = computed(() => {
@@ -125,21 +141,31 @@ const tableStatus = computed(() => {
           还没有人入座，把房间链接发给朋友即可开局。
         </p>
 
-        <p class="pot">
-          <span class="pot-label">底池</span>
-          <b class="num">{{ potTotal }}</b>
-        </p>
-        <p v-if="pots.length > 1" class="pots">
-          <span v-for="(pot, index) in pots" :key="index" class="num">
-            {{ index === 0 ? '主池' : `边池${String(index)}` }} {{ pot.amount }}
-          </span>
-        </p>
+        <div class="center-pot">
+          <p class="pot">
+            <span class="pot-label">底池</span>
+            <b class="num">{{ potTotal }}</b>
+            <!-- 边池明细：视觉上由旁边的 .pots 给出（窄屏会隐藏它），
+                 无障碍读法始终挂在底池这一处，避免读两遍。 -->
+            <span v-if="pots.length > 1" class="sr-only">（{{ potBreakdownText }}）</span>
+          </p>
+          <p v-if="pots.length > 1" class="pots" aria-hidden="true">
+            <span v-for="(pot, index) in pots" :key="index" class="num">
+              {{ index === 0 ? '主池' : `边池${String(index)}` }} {{ pot.amount }}
+            </span>
+          </p>
+        </div>
         <CommunityCards :cards="board" :street="street" :highlight="highlightCards" />
       </div>
 
       <!-- 座位：按 maxSeats 分布，2–9 人都能正常排布。 -->
       <template v-for="(seat, index) in seats" :key="index">
-        <div v-if="seat" class="seat-slot" :class="{ 'is-hero-slot': index === heroSeat }" :style="seatStyle(index)">
+        <div
+          v-if="seat"
+          class="seat-slot"
+          :class="{ 'is-hero-slot': index === heroSeat, 'is-side-seat': isSideSeat(index) }"
+          :style="seatStyle(index)"
+        >
           <PlayerSeat
             :seat="seat"
             :is-hero="seat.playerId === heroPlayerId"
@@ -214,15 +240,34 @@ const tableStatus = computed(() => {
   pointer-events: none;
 }
 
+/*
+ * 中央信息区：两行（底池+边池 / 公共牌），整体居中。
+ *   - 竖排而不是 grid 堆叠：`.center` 的宽度必须是「两行里较宽的那一行」，
+ *     否则块会比内容宽（曾用 `.board { flex-basis: 100% }` 强行独占一行，
+ *     结果容器的 max-content 把两行宽度相加，块变宽 87px 还会压到侧边座位面板）。
+ *   - 边池与底池同一行：边池另起一行会让中心块高 20px，桌面高度不变时就会顶到
+ *     上沿的座位面板（实测 1280×720 出现底池压住本人座位面板）。
+ */
 .center {
   position: absolute;
   left: 50%;
-  top: 42%;
-  display: grid;
-  justify-items: center;
+  /* 45%（而非正中）：本人座位固定在环的下沿中央，其面板比别的座位高一截
+     （昵称 + 筹码 + 底牌 + 行动提示），中心块略微下移才不会顶到它。 */
+  top: 45%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   gap: 6px;
   width: max-content;
   transform: translate(-50%, -50%);
+}
+
+/* 底池与边池同行。 */
+.center-pot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
 }
 
 .pot {
@@ -337,7 +382,72 @@ const tableStatus = computed(() => {
     /* 椭圆横向半径收窄，座位面板不越出屏幕（无横向滚动）。 */
     --seat-anchor-x: 43%;
     /* 座位面板同时收窄，9 人桌在竖屏下才不会互相压住。 */
-    --seat-w: 104px;
+    --seat-w: 108px;
+  }
+}
+
+/*
+ * 竖屏（≤560px 宽）：桌面高度跟着视口走（390×844 时 310px），公共牌缩到 34px 上下，
+ * 贴边座位单独收窄——三件事一起做，公共牌区才真正空出来。
+ * 竖屏是 9 人桌最紧张的一档：`|sin|` 最小的两个座位（9 人桌的 ±10° 位）与公共牌同高，
+ * 只能在宽度上让路（108px → 64px）；收窄后中央 222px 全部留给公共牌。
+ * 实测 390×844：6 人桌与 9 人桌的公共牌与任何座位面板都零重叠。
+ */
+@media (max-width: 560px) and (orientation: portrait) {
+  .table {
+    /*
+     * 桌面高度跟着视口走：竖屏下顶栏 + 横屏引导 + 底部操作区要占掉 500px 上下
+     * （动作区有下注滑块时最高），桌面吃掉剩下的高度，否则矮一点的手机（360×740）
+     * 会被底部操作区顶出屏幕、整页纵向滚动。
+     * 系数 1.1 是让 390×844（规格书要求的最小竖屏）刚好拿到上限 310px，
+     * 更矮的机器按比例缩小桌面，不再撑破页面。dvh 而不是 vh：地址栏伸缩时 vh 会算错。
+     */
+    --table-h: clamp(196px, calc(100dvh * 1.1 - 618px), 310px);
+    --seat-anchor-y: 44%;
+  }
+
+  /* 中央块（底池/边池 + 轮次 + 公共牌）竖排居中：宽度只由公共牌决定，左右两侧留给贴边座位。 */
+  .center {
+    top: 50%;
+  }
+
+  /* 贴边座位：只留「昵称 + 筹码」，头像与光环让位给公共牌。 */
+  .seat-slot.is-side-seat {
+    --seat-w: 64px;
+  }
+
+  .seat-slot.is-side-seat :deep(.avatar),
+  .seat-slot.is-side-seat :deep(.seat-aura) {
+    display: none;
+  }
+
+  /* 公共牌宽度跟着视口走：两侧贴边座位各占 64px + 4px 边距后剩下的横向空间，
+     五张牌加牌距必须全部装下（390px 宽时 34px，360px 宽时 30px，320px 宽时 24px）。 */
+  .center :deep(.board) {
+    --board-cw: clamp(24px, calc((100vw - 210px) / 5), 34px);
+  }
+
+  .center :deep(.board .card--md) {
+    --cw: var(--board-cw);
+  }
+
+  .center :deep(.board .slot--empty) {
+    width: var(--board-cw);
+    height: calc(var(--board-cw) * 1.4);
+  }
+
+  /* 牌距同步收紧：五张牌加上牌距必须留出余量。 */
+  .center :deep(.board .row) {
+    gap: 4px;
+  }
+
+  .center :deep(.board .gap) {
+    width: 8px;
+  }
+
+  /* 边池明细行同横屏矮屏：会让中央块宽过两侧座位之间的净宽，明细交给 sr-only 与结算叠层。 */
+  .pots {
+    display: none;
   }
 }
 
@@ -359,16 +469,50 @@ const tableStatus = computed(() => {
 
   .table {
     --table-h: min(35vh, 118px);
-    /* 座位锚点外移：面板已收窄（见 PlayerSeat 矮屏规则），外移后正好贴住桌沿，
-       顶部座位不压公共牌、底部座位不压操作区。 */
-    --seat-anchor-y: 58%;
+    /* 座位锚点外移：面板已收窄（见 PlayerSeat 矮屏规则），外移后正好贴住桌沿。
+       60% 时上下两排座位与中央块只剩 3px 净空，64% 能拉到 7–12px
+       （本人座位面板略高于顶栏中线，但顶栏中段是空的，不会挡住任何顶栏文字）。 */
+    --seat-anchor-y: 64%;
     /* 横屏手机同样收窄座位面板，给公共牌与操作区留出宽度。 */
     --seat-w: 116px;
   }
 
-  /* 公共牌整体上移，与本人座位面板拉开距离。 */
+  /*
+   * 极矮横屏（740×360 只有 ~118px 桌面高度）的紧凑环形布局：
+   * 中央信息压成「[底池/边池] 一行 + [轮次][公共牌] 一行」。
+   * 纵向每省一行都是公共牌与座位面板之间的净空：中心块从 114px 降到 83px，
+   * 座位面板收在上下两侧，公共牌区与底池都不再被压住。
+   * 轮次标签原本在公共牌上方独占一行，这里让 `.board` 横排（标签在左、牌在右）。
+   *
+   * 边池明细行（.pots）在这一档隐藏：它会把底池那一行撑到 ~277px，再加上公共牌就比
+   * 两侧座位之间的净宽还宽（实测 740×360 会压住座位面板整 17px）。底池总额仍在底池胶囊里，
+   * 明细由屏幕阅读器读同一处的 sr-only 文本，结算叠层与手牌历史里也照常列出。
+   */
   .center {
-    top: 36%;
+    top: 50%;
+    gap: 2px;
+  }
+
+  .center > :deep(.board) {
+    grid-auto-flow: column;
+    align-items: center;
+    column-gap: 6px;
+    row-gap: 0;
+  }
+
+  /* 公共牌小一档：中心块宽度直接决定它与两侧座位面板之间的净宽。
+     42px 时净宽只剩 1px（字体或文案一变就会压上），38px 能留出 6px。 */
+  .center :deep(.board .card--md) {
+    --cw: 38px;
+  }
+
+  .center :deep(.board .slot--empty) {
+    width: 38px;
+    height: 53px;
+  }
+
+  .pots {
+    display: none;
   }
 
   .pot b {

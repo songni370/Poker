@@ -115,8 +115,14 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
       <span v-else-if="seat.allIn" class="flag flag--allin" aria-hidden="true">ALL IN</span>
     </div>
 
-    <!-- 状态行：文本形式（不仅靠颜色）。 -->
-    <p v-if="isActing || statusText || lastActionText" class="status">
+    <!-- 状态行：文本形式（不仅靠颜色）。
+         is-action-only 只说明「上一手做了什么」，矮屏/竖屏可以让位给公共牌；
+         已弃牌、全下、断线、轮到你这些状态永远不会被隐藏。 -->
+    <p
+      v-if="isActing || statusText || lastActionText"
+      class="status"
+      :class="{ 'is-action-only': !isActing && !statusText && Boolean(lastActionText) }"
+    >
       <span v-if="isActing" class="turn">YOUR TURN</span>
       <span v-else-if="statusText" class="state">{{ statusText }}</span>
       <span v-else-if="lastActionText" class="state">{{ lastActionText }}</span>
@@ -301,7 +307,8 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
 /* 竖屏窄屏：座位收窄到桌面内，避免横向溢出。 */
 @media (max-width: 560px) and (orientation: portrait) {
   .seat {
-    width: 108px;
+    /* 走变量：牌桌会给「贴边座位」单独设一个更窄的 --seat-w（见 PokerTable 竖屏规则）。 */
+    width: var(--seat-w, 108px);
   }
 
   .avatar {
@@ -320,6 +327,24 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   .name {
     font-size: 0.74rem;
   }
+
+  /*
+   * 竖屏只有 ~358px 宽、9 个座位环成一圈：座位面板每高 10px，公共牌就被吃掉 10px。
+   * 这里只保留「头像 + 昵称 + 筹码」，面板从 ~105px 收到 ~47px，公共牌区不再被压住：
+   *   - 底牌：本人底牌在下方操作区有大图；他人只画背面，弃牌/全下的状态由面板淡化与 ALL IN 标记给出；
+   *   - 「上一手动作」文本：下注筹码本身就在桌上显示金额；
+   *   - 行动提示：本人由底部 YOUR TURN + 进度条给出，他人由操作区的「等待 X 行动」给出；
+   *   - 已弃牌 / 全下 / 已断线 / 轮到你的文本状态一律保留（不靠颜色区分）。
+   */
+  .seat .cards,
+  .seat .status.is-action-only {
+    display: none;
+  }
+
+  .is-hero .status,
+  .is-hero .timer {
+    display: none;
+  }
 }
 
 @media (max-height: 430px) {
@@ -334,29 +359,19 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
    * 时底池被完全盖住）。这里让所有座位只保留「姓名 + 筹码」两项关键信息：
    *   - 头像与光环让位；行动提示仍由「面板描边 + YOUR TURN 文本 + 进度条」三重给出；
    *   - 本人座位的底牌在下方操作区已有大图，座位里重复的小牌一并省掉。
-   * 面板因此缩到 ~55px，公共牌与底池不再被遮挡。
+   *
+   * 进一步：状态行（YOUR TURN + 进度条、上一手动作文字）让面板从 47px 长到 67px，
+   * 在 118px 高的桌面上必然重新压住公共牌。因此矮屏连状态行一起收起：
+   *   - 轮到本人：底部操作区有 YOUR TURN + 秒数 + 整条进度条，信息不丢；
+   *   - 轮到别人：操作区显示「等待 X 行动」，也是文本；
+   *   - 已弃牌 / 全下 / 已断线：仍由面板淡化、ALL IN 标记、断线图标与虚线边框给出（不靠颜色）。
    */
   .seat .avatar,
   .seat .seat-aura,
-  .seat .cards {
+  .seat .cards,
+  .seat .status,
+  .seat .timer {
     display: none;
-  }
-
-  .status {
-    font-size: 0.62rem;
-  }
-
-  .avatar {
-    width: 28px;
-    height: 28px;
-    font-size: 0.85rem;
-  }
-
-  .seat-aura {
-    left: 8px;
-    width: 28px;
-    height: 28px;
-    margin-top: -14px;
   }
 
   .name {
