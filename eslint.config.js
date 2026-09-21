@@ -4,7 +4,7 @@ import pluginVue from 'eslint-plugin-vue'
 import globals from 'globals'
 
 export default tseslint.config(
-  { ignores: ['dist/**', 'data/**', 'node_modules/**', '.skill-sources/**', '.dsh/**', '.agents/**', 'artifacts/**'] },
+  { ignores: ['dist/**', 'data/**', 'node_modules/**', '.skill-sources/**', '.dsh/**', '.agents/**', 'artifacts/**', 'test-results/**', 'playwright-report/**'] },
   js.configs.recommended,
   tseslint.configs.recommended,
   pluginVue.configs['flat/essential'],

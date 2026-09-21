@@ -30,11 +30,16 @@ npm run dev        # 客户端 http://localhost:5173 · 服务端 http://localho
 | `npm run typecheck` | `vue-tsc`（客户端）+ `tsc`（服务端） |
 | `npm run lint` | ESLint |
 | `npm test` | Node 内置测试运行器（原生跑 TypeScript，无额外框架） |
-| `npm run e2e` | 真实 Chrome 双会话端到端：建房 → 邀请加入 → **对局中刷新页面** → 打完一手 → 开始下一手（需先 `npm run build && npm start`） |
+| `npm run e2e` | Playwright + 真实 Chrome 端到端：单端口部署验收、两个独立浏览器上下文打完一手（含**摊牌前不泄露对手底牌**断言与**对局中刷新恢复**）、手机横屏无横向溢出 |
+| `npm run check:deploy` | 对已启动的服务做单进程部署自检（网页/API/WebSocket 同端口、无外部服务依赖） |
+| `npm run backup` | SQLite 备份与恢复演练（独立库：备份 → 校验 → 删除原库 → 恢复 → 重启验证） |
 
-`npm run e2e` 只通过 Chrome DevTools Protocol 驱动两个**相互隔离的浏览器上下文**（各自独立的 localStorage），
-不引入 Playwright 等依赖；截图输出到 `artifacts/e2e/`。若受限环境里 Chrome 自身沙箱无法初始化，
-脚本会加 `--no-sandbox`（仅访问本机页面、一次性临时用户目录）。
+`npm run e2e` 使用 **Playwright**（`@playwright/test`，Apache-2.0）驱动两个相互隔离的浏览器上下文，
+直接复用系统已安装的 Google Chrome（`channel: 'chrome'`，不额外下载浏览器内核），
+并用独立端口 + 独立数据库启动一次生产进程，因此随时可跑、不影响正在服务的实例。
+受限环境里 Chrome 自身沙箱可能无法初始化，故带 `--no-sandbox`（仅访问本机页面）。截图输出到 `artifacts/e2e/`。
+
+部署、升级、备份与发布前检查清单见 [`docs/DEPLOY.md`](docs/DEPLOY.md)。
 
 ## 架构（不可妥协的约束）
 

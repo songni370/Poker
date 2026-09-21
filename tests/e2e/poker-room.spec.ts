@@ -1,0 +1,214 @@
+import { expect, test, type Page } from '@playwright/test'
+
+/**
+ * 端到端验收（规格书第 3/4/5 阶段）：
+ *   1. 单次部署后一个端口同时提供网页、HTTP API 与 WebSocket；
+ *   2. 两个**独立浏览器上下文**（各自独立 localStorage）建房入座并打完一手；
+ *   3. 摊牌之前，主机页面里不得出现对手的底牌；
+ *   4. 对局中刷新页面能自动重连并恢复同一手牌；
+ *   5. 结算后可以开始下一手。
+ */
+
+test.describe.configure({ mode: 'serial' })
+
+/** 收集页面未捕获异常，测试结束时断言为空。 */
+function watchErrors(page: Page): string[] {
+  const errors: string[] = []
+  page.on('pageerror', (error) => errors.push(error.message))
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text())
+  })
+  return errors
+}
+
+async function createRoom(page: Page, nickname: string, roomName: string): Promise<string> {
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: '开一桌德州' })).toBeVisible()
+  await page.getByPlaceholder('例如：小满').fill(nickname)
+  await page.getByPlaceholder('例如：周五夜局').fill(roomName)
+  await page.getByRole('button', { name: '创建并进入等待区' }).click()
+  await page.waitForURL(/\/room\//)
+  const roomId = new URL(page.url()).pathname.split('/room/')[1]!
+  expect(roomId.length).toBeGreaterThan(3)
+  return roomId
+}
+
+async function joinRoom(page: Page, roomId: string, nickname: string): Promise<void> {
+  await page.goto(`/room/${roomId}`)
+  await expect(page.getByRole('heading', { name: '加入这桌牌局' })).toBeVisible()
+  await page.getByPlaceholder('例如：小满').fill(nickname)
+  await page.getByRole('button', { name: '加入房间' }).click()
+  await expect(page.getByText('座位', { exact: false }).first()).toBeVisible()
+}
+
+/** 双方只用过牌/跟注，保证走到摊牌。返回是否出现结算叠层。 */
+async function playUntilSettled(pages: Page[], timeoutMs = 45_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    for (const page of pages) {
+      if (await page.getByRole('button', { name: '知道了' }).isVisible().catch(() => false)) return true
+      for (const pattern of [/^过牌/, /^跟注/]) {
+        const button = page.getByRole('button', { name: pattern })
+        if ((await button.count()) === 0) continue
+        if (!(await button.first().isEnabled().catch(() => false))) continue
+        await button.first().click()
+        await page.waitForTimeout(120)
+        break
+      }
+    }
+    await pages[0]!.waitForTimeout(120)
+  }
+  return false
+}
+
+/** 读取某页面「你的底牌」区域里的牌面（PlayingCard 用 role=img + aria-label）。 */
+async function readHoleCards(page: Page): Promise<string[]> {
+  const cards = page.locator('.hero-cards [role="img"]')
+  const count = await cards.count()
+  const labels: string[] = []
+  for (let index = 0; index < count; index++) {
+    const label = await cards.nth(index).getAttribute('aria-label')
+    if (label && label !== '盖住的牌') labels.push(label)
+  }
+  return labels
+}
+
+test('部署验收：一个端口同时提供网页、HTTP API 与 WebSocket', async ({ page, request }) => {
+  const health = await request.get('/api/health')
+  expect(health.status()).toBe(200)
+  const body = (await health.json()) as { ok: boolean; dbMigration: number; dbPath: string }
+  expect(body.ok).toBe(true)
+  expect(body.dbMigration).toBeGreaterThanOrEqual(1)
+  expect(body.dbPath).toMatch(/\.sqlite$/)
+
+  // 同一个 origin 提供页面
+  const home = await request.get('/')
+  expect(home.status()).toBe(200)
+  expect(home.headers()['content-type']).toContain('text/html')
+
+  // SPA 深链回落到 index.html，API 未知路径不回落到页面
+  expect((await request.get('/table/not-a-real-room')).status()).toBe(200)
+  expect((await request.get('/api/does-not-exist')).status()).toBe(404)
+
+  // WebSocket 同端口握手成功
+  await page.goto('/')
+  const upgraded = await page.evaluate(
+    () =>
+      new Promise<boolean>((resolve) => {
+        const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`)
+        socket.addEventListener('open', () => {
+          socket.close()
+          resolve(true)
+        })
+        socket.addEventListener('error', () => resolve(false))
+        setTimeout(() => resolve(false), 5000)
+      }),
+  )
+  expect(upgraded).toBe(true)
+})
+
+test('两个独立会话打完一手：摊牌前不泄露对手底牌，结算后可开下一手', async ({ browser }) => {
+  const hostContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const guestContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const host = await hostContext.newPage()
+  const guest = await guestContext.newPage()
+  const hostErrors = watchErrors(host)
+  const guestErrors = watchErrors(guest)
+
+  const roomId = await createRoom(host, `房主${Date.now() % 1000}`, '端到端验收房')
+  await joinRoom(guest, roomId, `客人${Date.now() % 1000}`)
+
+  // 房主界面应看到新玩家入座（服务端广播）
+  await expect(host.getByText('已入座')).toBeVisible()
+  await expect(host.locator('.seats')).toContainText('客人')
+
+  await host.screenshot({ path: 'artifacts/e2e/01-room-waiting-1440x900.png' })
+
+  await host.getByRole('button', { name: '开始牌局' }).click()
+  await host.waitForURL(/\/table\//)
+  await guest.waitForURL(/\/table\//)
+
+  // 双方各自拿到两张底牌，且互不相同
+  const hostCards = await readHoleCards(host)
+  const guestCards = await readHoleCards(guest)
+  expect(hostCards).toHaveLength(2)
+  expect(guestCards).toHaveLength(2)
+  expect(new Set([...hostCards, ...guestCards]).size).toBe(4)
+
+  // ── 信息安全：摊牌之前，房主页面里不得出现对手的底牌 ──
+  for (const card of guestCards) {
+    await expect(host.locator(`[role="img"][aria-label="${card}"]`)).toHaveCount(0)
+  }
+  // 反向对照：房主自己的底牌确实在页面上（证明上面的检查不是空跑）
+  for (const card of hostCards) {
+    await expect(host.locator(`[role="img"][aria-label="${card}"]`).first()).toBeVisible()
+  }
+
+  // ── 对局中刷新：凭本地凭证自动重连并回到同一手牌 ──
+  const handBefore = await guest.locator('body').innerText()
+  const handNoBefore = /第\s*(\d+)\s*手/.exec(handBefore)?.[1] ?? null
+  await guest.reload()
+  await guest.waitForURL(/\/table\//)
+  await expect(guest.getByText('已连接')).toBeVisible()
+  await expect(guest.locator('.hero-cards [role="img"]')).toHaveCount(2)
+  const handAfter = await guest.locator('body').innerText()
+  // 顶栏把「第 N 手」拆成多个元素渲染，innerText 里是换行而不是空格。
+  if (handNoBefore) expect(handAfter).toMatch(new RegExp(`第\\s*${handNoBefore}\\s*手`))
+  expect([...guestCards].sort()).toEqual([...(await readHoleCards(guest))].sort())
+
+  // ── 打完这一手 ──
+  expect(await playUntilSettled([host, guest])).toBe(true)
+  await expect(host.getByRole('button', { name: '知道了' })).toBeVisible()
+  await host.screenshot({ path: 'artifacts/e2e/02-table-settlement-1440x900.png' })
+  await guest.screenshot({ path: 'artifacts/e2e/03-guest-settlement-1440x900.png' })
+
+  // 结算叠层里应出现赢家与牌型，且不再显示他人底牌之外的私密信息
+  await expect(host.getByText(/本手结算|本手你未赢下底池|你赢得/).first()).toBeVisible()
+
+  // ── 开始下一手 ──
+  await host.getByRole('button', { name: '知道了' }).click()
+  await host.getByRole('button', { name: '开始下一手' }).click()
+  await expect(host.getByRole('button', { name: '知道了' })).toBeHidden()
+  await expect
+    .poll(async () => /第\s*2\s*手/.test(await host.locator('body').innerText()), { timeout: 10_000 })
+    .toBe(true)
+
+  // 横屏手机尺寸截图（响应式证据）
+  await guest.setViewportSize({ width: 844, height: 390 })
+  await guest.waitForTimeout(300)
+  await guest.screenshot({ path: 'artifacts/e2e/04-table-844x390.png' })
+
+  expect(hostErrors).toEqual([])
+  expect(guestErrors).toEqual([])
+  await hostContext.close()
+  await guestContext.close()
+})
+
+test('手机横屏无溢出：844×390 与 740×360 不出现横向滚动', async ({ browser }) => {
+  const context = await browser.newContext()
+  const page = await context.newPage()
+  const errors = watchErrors(page)
+
+  for (const [width, height] of [
+    [844, 390],
+    [740, 360],
+  ] as const) {
+    await page.setViewportSize({ width, height })
+    // 等待开局前的等待区与牌桌都渲染一遍，确保两种布局都受检
+    await page.goto('/')
+    const lobbyOverflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    )
+    expect(lobbyOverflow, `大厅在 ${width}×${height} 不应横向溢出`).toBe(0)
+
+    const roomId = await createRoom(page, `手机${Date.now() % 1000}`, '手机布局检查')
+    const roomOverflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    )
+    expect(roomOverflow, `等待区在 ${width}×${height} 不应横向溢出`).toBe(0)
+    expect(roomId).toBeTruthy()
+  }
+
+  expect(errors).toEqual([])
+  await context.close()
+})

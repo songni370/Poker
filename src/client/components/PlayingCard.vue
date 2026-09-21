@@ -104,6 +104,21 @@ const segments = computed<readonly string[]>(() => (rank.value ? SEGMENTS[rank.v
 
 <style scoped>
 .card {
+  /* 发牌/亮牌：新建的牌淡入（元素复用不会重播），只动 opacity，合成层友好。
+     prefers-reduced-motion 由 theme.css 的全局规则统一关闭。 */
+  animation: card-in 200ms ease-out both;
+}
+
+@keyframes card-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.card {
   position: relative;
   display: block;
   flex: none;

@@ -61,6 +61,9 @@ body {
 
 #app {
   min-height: 100dvh;
+  /* 刘海/圆角屏：内容不越出安全区（viewport-fit=cover 时必须自己处理）。 */
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
 }
 
 h1,
@@ -69,6 +72,31 @@ h3 {
   margin: 0;
   font-weight: 600;
   letter-spacing: 0.01em;
+  /* 避免标题在窄屏出现孤字。 */
+  text-wrap: balance;
+}
+
+html {
+  /* 移动端点按高亮统一成品牌金的淡色，而不是系统默认的蓝框。 */
+  -webkit-tap-highlight-color: color-mix(in srgb, var(--gold) 22%, transparent);
+}
+
+/* 触控：去掉 300ms 双击缩放延迟。 */
+button,
+a,
+input,
+select,
+label,
+[role='button'] {
+  touch-action: manipulation;
+}
+
+/* 抽屉/对话框内部滚动不把滚动链传给页面。 */
+.p-drawer,
+.p-dialog,
+.p-drawer-content,
+.p-dialog-content {
+  overscroll-behavior: contain;
 }
 
 /* 键盘可达性：所有可交互元素保留可见焦点环。 */

@@ -770,7 +770,13 @@ export class HoldemTable {
       ...snapshot.seats.flatMap((entry) => [...entry.holeCards, ...(entry.revealedCards ?? [])]),
     ]
     if (new Set(allCards).size !== allCards.length) throw new EngineError('bad_state', '快照出现重复的牌')
-    if (allCards.length !== 52) throw new EngineError('bad_state', `快照牌数不为 52：${String(allCards.length)}`)
+    if (snapshot.phase === 'waiting') {
+      // 还没开过手：不该有任何已发出的牌（此时牌堆本来就是空的）。
+      if (allCards.length > 0) throw new EngineError('bad_state', '未开局快照不应含已发出的牌')
+    } else if (allCards.length !== 52) {
+      // 手牌进行中：牌堆 + 已发出的牌必须刚好是完整一副。
+      throw new EngineError('bad_state', `快照牌数不为 52：${String(allCards.length)}`)
+    }
 
     if (snapshot.handId !== null && snapshot.phase === 'waiting') {
       throw new EngineError('bad_state', '快照状态与手牌 ID 不一致')

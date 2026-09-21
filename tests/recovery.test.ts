@@ -275,6 +275,43 @@ test('单进程重启：从 SQLite 快照恢复一致牌局，继续打完且不
   assert.equal(Number(rows2.c), 1, '二次重启后仍只有一条结算记录')
 })
 
+test('重启恢复：从未开过手的等待房间也必须存活（无牌堆的快照不算损坏）', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'poker-waiting-'))
+  const dbPath = join(dir, 'poker.sqlite')
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+
+  const first = await startServer(dbPath)
+  const host = await postJson<RoomCredentials>(`${first.base}/api/rooms`, {
+    nickname: '房主',
+    roomName: '等待中的房',
+    maxSeats: 3,
+  })
+  await postJson<RoomCredentials>(`${first.base}/api/rooms/${host.roomId}/join`, { nickname: '先到的' })
+  await first.stop()
+
+  const second = await startServer(dbPath)
+  t.after(second.stop)
+
+  assert.equal(second.rooms.roomCount(), 1, '等待中的房间应被恢复进内存，而不是被当成损坏快照关闭')
+  const response = await fetch(`${second.base}/api/rooms/${host.roomId}`)
+  assert.equal(response.status, 200, '恢复后邀请链接仍可访问')
+  const info = (await response.json()) as { roomName: string; seated: number; maxSeats: number }
+  assert.equal(info.roomName, '等待中的房')
+  assert.equal(info.seated, 2, '两名玩家都应还在座位上')
+  assert.equal(info.maxSeats, 3)
+
+  // 恢复后仍能正常开局
+  const reconnect = new TestClient(second.wsUrl)
+  t.after(() => reconnect.close())
+  await reconnect.open()
+  reconnect.send(joinCommand(host))
+  await reconnect.waitFor((m) => m.type === 'connection.recovered')
+  reconnect.send({ type: 'game.start', requestId: rid() })
+  const started = await reconnect.waitFor((m) => m.type === 'hand.started')
+  assert.ok(started.type === 'hand.started')
+  assert.equal(started.state.seats.filter(Boolean).length, 2)
+})
+
 test('重启后按持久化的截止时间判定超时：已过期则立即执行一次自动动作', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'poker-timeout-'))
   const dbPath = join(dir, 'poker.sqlite')
