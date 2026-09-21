@@ -89,8 +89,11 @@ function dealerStyle(index: number): Record<string, string> {
 function seatStyle(index: number): Record<string, string> {
   const { angle } = polarFor(index)
   // y 方向的半径由 CSS 变量控制，小屏时自动收窄，避免座位越出桌面。
+  // x 方向额外用 clamp 按「座位面板自身宽度的一半」收边：锚点是百分比而面板是固定宽度，
+  // 窄屏时最左/最右的座位必然顶出桌子，造成横向溢出。
+  const edge = 'var(--seat-w, 144px) / 2 + 4px'
   return {
-    left: `calc(50% + var(--seat-anchor-x, ${String(RX)}%) * ${String(Math.cos(angle))})`,
+    left: `clamp(calc(${edge}), calc(50% + var(--seat-anchor-x, ${String(RX)}%) * ${String(Math.cos(angle))}), calc(100% - ${edge}))`,
     top: `calc(50% + var(--seat-anchor-y, ${String(RY)}%) * ${String(Math.sin(angle))})`,
   }
 }
@@ -99,6 +102,9 @@ function chipStyle(index: number): Record<string, string> {
   const { x, y } = offsetFor(index)
   return { left: `${String(x)}%`, top: `${String(y)}%` }
 }
+
+/** 已入座人数：用于空桌引导与状态播报。 */
+const seatedCount = computed(() => props.seats.filter(Boolean).length)
 
 /** 桌面中央的一句话状态，用 aria-live 播报给屏幕阅读器。 */
 const tableStatus = computed(() => {
@@ -114,6 +120,11 @@ const tableStatus = computed(() => {
       <span class="betting-line" aria-hidden="true" />
 
       <div class="center">
+        <!-- 空桌：给一句可执行的引导，而不是空荡荡的桌面。 -->
+        <p v-if="seatedCount === 0" class="empty-state">
+          还没有人入座，把房间链接发给朋友即可开局。
+        </p>
+
         <p class="pot">
           <span class="pot-label">底池</span>
           <b class="num">{{ potTotal }}</b>
@@ -236,6 +247,16 @@ const tableStatus = computed(() => {
   color: var(--gold);
 }
 
+.empty-state {
+  margin: 0;
+  padding: 4px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--gold-dim);
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
 .pots {
   display: flex;
   gap: 10px;
@@ -315,6 +336,8 @@ const tableStatus = computed(() => {
     --seat-anchor-y: 45%;
     /* 椭圆横向半径收窄，座位面板不越出屏幕（无横向滚动）。 */
     --seat-anchor-x: 43%;
+    /* 座位面板同时收窄，9 人桌在竖屏下才不会互相压住。 */
+    --seat-w: 104px;
   }
 }
 
@@ -324,6 +347,8 @@ const tableStatus = computed(() => {
     --table-h: min(35vh, 118px);
     /* 座位锚点向内收：顶部座位不越出桌面，底部座位不压住公共牌。 */
     --seat-anchor-y: 46%;
+    /* 横屏手机同样收窄座位面板，给公共牌与操作区留出宽度。 */
+    --seat-w: 116px;
   }
 
   /* 公共牌整体上移，与本人座位面板拉开距离。 */

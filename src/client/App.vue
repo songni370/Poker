@@ -25,7 +25,10 @@ import { RouterView } from 'vue-router'
   left: var(--space-2);
   top: -60px;
   z-index: 40;
-  padding: 10px 14px;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 14px;
   background: var(--gold);
   color: var(--bg);
   font-weight: 600;

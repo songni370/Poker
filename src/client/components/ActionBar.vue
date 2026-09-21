@@ -226,12 +226,24 @@ const liveText = computed(() => {
           :show-buttons="showStepper"
           button-layout="horizontal"
           :max-fraction-digits="0"
+          :pt="{
+            pcInputText: { root: { 'aria-label': '下注金额' } },
+            incrementButton: { 'aria-hidden': 'true', tabindex: '-1' },
+            decrementButton: { 'aria-hidden': 'true', tabindex: '-1' },
+          }"
           fluid
         />
       </label>
 
       <div class="slider">
-        <Slider v-model="amount" :min="minAmount" :max="maxAmount" :step="10" aria-label="下注金额滑块" />
+        <Slider
+          v-model="amount"
+          :min="minAmount"
+          :max="maxAmount"
+          :step="10"
+          aria-label="下注金额滑块"
+          :style="{ '--p-slider-handle-width': '28px', '--p-slider-handle-height': '28px' }"
+        />
       </div>
 
       <div class="quick">
@@ -357,6 +369,7 @@ const liveText = computed(() => {
 .slider {
   flex: 1 1 160px;
   min-width: 140px;
+  /* 上下留白 + 加大手柄，让滑块更容易点中。 */
   padding: 10px 2px;
 }
 
@@ -417,6 +430,10 @@ const liveText = computed(() => {
   .sizing {
     gap: 6px;
     padding-top: 0;
+  }
+
+  .slider {
+    padding: 10px 2px;
   }
 }
 

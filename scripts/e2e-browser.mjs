@@ -5,6 +5,7 @@
 // 环境变量：E2E_BASE_URL、E2E_OUT_DIR、CHROME_PATH、E2E_DEBUG_PORT
 import { spawn } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -224,9 +225,9 @@ async function main() {
   mkdirSync(OUT_DIR, { recursive: true })
   await waitForHttp(`${BASE}/api/health`)
 
-  // 固定复用同一个 profile 目录：每次新建 --user-data-dir 会让 macOS 把 Chrome
-  // 当成一个全新实例，Dock 里就会不停冒出新的图标。
-  const profileDir = process.env.E2E_PROFILE_DIR ?? join(OUT_DIR, 'chrome-profile')
+  // 固定复用同一个 profile 目录（放在系统临时目录，不污染仓库）：
+  // 每次新建 --user-data-dir 会让 macOS 把 Chrome 当成一个全新实例，Dock 里就会不停冒出新的图标。
+  const profileDir = process.env.E2E_PROFILE_DIR ?? join(tmpdir(), 'poker-e2e-chrome-profile')
   mkdirSync(profileDir, { recursive: true })
   const chrome = spawn(
     CHROME,
