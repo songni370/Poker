@@ -1804,7 +1804,8 @@ async function leaveTable(): Promise<void> {
   flex-wrap: nowrap;
   gap: 6px;
   min-width: 0;
-  padding-bottom: 2px;
+  /* 滚动容器会裁掉溢出内容，这里留出内边距，键盘焦点环（outline-offset: 2px）不被切掉。 */
+  padding: 3px 3px 4px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scrollbar-width: thin;
