@@ -61,6 +61,52 @@ interface Seat extends Omit<EngineSeatPublic, 'revealedCards'> {
   pendingLeave: boolean
 }
 
+export const TABLE_SNAPSHOT_VERSION = 1
+
+export interface SeatSnapshot {
+  playerId: string
+  nickname: string
+  seat: number
+  stack: number
+  inHand: boolean
+  folded: boolean
+  allIn: boolean
+  committedStreet: number
+  committedHand: number
+  lastAction: ActionType | null
+  holeCards: Card[]
+  revealedCards: Card[] | null
+  pendingLeave: boolean
+}
+
+/**
+ * 引擎的完整私有状态快照（含牌堆位置与所有人底牌）。
+ * 只允许写入服务端 SQLite 的 room_snapshots，绝不整体下发客户端。
+ */
+export interface TableSnapshot {
+  schemaVersion: number
+  config: TableConfig
+  seats: SeatSnapshot[]
+  deck: Card[]
+  burn: Card[]
+  board: Card[]
+  phase: HandPhase
+  street: Street | null
+  handId: string | null
+  handNo: number
+  buttonSeat: number | null
+  smallBlindSeat: number | null
+  bigBlindSeat: number | null
+  actingSeat: number | null
+  firstToActSeat: number | null
+  actionCursor: number | null
+  currentBet: number
+  minRaise: number
+  needsToAct: number[]
+  raiseAllowed: [number, boolean][]
+  result: HandResultPublic | null
+}
+
 /**
  * 无框架依赖的无限注德州扑克牌桌状态机。
  * 唯一真相来源：牌堆、底牌、筹码、轮次与行动权全部在这里裁定。
@@ -594,5 +640,164 @@ export class HoldemTable {
       })),
       result: this.result,
     }
+  }
+
+  /* ───────────────────────── 可恢复快照（第 4 阶段） ───────────────────────── */
+
+  /**
+   * 导出完整私有状态（含牌堆位置与所有人底牌）。
+   * 这份数据**只允许写入服务端 SQLite**，绝不整体下发给客户端。
+   */
+  serialize(): TableSnapshot {
+    return {
+      schemaVersion: TABLE_SNAPSHOT_VERSION,
+      config: { ...this.config },
+      seats: this.seats.map((seat) => ({
+        playerId: seat.playerId,
+        nickname: seat.nickname,
+        seat: seat.seat,
+        stack: seat.stack,
+        inHand: seat.inHand,
+        folded: seat.folded,
+        allIn: seat.allIn,
+        committedStreet: seat.committedStreet,
+        committedHand: seat.committedHand,
+        lastAction: seat.lastAction,
+        holeCards: [...seat.holeCards],
+        revealedCards: seat.revealedCards ? [...seat.revealedCards] : null,
+        pendingLeave: seat.pendingLeave,
+      })),
+      deck: [...this.deck],
+      burn: [...this.burn],
+      board: [...this.board],
+      phase: this.phase,
+      street: this.street,
+      handId: this.handId,
+      handNo: this.handNo,
+      buttonSeat: this.buttonSeat,
+      smallBlindSeat: this.smallBlindSeat,
+      bigBlindSeat: this.bigBlindSeat,
+      actingSeat: this.actingSeat,
+      firstToActSeat: this.firstToActSeat,
+      actionCursor: this.actionCursor,
+      currentBet: this.currentBet,
+      minRaise: this.minRaise,
+      needsToAct: [...this.needsToAct],
+      raiseAllowed: [...this.raiseAllowed.entries()],
+      result: this.result ? { ...this.result } : null,
+    }
+  }
+
+  /** 从快照重建牌桌；结构不一致直接抛错，由调用方决定是否放弃该房间。 */
+  static restore(snapshot: TableSnapshot): HoldemTable {
+    if (!snapshot || snapshot.schemaVersion !== TABLE_SNAPSHOT_VERSION) {
+      throw new EngineError('bad_state', `快照版本不兼容：${String(snapshot?.schemaVersion)}`)
+    }
+    if (
+      !Array.isArray(snapshot.seats) ||
+      !Array.isArray(snapshot.deck) ||
+      !Array.isArray(snapshot.burn) ||
+      !Array.isArray(snapshot.board) ||
+      !Array.isArray(snapshot.needsToAct) ||
+      !Array.isArray(snapshot.raiseAllowed) ||
+      typeof snapshot.config !== 'object' ||
+      snapshot.config === null
+    ) {
+      throw new EngineError('bad_state', '快照结构损坏')
+    }
+    const { config } = snapshot
+    if (
+      !Number.isInteger(config.smallBlind) ||
+      !Number.isInteger(config.bigBlind) ||
+      config.smallBlind <= 0 ||
+      config.bigBlind < config.smallBlind ||
+      !Number.isInteger(config.startingStack) ||
+      config.startingStack <= 0 ||
+      !Number.isInteger(config.maxSeats) ||
+      config.maxSeats < 2 ||
+      config.maxSeats > 9
+    ) {
+      throw new EngineError('bad_state', '快照中的桌规不合法')
+    }
+
+    const table = new HoldemTable({ ...config })
+    const seenSeatNumbers = new Set<number>()
+    const seenPlayerIds = new Set<string>()
+
+    table.seats = snapshot.seats.map((entry) => {
+      if (!Number.isInteger(entry.seat) || entry.seat < 0 || entry.seat >= config.maxSeats) {
+        throw new EngineError('bad_state', `快照座位号越界：${String(entry.seat)}`)
+      }
+      if (seenSeatNumbers.has(entry.seat)) throw new EngineError('bad_state', '快照座位号重复')
+      if (seenPlayerIds.has(entry.playerId)) throw new EngineError('bad_state', '快照玩家重复')
+      seenSeatNumbers.add(entry.seat)
+      seenPlayerIds.add(entry.playerId)
+      if (entry.stack < 0 || entry.committedStreet < 0 || entry.committedHand < 0) {
+        throw new EngineError('bad_state', '快照出现负筹码')
+      }
+      if (entry.committedStreet > entry.committedHand) {
+        throw new EngineError('bad_state', '快照中本轮投入大于本手投入')
+      }
+      if (entry.folded && entry.allIn) throw new EngineError('bad_state', '快照同时标记弃牌与全下')
+      if (entry.holeCards.length > 2) throw new EngineError('bad_state', '快照底牌超过两张')
+      return {
+        playerId: entry.playerId,
+        nickname: entry.nickname,
+        seat: entry.seat,
+        stack: entry.stack,
+        inHand: entry.inHand,
+        folded: entry.folded,
+        allIn: entry.allIn,
+        committedStreet: entry.committedStreet,
+        committedHand: entry.committedHand,
+        lastAction: entry.lastAction,
+        holeCards: [...entry.holeCards],
+        revealedCards: entry.revealedCards ? [...entry.revealedCards] : null,
+        pendingLeave: entry.pendingLeave,
+      }
+    })
+    table.seats.sort((a, b) => a.seat - b.seat)
+
+    if (snapshot.board.length !== 0 && snapshot.board.length !== 3 && snapshot.board.length !== 4 && snapshot.board.length !== 5) {
+      throw new EngineError('bad_state', `快照公共牌数量异常：${String(snapshot.board.length)}`)
+    }
+
+    // 全局查重：牌堆 + 弃牌 + 公共牌 + 所有底牌之间不允许出现同一张牌。
+    const allCards = [
+      ...snapshot.deck,
+      ...snapshot.burn,
+      ...snapshot.board,
+      ...snapshot.seats.flatMap((entry) => [...entry.holeCards, ...(entry.revealedCards ?? [])]),
+    ]
+    if (new Set(allCards).size !== allCards.length) throw new EngineError('bad_state', '快照出现重复的牌')
+    if (allCards.length !== 52) throw new EngineError('bad_state', `快照牌数不为 52：${String(allCards.length)}`)
+
+    if (snapshot.handId !== null && snapshot.phase === 'waiting') {
+      throw new EngineError('bad_state', '快照状态与手牌 ID 不一致')
+    }
+    if (snapshot.actingSeat !== null && !snapshot.needsToAct.includes(snapshot.actingSeat)) {
+      throw new EngineError('bad_state', '快照行动者不在待行动集合中')
+    }
+
+    table.deck = [...snapshot.deck]
+    table.burn = [...snapshot.burn]
+    table.board = [...snapshot.board]
+    table.phase = snapshot.phase
+    table.street = snapshot.street
+    table.handId = snapshot.handId
+    table.handNo = snapshot.handNo
+    table.buttonSeat = snapshot.buttonSeat
+    table.smallBlindSeat = snapshot.smallBlindSeat
+    table.bigBlindSeat = snapshot.bigBlindSeat
+    table.actingSeat = snapshot.actingSeat
+    table.firstToActSeat = snapshot.firstToActSeat
+    table.actionCursor = snapshot.actionCursor
+    table.currentBet = snapshot.currentBet
+    table.minRaise = snapshot.minRaise
+    table.needsToAct = new Set(snapshot.needsToAct)
+    table.raiseAllowed = new Map(snapshot.raiseAllowed)
+    table.result = snapshot.result ? { ...snapshot.result } : null
+
+    return table
   }
 }

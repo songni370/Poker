@@ -48,11 +48,12 @@ export async function buildApp(handle: DbHandle, options: BuildAppOptions = {}):
   const repo = new Repo(handle.db)
   const rooms = new RoomManager(repo)
   rooms.startSweeper()
-  const stale = rooms.closeStaleRooms()
-  if (stale > 0) {
-    app.log.warn(
-      { count: stale },
-      '上一次进程遗留的房间已标记为 closed（房间内存状态不跨重启，快照恢复在第 4 阶段实现）',
+  // 第 4 阶段：进程重启后从 SQLite 快照恢复未关闭房间（含牌局与牌堆位置）。
+  const recovery = rooms.restoreRooms()
+  if (recovery.restored > 0 || recovery.discarded > 0) {
+    app.log.info(
+      { restored: recovery.restored, discarded: recovery.discarded },
+      '房间恢复完成（restored=从快照恢复，discarded=快照不可用被安全关闭）',
     )
   }
 

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { EngineError, HoldemTable, cryptoRng } from '../engine/index.ts'
+import { EngineError, HoldemTable, cryptoRng, type TableSnapshot } from '../engine/index.ts'
 import { TABLE_RULES } from '../shared/poker.ts'
 import {
   ERROR_MESSAGES,
@@ -46,6 +46,39 @@ export interface ClientSocket {
   close(code?: number, reason?: string): void
 }
 
+/** 房间快照结构版本；改动结构时必须同步提升，旧快照会被安全丢弃。 */
+export const SNAPSHOT_VERSION = 1
+
+/**
+ * 房间的可恢复快照（第 4 阶段）：一房一行，含引擎私有状态（牌堆/底牌）。
+ * 只写服务端 SQLite，绝不整体下发客户端。
+ */
+export interface RoomSnapshot {
+  schemaVersion: number
+  roomId: string
+  name: string
+  hostPlayerId: string
+  maxSeats: number
+  smallBlind: number
+  bigBlind: number
+  startingStack: number
+  turnSeconds: number
+  status: RoomStatus
+  version: number
+  turnDeadlineAt: number | null
+  persistedHandId: string | null
+  members: {
+    playerId: string
+    nickname: string
+    seat: number | null
+    ready: boolean
+    isHost: boolean
+    reconnectHash: string
+  }[]
+  table: TableSnapshot
+  savedAt: number
+}
+
 interface RoomInit {
   id: string
   name: string
@@ -67,7 +100,7 @@ export class RoomRuntime {
   readonly bigBlind: number
   readonly startingStack: number
   readonly turnSeconds: number
-  readonly table: HoldemTable
+  table: HoldemTable
   readonly members = new Map<string, RoomMember>()
   readonly createdAt = Date.now()
 
@@ -95,6 +128,73 @@ export class RoomRuntime {
       startingStack: init.startingStack,
       maxSeats: init.maxSeats,
     })
+  }
+
+  /** 导出可恢复快照（含引擎私有状态）。 */
+  serialize(): RoomSnapshot {
+    return {
+      schemaVersion: SNAPSHOT_VERSION,
+      roomId: this.id,
+      name: this.name,
+      hostPlayerId: this.hostPlayerId,
+      maxSeats: this.maxSeats,
+      smallBlind: this.smallBlind,
+      bigBlind: this.bigBlind,
+      startingStack: this.startingStack,
+      turnSeconds: this.turnSeconds,
+      status: this.status,
+      version: this.version,
+      turnDeadlineAt: this.turnDeadlineAt,
+      persistedHandId: this.persistedHandId,
+      members: [...this.members.values()].map((member) => ({
+        playerId: member.playerId,
+        nickname: member.nickname,
+        seat: member.seat,
+        ready: member.ready,
+        isHost: member.isHost,
+        reconnectHash: member.reconnectHash,
+      })),
+      table: this.table.serialize(),
+      savedAt: Date.now(),
+    }
+  }
+
+  /** 从快照重建运行时；结构损坏会抛错，由调用方决定是否放弃该房间。 */
+  static fromSnapshot(snapshot: RoomSnapshot): RoomRuntime {
+    if (!snapshot || snapshot.schemaVersion !== SNAPSHOT_VERSION) {
+      throw new Error(`房间快照版本不兼容：${String(snapshot?.schemaVersion)}`)
+    }
+    if (!Array.isArray(snapshot.members)) throw new Error('房间快照结构损坏')
+    const room = new RoomRuntime({
+      id: snapshot.roomId,
+      name: snapshot.name,
+      hostPlayerId: snapshot.hostPlayerId,
+      maxSeats: snapshot.maxSeats,
+      smallBlind: snapshot.smallBlind,
+      bigBlind: snapshot.bigBlind,
+      startingStack: snapshot.startingStack,
+      turnSeconds: snapshot.turnSeconds,
+    })
+    for (const entry of snapshot.members) {
+      room.members.set(entry.playerId, {
+        playerId: entry.playerId,
+        nickname: entry.nickname,
+        seat: entry.seat,
+        ready: entry.ready,
+        isHost: entry.isHost,
+        reconnectHash: entry.reconnectHash,
+        socket: null,
+        // 重启后一律视为「曾断线」：客户端回来时走 connection.recovered，
+        // 同时让闲置回收能按这个时间点计算。
+        disconnectedAt: Date.now(),
+      })
+    }
+    room.status = snapshot.status === 'closed' ? 'waiting' : snapshot.status
+    room.version = snapshot.version
+    room.turnDeadlineAt = snapshot.turnDeadlineAt
+    room.persistedHandId = snapshot.persistedHandId
+    room.table = HoldemTable.restore(snapshot.table)
+    return room
   }
 
   /** 同一房间的所有命令、超时与状态发布都串行执行，避免并发交错。 */
@@ -138,11 +238,41 @@ export class RoomManager {
     return this.rooms.size
   }
 
-  /** 进程重启后内存房间已丢失：明确关闭遗留房间，而不是留下一个打不开的「进行中」。 */
-  closeStaleRooms(): number {
-    const stale = this.repo.openRoomIds()
-    for (const roomId of stale) this.repo.setRoomStatus(roomId, 'closed')
-    return stale.length
+  /**
+   * 启动恢复：从 room_snapshots 重建所有未关闭房间（含牌局与牌堆位置）。
+   * 快照缺失或损坏的房间会被安全关闭并记录，绝不让半个状态对外服务。
+   */
+  restoreRooms(): { restored: number; discarded: number } {
+    const rows = this.repo.loadSnapshots()
+    const restoredIds = new Set<string>()
+    let restored = 0
+    let discarded = 0
+
+    for (const row of rows) {
+      try {
+        const snapshot = JSON.parse(row.state_json) as RoomSnapshot ?? undefined
+        const room = RoomRuntime.fromSnapshot(snapshot)
+        this.rooms.set(room.id, room)
+        restoredIds.add(room.id)
+        restored += 1
+        // 恢复后立刻按持久化的截止时间接管计时（过期则立即执行一次超时动作）。
+        this.scheduleTurn(room, true)
+      } catch (error) {
+        discarded += 1
+        console.error(`[room] 房间 ${row.room_id} 的快照不可用，已关闭：`, error instanceof Error ? error.message : error)
+        this.repo.setRoomStatus(row.room_id, 'closed')
+        this.repo.deleteSnapshot(row.room_id)
+      }
+    }
+
+    // 没有快照的遗留房间（例如旧版本数据）同样关闭，避免留下打不开的「进行中」。
+    for (const roomId of this.repo.openRoomIds()) {
+      if (restoredIds.has(roomId)) continue
+      this.repo.setRoomStatus(roomId, 'closed')
+      discarded += 1
+    }
+
+    return { restored, discarded }
   }
 
   createRoom(input: { nickname: string; roomName?: string; maxSeats: number }): RoomCredentials {
@@ -186,6 +316,8 @@ export class RoomManager {
         turnSeconds: room.turnSeconds,
       })
       this.repo.upsertPlayer(this.playerRecord(room, member))
+      // 建房即落一份快照：否则「建了房但还没发过命令」的房间重启后无快照可恢复，只能被关闭。
+      this.repo.saveSnapshot(roomId, room.version, JSON.stringify(room.serialize()))
     })
 
     this.rooms.set(roomId, room)
@@ -215,7 +347,10 @@ export class RoomManager {
     room.members.set(playerId, member)
     if (seat !== null) room.table.sit(playerId, nickname, seat)
 
-    this.repo.upsertPlayer(this.playerRecord(room, member))
+    this.repo.transaction(() => {
+      this.repo.upsertPlayer(this.playerRecord(room, member))
+      this.repo.saveSnapshot(room.id, room.version, JSON.stringify(room.serialize()))
+    })
     return this.credentials(room, member, token)
   }
 
@@ -246,6 +381,7 @@ export class RoomManager {
     void room.run(() => {
       this.sendSnapshot(room, member.playerId, reconnected ? 'connection.recovered' : 'room.snapshot')
       // 全员广播：新玩家加入与重连都必须让其他人立刻看到「连接状态」变化。
+      this.bumpVersion(room)
       this.publish(room, reconnected ? 'connection.recovered' : 'room.player_joined', {
         notice: reconnected ? `${member.nickname} 已重新连接` : `${member.nickname} 加入了房间`,
       })
@@ -260,6 +396,7 @@ export class RoomManager {
     member.socket = null
     member.disconnectedAt = Date.now()
     void room.run(() => {
+      this.bumpVersion(room)
       this.persist(room)
       this.publish(room, 'hand.state_changed', { notice: `${member.nickname} 断线（座位保留至本局结束）` })
     })
@@ -302,6 +439,7 @@ export class RoomManager {
       if (room.turnTimer) clearTimeout(room.turnTimer)
       room.status = 'closed'
       this.repo.setRoomStatus(roomId, 'closed')
+      this.repo.deleteSnapshot(roomId)
       this.rooms.delete(roomId)
       closed += 1
     }
@@ -398,12 +536,15 @@ export class RoomManager {
           throw new CommandError('bad_request')
       }
 
+      // 先推进版本号并定下本回合截止时间，再连同快照一起落库：
+      // 这样快照里的 version / turnDeadlineAt 与随后广播的状态完全一致。
+      this.bumpVersion(room)
+      this.scheduleTurn(room)
       this.repo.transaction(() => {
         this.repo.saveReceipt(command.requestId, room.id, playerId, command.type, '{"ok":true}')
         this.writeState(room)
       })
       if (room.status === 'playing') this.repo.setRoomStatus(room.id, 'playing')
-      this.scheduleTurn(room)
       this.publish(room, eventType, { notice, result })
     } catch (error) {
       const code = error instanceof CommandError ? error.code : error instanceof EngineError ? this.mapEngineError(error) : 'internal'
@@ -432,7 +573,12 @@ export class RoomManager {
 
   /* ───────────────────────── 超时 ───────────────────────── */
 
-  private scheduleTurn(room: RoomRuntime): void {
+  /**
+   * 武装/重置行动计时器。
+   * keepPersistedDeadline=true 用于重启恢复：沿用快照里的截止时间，
+   * 若它已经过期则 delay=0，超时动作会立即被判定执行（而不是重新给满 20 秒）。
+   */
+  private scheduleTurn(room: RoomRuntime, keepPersistedDeadline = false): void {
     if (room.turnTimer) {
       clearTimeout(room.turnTimer)
       room.turnTimer = null
@@ -442,10 +588,16 @@ export class RoomManager {
       room.turnDeadlineAt = null
       return
     }
-    room.turnDeadlineAt = Date.now() + room.turnSeconds * 1000
-    room.turnTimer = setTimeout(() => {
-      void room.run(() => this.onTurnTimeout(room))
-    }, room.turnSeconds * 1000)
+    const now = Date.now()
+    const deadline =
+      keepPersistedDeadline && room.turnDeadlineAt !== null ? room.turnDeadlineAt : now + room.turnSeconds * 1000
+    room.turnDeadlineAt = deadline
+    room.turnTimer = setTimeout(
+      () => {
+        void room.run(() => this.onTurnTimeout(room))
+      },
+      Math.max(0, deadline - now),
+    )
   }
 
   /** 超时以服务端为准：无需跟注则自动过牌，否则自动弃牌；断线不暂停全桌。 */
@@ -464,8 +616,9 @@ export class RoomManager {
     const settled = room.table.publicState().result
     room.status = 'playing'
 
-    this.repo.transaction(() => this.writeState(room))
+    this.bumpVersion(room)
     this.scheduleTurn(room)
+    this.repo.transaction(() => this.writeState(room))
     this.publish(room, settled && settled !== settledBefore ? 'hand.settled' : 'hand.state_changed', {
       notice: `${member.nickname} 超时，系统自动${chosen.action === 'check' ? '过牌' : '弃牌'}`,
       result: settled && settled !== settledBefore ? settled : undefined,
@@ -487,7 +640,7 @@ export class RoomManager {
     }
   }
 
-  /** 必须在事务内调用。 */
+  /** 必须在事务内调用：玩家投影、手牌结算与可恢复快照一起落库。 */
   private writeState(room: RoomRuntime): void {
     for (const member of room.members.values()) this.repo.upsertPlayer(this.playerRecord(room, member))
     const result = room.table.publicState().result
@@ -495,6 +648,7 @@ export class RoomManager {
       this.repo.saveHandResult(room.id, result)
       room.persistedHandId = result.handId
     }
+    this.repo.saveSnapshot(room.id, room.version, JSON.stringify(room.serialize()))
   }
 
   private persist(room: RoomRuntime): void {
@@ -609,6 +763,11 @@ export class RoomManager {
     }
   }
 
+  /** 推进房间版本号；必须在写入快照之前调用。 */
+  private bumpVersion(room: RoomRuntime): void {
+    room.version += 1
+  }
+
   private sendTo(member: RoomMember, payload: unknown): void {
     if (member.socket && member.socket.readyState === 1) member.socket.send(JSON.stringify(payload))
   }
@@ -628,9 +787,12 @@ export class RoomManager {
     })
   }
 
-  /** 状态推送：版本号自增，所有在线成员各自收到「公共状态 + 本人私有状态」。 */
+  /**
+   * 状态推送：所有在线成员各自收到「公共状态 + 本人私有状态」。
+   * 版本号由调用方在写快照之前推进（见 bumpVersion），这样落库的版本与广播的版本一致，
+   * 重启恢复后客户端不会看到版本倒退。
+   */
   private publish(room: RoomRuntime, type: ServerEventType, extra: Partial<ServerEvent> = {}): void {
-    room.version += 1
     const base = this.envelope(room, type, extra)
     for (const member of room.members.values()) {
       if (!this.isConnected(member)) continue

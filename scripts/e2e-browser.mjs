@@ -320,6 +320,43 @@ async function main() {
       "document.body.innerText.includes('底牌') || document.body.innerText.includes('跟注') || document.body.innerText.includes('过牌')",
       '牌桌出现操作区',
     )
+    // ── 对局中刷新页面：应凭本地凭证自动重连并回到同一手牌（第 4 阶段验收） ──
+    const beforeReload = await evaluate(
+      cdp,
+      guest,
+      `(() => {
+        const text = document.body.innerText;
+        const hand = text.match(/第\\s*(\\d+)\\s*手/);
+        const pot = text.match(/底池\\s*\\n?\\s*(\\d+)/);
+        return { hand: hand ? hand[1] : null, pot: pot ? pot[1] : null, path: location.pathname };
+      })()`,
+    )
+    await cdp.send('Page.reload', {}, guest.sessionId)
+    await waitFor(cdp, guest, "location.pathname.startsWith('/table/')", '刷新后仍在牌桌路由')
+    await waitFor(cdp, guest, "document.body.innerText.includes('底池')", '刷新后牌桌重新渲染')
+    await waitFor(cdp, guest, "document.body.innerText.includes('已连接')", '刷新后自动重连成功')
+    const afterReload = await evaluate(
+      cdp,
+      guest,
+      `(() => {
+        const text = document.body.innerText;
+        const hand = text.match(/第\\s*(\\d+)\\s*手/);
+        const pot = text.match(/底池\\s*\\n?\\s*(\\d+)/);
+        return { hand: hand ? hand[1] : null, pot: pot ? pot[1] : null, path: location.pathname };
+      })()`,
+    )
+    if (afterReload.path !== beforeReload.path) {
+      throw new Error(`刷新后路由不一致：${beforeReload.path} → ${afterReload.path}`)
+    }
+    if (beforeReload.hand !== null && afterReload.hand !== beforeReload.hand) {
+      throw new Error(`刷新后手数不一致：第 ${beforeReload.hand} 手 → 第 ${afterReload.hand} 手`)
+    }
+    if (beforeReload.pot !== null && afterReload.pot !== beforeReload.pot) {
+      throw new Error(`刷新后底池不一致：${beforeReload.pot} → ${afterReload.pot}`)
+    }
+    console.log(`✔ 对局中刷新页面后自动重连并恢复同一手牌（第 ${afterReload.hand ?? '?'} 手，底池 ${afterReload.pot ?? '?'}）`)
+    await screenshot(cdp, guest, '05-after-reload-mid-hand')
+
     const outcome = await playUntilSettled(cdp, [host, guest])
     if (!outcome.settled) {
       for (const [index, tab] of [host, guest].entries()) {

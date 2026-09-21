@@ -4,6 +4,9 @@ export { awardPots, buildPots, type Award, type Contribution, type SidePot } fro
 export {
   EngineError,
   HoldemTable,
+  TABLE_SNAPSHOT_VERSION,
+  type SeatSnapshot,
+  type TableSnapshot,
   type EngineErrorCode,
   type EngineSeatPublic,
   type TableConfig,

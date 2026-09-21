@@ -135,6 +135,34 @@ export class Repo {
       .run(result.handId, roomId, result.handNo, result.board.join(' '), result.potTotal, JSON.stringify(result), Date.now())
   }
 
+  /** 可恢复快照：每房一行，随命令在同一事务内覆盖写入。 */
+  saveSnapshot(roomId: string, version: number, stateJson: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO room_snapshots (room_id, version, state_json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(room_id) DO UPDATE SET
+           version = excluded.version, state_json = excluded.state_json, updated_at = excluded.updated_at`,
+      )
+      .run(roomId, version, stateJson, Date.now())
+  }
+
+  /** 启动时读取未关闭房间的快照用于恢复。state_json 只允许服务端读取。 */
+  loadSnapshots(): { room_id: string; state_json: string }[] {
+    return this.db
+      .prepare(
+        `SELECT s.room_id AS room_id, s.state_json AS state_json
+           FROM room_snapshots s
+           JOIN rooms r ON r.room_id = s.room_id
+          WHERE r.status <> 'closed'`,
+      )
+      .all() as unknown as { room_id: string; state_json: string }[]
+  }
+
+  deleteSnapshot(roomId: string): void {
+    this.db.prepare('DELETE FROM room_snapshots WHERE room_id = ?').run(roomId)
+  }
+
   /** 命令幂等：同一个 requestId 只生效一次。 */
   hasReceipt(requestId: string): boolean {
     const row = this.db.prepare('SELECT 1 AS found FROM command_receipts WHERE request_id = ?').get(requestId)

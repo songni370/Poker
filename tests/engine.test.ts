@@ -350,3 +350,112 @@ test('随机对局不变量：筹码守恒、无人负筹码、底牌不重复�
 
   assert.ok(played >= 20, `随机对局样本过少：${played} 手`)
 })
+
+/* ───────────────────────────── 第 4 阶段：可恢复快照 ───────────────────────────── */
+
+/** 确定性对局驱动：优先过牌，其次跟注，保证一定走到摊牌。 */
+function playDeterministic(table: HoldemTable, stopAfter = Number.POSITIVE_INFINITY): number {
+  let steps = 0
+  while (table.isHandRunning() && steps < stopAfter) {
+    const state = table.publicState()
+    if (state.actingSeat === null) break
+    const seat = state.seats.find((entry) => entry.seat === state.actingSeat)
+    if (!seat) break
+    const legal = table.legalActions(seat.playerId)
+    const pick = legal.find((a) => a.action === 'check') ?? legal.find((a) => a.action === 'call') ?? legal[0]!
+    table.act(seat.playerId, pick.action, pick.amount)
+    steps += 1
+  }
+  return steps
+}
+
+function buildDeterministicTable(): HoldemTable {
+  const table = makeTable([
+    ['p1', 0, 2000],
+    ['p2', 1, 2000],
+    ['p3', 2, 2000],
+  ])
+  // 固定发牌顺序，保证两次构建拿到完全相同的一手牌；剩余牌补足 52 张（永不被发出）。
+  const dealOrder = ['As', 'Kd', 'Qh', 'Ah', 'Ks', 'Qd', '2c', '3d', '4h', '5s', '6c', '7d', '8h']
+  const used = new Set(dealOrder)
+  const deck = deckFromDealOrder([...dealOrder, ...createDeck().filter((card) => !used.has(card))])
+  assert.equal(deck.length, 52)
+  table.startHand({ handId: 'h-restore', rng: seededRng(7), buttonSeat: 0, deck })
+  return table
+}
+
+test('快照往返：中局序列化再恢复，状态逐字节一致且能继续打完同一结果', () => {
+  const original = buildDeterministicTable()
+  const playedBefore = playDeterministic(original, 3)
+  assert.equal(playedBefore, 3, '应至少能连续行动 3 次')
+
+  const snapshot = original.serialize()
+  const restored = HoldemTable.restore(JSON.parse(JSON.stringify(snapshot)) as typeof snapshot)
+
+  // 1) 往返后私有状态完全一致（含牌堆、底牌、行动游标）
+  assert.deepEqual(restored.serialize(), snapshot, '序列化 → 恢复 → 再序列化 必须完全相同')
+
+  // 2) 公开状态与本人合法动作一致
+  assert.deepEqual(restored.publicState(), original.publicState())
+  const actingSeat = original.publicState().actingSeat!
+  const actingPlayerId = original.publicState().seats.find((s) => s.seat === actingSeat)!.playerId
+  assert.deepEqual(restored.legalActions(actingPlayerId), original.legalActions(actingPlayerId))
+  for (const playerId of ['p1', 'p2', 'p3']) {
+    assert.deepEqual(restored.holeCardsOf(playerId), original.holeCardsOf(playerId), `${playerId} 底牌应一致`)
+  }
+
+  // 3) 两边用同一个确定性策略继续打，最终筹码与结算结果必须完全一致
+  playDeterministic(original)
+  playDeterministic(restored)
+  assert.equal(restored.publicState().phase, 'settlement')
+  assert.equal(original.publicState().phase, 'settlement')
+  for (const playerId of ['p1', 'p2', 'p3']) {
+    assert.equal(stackOf(restored, playerId), stackOf(original, playerId), `${playerId} 最终筹码应一致`)
+  }
+  assert.deepEqual(restored.publicState().result, original.publicState().result)
+  assert.equal(restored.totalChips(), 6000, '恢复后继续打完仍须筹码守恒')
+})
+
+test('快照校验：损坏或版本不符的快照必须被拒绝，不能带病恢复', () => {
+  const table = buildDeterministicTable()
+  playDeterministic(table, 2)
+  const good = table.serialize()
+
+  assert.throws(
+    () => HoldemTable.restore({ ...good, schemaVersion: 999 }),
+    /快照版本不兼容/,
+    '版本不符应拒绝',
+  )
+  assert.throws(
+    () => HoldemTable.restore({ ...good, config: { ...good.config, smallBlind: 0 } }),
+    /桌规不合法/,
+    '非法桌规应拒绝',
+  )
+  assert.throws(
+    () => HoldemTable.restore({ ...good, seats: good.seats.map((s, i) => (i === 0 ? { ...s, stack: -1 } : s)) }),
+    /负筹码/,
+    '负筹码应拒绝',
+  )
+  assert.throws(
+    () =>
+      HoldemTable.restore({
+        ...good,
+        board: [...good.board, good.deck[0]!],
+      }),
+    /快照公共牌数量异常|重复的牌|牌数不为 52/,
+    '公共牌数量异常应拒绝',
+  )
+  // 把一张牌同时放进牌堆和公共牌，制造重复
+  const duplicated = { ...good, deck: [...good.deck.slice(0, -1), good.board[0] ?? good.deck[0]!] }
+  assert.throws(() => HoldemTable.restore(duplicated), /重复的牌|牌数不为 52/, '重复牌应拒绝')
+  assert.throws(
+    () => HoldemTable.restore({ ...good, seats: good.seats.map((s, i) => (i === 0 ? { ...s, folded: true, allIn: true } : s)) }),
+    /同时标记弃牌与全下/,
+    '弃牌与全下互斥',
+  )
+  assert.throws(
+    () => HoldemTable.restore({ ...good, actingSeat: 99 }),
+    /行动者不在待行动集合中/,
+    '行动者非法应拒绝',
+  )
+})
