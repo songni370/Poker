@@ -713,7 +713,7 @@ const historyEntries = computed(() => {
   }
 
   .cards :deep(.card) {
-    --cw: 38px;
+    --cw: 36px;
   }
 
   .hero-stack {
@@ -765,6 +765,14 @@ const historyEntries = computed(() => {
 @media (max-height: 380px) {
   .stat--hand {
     display: none;
+  }
+
+  .stage {
+    padding-top: 2px;
+  }
+
+  .hero {
+    padding-bottom: 0;
   }
 }
 </style>

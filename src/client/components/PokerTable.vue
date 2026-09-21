@@ -90,7 +90,7 @@ function seatStyle(index: number): Record<string, string> {
   const { angle } = polarFor(index)
   // y 方向的半径由 CSS 变量控制，小屏时自动收窄，避免座位越出桌面。
   return {
-    left: `calc(50% + ${String(RX * Math.cos(angle))}%)`,
+    left: `calc(50% + var(--seat-anchor-x, ${String(RX)}%) * ${String(Math.cos(angle))})`,
     top: `calc(50% + var(--seat-anchor-y, ${String(RY)}%) * ${String(Math.sin(angle))})`,
   }
 }
@@ -313,13 +313,15 @@ const tableStatus = computed(() => {
     /* 竖屏窄屏：桌面不抢高度，优先保证操作区完整可见。 */
     --table-h: min(33vh, 252px);
     --seat-anchor-y: 45%;
+    /* 椭圆横向半径收窄，座位面板不越出屏幕（无横向滚动）。 */
+    --seat-anchor-x: 43%;
   }
 }
 
 /* 横屏手机：压低桌面高度，给底部操作区留出空间。 */
 @media (max-height: 430px) {
   .table {
-    --table-h: min(40vh, 164px);
+    --table-h: min(35vh, 118px);
     /* 座位锚点向内收：顶部座位不越出桌面，底部座位不压住公共牌。 */
     --seat-anchor-y: 46%;
   }

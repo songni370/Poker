@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Button from 'primevue/button'
 import Dialog from 'primevue/dialog'
 import InputNumber from 'primevue/inputnumber'
@@ -99,6 +99,20 @@ const quickAmounts = computed(() => {
 })
 
 const confirmAllIn = ref(false)
+
+/** 极矮屏（横屏手机）隐藏步进按钮：保留数字输入本体，高度更可控。 */
+const showStepper = ref(true)
+
+function syncDensity(): void {
+  showStepper.value = window.innerHeight > 430
+}
+
+onMounted(() => {
+  syncDensity()
+  window.addEventListener('resize', syncDensity)
+})
+
+onBeforeUnmount(() => window.removeEventListener('resize', syncDensity))
 
 function sendAction(action: LegalAction['action'], value?: number): void {
   if (!canAct.value) return
@@ -209,7 +223,7 @@ const liveText = computed(() => {
           :max="maxAmount"
           :step="10"
           :use-grouping="false"
-          show-buttons
+          :show-buttons="showStepper"
           button-layout="horizontal"
           :max-fraction-digits="0"
           fluid
@@ -374,7 +388,35 @@ const liveText = computed(() => {
   }
 
   .field :deep(.p-inputnumber) {
-    width: 116px;
+    width: 104px;
+  }
+
+  /* 区间文案在矮屏省略（数字输入自身带 min/max 约束）。 */
+  .range {
+    display: none;
+  }
+
+  .action-bar {
+    padding: 0;
+    gap: 2px;
+  }
+
+  .buttons {
+    gap: 6px;
+  }
+
+  .buttons :deep(.p-button) {
+    padding-block: 8px;
+  }
+
+  /* 极矮屏：倒计时收成紧凑一行（进度条交给座位上的进度条显示）。 */
+  .turn-bar {
+    display: none;
+  }
+
+  .sizing {
+    gap: 6px;
+    padding-top: 0;
   }
 }
 
