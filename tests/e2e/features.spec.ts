@@ -46,7 +46,8 @@ test('聊天：房主发言对手能看到，刷新后仍能看到历史，未�
   const errors = [...watchErrors(host), ...watchErrors(guest)]
 
   const roomId = await createRoom(host, `房主${Date.now() % 1000}`, 2)
-  await joinRoom(guest, roomId, `客人${Date.now() % 1000}`)
+  const guestName = `客人${Date.now() % 1000}`
+  await joinRoom(guest, roomId, guestName)
   await host.getByRole('button', { name: '开始牌局' }).click()
   await host.waitForURL(/\/table\//)
   await guest.waitForURL(/\/table\//)
@@ -78,6 +79,31 @@ test('聊天：房主发言对手能看到，刷新后仍能看到历史，未�
   await expect(guest.getByText('第二条消息')).toBeVisible()
   await guest.waitForTimeout(400)
   await guest.screenshot({ path: 'artifacts/e2e/09-chat-unread-divider.png' })
+
+  // ── 房间事件进聊天日志（服务端 system 消息） ──
+  await expect(guest.locator('.chat-system').first()).toBeVisible()
+
+  // ── @ 提醒：被提到的人看到文字标记，按钮名称里也报出来 ──
+  await host.getByPlaceholder('说点什么…').fill(`@${guestName} 该你了`)
+  await host.getByRole('button', { name: '发送' }).click()
+  await expect(guest.locator('.chat-msg.is-mention').first()).toBeVisible()
+  await expect(guest.locator('.chat-mention-tag').first()).toHaveText('提到了你')
+  await expect(chatButton).toHaveAttribute('aria-label', /条提到了你/)
+
+  // 插入 @ 的按钮可用（列出房内其他玩家）
+  await host.getByRole('button', { name: '插入 @ 提及' }).click()
+  await expect(host.getByRole('menuitem', { name: guestName })).toBeVisible()
+  await host.keyboard.press('Escape')
+
+  // ── 搜索：只留匹配消息并给出条数 ──
+  await guest.getByPlaceholder('搜索消息…').fill('该你了')
+  await expect(guest.getByText(/匹配 \d+ 条/)).toBeVisible()
+  await expect(guest.locator('.chat-msg')).toHaveCount(1)
+  await guest.getByPlaceholder('搜索消息…').fill('绝对不存在的关键词')
+  await expect(guest.getByText('没有匹配的消息')).toBeVisible()
+  await guest.getByRole('button', { name: '清除' }).click()
+  await expect(guest.locator('.chat-msg').first()).toBeVisible()
+  await guest.screenshot({ path: 'artifacts/e2e/12-chat-mention-and-log.png' })
 
   // 刷新后聊天历史仍在（服务端下发 chatHistory）
   await guest.reload()

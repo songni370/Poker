@@ -18,9 +18,10 @@ export const useChatStore = defineStore('chat', () => {
     messages.value = [...history]
   }
 
+  /** 追加一条消息；系统消息（房间事件）不计入未读，避免「XX 入座」也亮红点。 */
   function append(message: ChatMessage): void {
     messages.value = [...messages.value, message]
-    unread.value += 1
+    if (message.kind === 'user') unread.value += 1
   }
 
   function markRead(): void {
@@ -35,5 +36,10 @@ export const useChatStore = defineStore('chat', () => {
   const latest = computed(() => messages.value[messages.value.length - 1] ?? null)
   const count = computed(() => messages.value.length)
 
-  return { messages, unread, latest, count, setHistory, append, markRead, clear }
+  /** 是否有人在这条消息里 @ 了我（服务端解析并校验过昵称）。 */
+  function mentionsMe(message: ChatMessage, playerId: string | null | undefined): boolean {
+    return Boolean(playerId) && (message.mentions ?? []).includes(playerId as string)
+  }
+
+  return { messages, unread, latest, count, mentionsMe, setHistory, append, markRead, clear }
 })

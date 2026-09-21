@@ -170,12 +170,18 @@ export const CHAT_MAX_LENGTH = 200
 export const CHAT_HISTORY_LIMIT = 50
 export const HAND_HISTORY_LIMIT = 20
 
+export type ChatMessageKind = 'user' | 'system'
+
 export interface ChatMessage {
   id: string
+  /** user = 玩家发言；system = 房间事件（入座/开局/超时/结算…），由服务端写入。 */
+  kind: ChatMessageKind
   playerId: string
   nickname: string
   text: string
   at: number
+  /** 被 @ 到的玩家 id（服务端按昵称解析并校验，客户端据此高亮与提醒）。 */
+  mentions?: string[]
 }
 
 /* ────────────────────────────── 服务端 → 客户端事件 ────────────────────────────── */
@@ -190,7 +196,6 @@ export const SERVER_EVENT_TYPES = [
   'hand.settled',
   'room.error',
   'connection.recovered',
-  'chat.message',
   'pong',
 ] as const
 export type ServerEventType = (typeof SERVER_EVENT_TYPES)[number]
@@ -214,8 +219,6 @@ export interface ServerEvent {
   error?: { code: ErrorCode; message: string }
   /** 系统提示文案（如「XX 加入了房间」）。 */
   notice?: string
-  /** 仅 chat.message 携带：一条新聊天。 */
-  chat?: ChatMessage
   /** 仅 room.snapshot / connection.recovered 携带：最近聊天记录。 */
   chatHistory?: ChatMessage[]
   /** 仅 room.snapshot / connection.recovered 携带：最近手牌历史。 */
@@ -230,6 +233,17 @@ export interface PongMessage {
   serverTime: number
 }
 
+/**
+ * 一条新聊天。**不携带任何对局状态**：聊天不是状态推送，
+ * 否则消息会抢在结算/亮牌事件之前把牌面带出去，也会打乱逐张亮牌的时序。
+ */
+export interface ChatMessageEvent {
+  type: 'chat.message'
+  eventId: string
+  serverTime: number
+  message: ChatMessage
+}
+
 /** 尚未进入房间时的错误（例如凭证无效），不带状态快照。 */
 export interface LightErrorMessage {
   type: 'room.error'
@@ -238,7 +252,7 @@ export interface LightErrorMessage {
   error: { code: ErrorCode; message: string }
 }
 
-export type ServerMessage = ServerEvent | PongMessage | LightErrorMessage
+export type ServerMessage = ServerEvent | PongMessage | LightErrorMessage | ChatMessageEvent
 
 /* ────────────────────────────── 客户端 → 服务端命令（校验边界） ────────────────────────────── */
 

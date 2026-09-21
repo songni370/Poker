@@ -224,6 +224,27 @@ export class RoomRuntime {
     if (this.chat.length > CHAT_HISTORY_LIMIT) this.chat.shift()
   }
 
+  /**
+   * 追加一条系统消息（房间事件）。聊天面板因此同时是房间日志：
+   * 换设备/刷新回来也能看到期间发生了什么。
+   */
+  pushSystem(text: string): ChatMessage {
+    return this.#pushSystemInternal(text)
+  }
+
+  #pushSystemInternal(text: string): ChatMessage {
+    const message: ChatMessage = {
+      id: randomUUID(),
+      kind: 'system',
+      playerId: '',
+      nickname: '',
+      text,
+      at: Date.now(),
+    }
+    this.pushChat(message)
+    return message
+  }
+
   pushHistory(result: HandResultPublic): void {
     if (this.history.some((entry) => entry.handId === result.handId)) return
     this.history.push(result)
@@ -436,10 +457,11 @@ export class RoomManager {
     void room.run(() => {
       this.sendSnapshot(room, member.playerId, reconnected ? 'connection.recovered' : 'room.snapshot')
       // 全员广播：新玩家加入与重连都必须让其他人立刻看到「连接状态」变化。
+      const notice = reconnected ? `${member.nickname} 已重新连接` : `${member.nickname} 加入了房间`
+      // 只有首次加入进聊天日志；重连不记，避免网络抖动把日志刷满。
+      if (!reconnected) this.publishSystemChat(room, notice)
       this.bumpVersion(room)
-      this.publish(room, reconnected ? 'connection.recovered' : 'room.player_joined', {
-        notice: reconnected ? `${member.nickname} 已重新连接` : `${member.nickname} 加入了房间`,
-      })
+      this.publish(room, reconnected ? 'connection.recovered' : 'room.player_joined', { notice })
     })
     return null
   }
@@ -612,6 +634,11 @@ export class RoomManager {
           throw new CommandError('bad_request')
       }
 
+      // 房间事件（入座/离座/开局/结算…）同时进聊天流，聊天面板因此也是房间日志。
+      // 全下逐张亮牌时结算消息延后到亮牌结束，避免「已结算」与还在亮牌同时出现。
+      const deferNoticeToChat = Boolean(result) && revealSteps.length > 0
+      if (notice && !deferNoticeToChat) this.publishSystemChat(room, notice)
+
       // 先推进版本号并定下本回合截止时间，再连同快照一起落库：
       // 这样快照里的 version / turnDeadlineAt 与随后广播的状态完全一致。
       this.bumpVersion(room)
@@ -623,7 +650,7 @@ export class RoomManager {
       if (room.status === 'playing') this.repo.setRoomStatus(room.id, 'playing')
       if (result && revealSteps.length > 0) {
         // 全下后一次性发完 5 张太突兀：按翻牌 → 转牌 → 河牌逐段推送，最后再发结算。
-        this.scheduleReveals(room, result, revealSteps, notice)
+        this.scheduleReveals(room, result, revealSteps, notice, true)
       } else {
         this.publish(room, eventType, { notice, result })
       }
@@ -652,6 +679,7 @@ export class RoomManager {
     result: HandResultPublic,
     steps: number[],
     notice: string | undefined,
+    logNoticeToChat = false,
   ): void {
     const stillSameHand = (): boolean =>
       !room.table.isHandRunning() && room.table.publicState().handId === result.handId
@@ -693,6 +721,9 @@ export class RoomManager {
       () => {
         void room.run(() => {
           if (!stillSameHand()) return
+          room.pendingSettlement = null
+          // 结算事件与它的日志同时在最后一步发出：亮牌过程里不会提前说「已结算」。
+          if (logNoticeToChat && notice) this.publishSystemChat(room, notice)
           this.bumpVersion(room)
           this.publish(room, 'hand.settled', { notice, result })
         })
@@ -712,23 +743,48 @@ export class RoomManager {
     recent.push(now)
     room.chatRate.set(member.playerId, recent)
 
+    const text = command.text.trim()
     const message: ChatMessage = {
       id: randomUUID(),
+      kind: 'user',
       playerId: member.playerId,
       nickname: member.nickname,
-      text: command.text.trim(),
+      text,
       at: now,
+      mentions: this.parseMentions(room, text, member.playerId),
     }
     room.pushChat(message)
     this.repo.saveReceipt(command.requestId, room.id, member.playerId, command.type, '{"ok":true}')
     this.publishChat(room, message)
   }
 
+  /**
+   * 解析 @ 提及：在文本里找 `@昵称`，只认房间里真实存在的成员（最长昵称优先），
+   * 排除发言者自己。返回被提及的 playerId 列表。
+   */
+  private parseMentions(room: RoomRuntime, text: string, senderId: string): string[] {
+    const candidates = [...room.members.values()]
+      .filter((member) => member.playerId !== senderId)
+      .map((member) => ({ id: member.playerId, nickname: member.nickname }))
+      .sort((a, b) => b.nickname.length - a.nickname.length)
+    const mentioned = new Set<string>()
+    for (const candidate of candidates) {
+      if (text.includes(`@${candidate.nickname}`)) mentioned.add(candidate.id)
+    }
+    return [...mentioned]
+  }
+
+  /** 广播一条系统消息（同时进入聊天历史）。 */
+  private publishSystemChat(room: RoomRuntime, text: string): void {
+    this.publishChat(room, room.pushSystem(text))
+  }
+
   private publishChat(room: RoomRuntime, message: ChatMessage): void {
-    const base = this.envelope(room, 'chat.message', { chat: message })
+    // 轻量事件：不带 state/self，因此不会影响对局状态的时序（尤其是逐张亮牌）。
+    const event = { type: 'chat.message', eventId: randomUUID(), serverTime: Date.now(), message }
     for (const member of room.members.values()) {
       if (!this.isConnected(member)) continue
-      this.sendTo(member, { ...base, self: this.privateState(room, member.playerId) })
+      this.sendTo(member, event)
     }
   }
 
@@ -795,6 +851,7 @@ export class RoomManager {
     room.status = 'playing'
     const notice = `${member.nickname} 超时，系统自动${chosen.action === 'check' ? '过牌' : '弃牌'}`
 
+    this.publishSystemChat(room, notice)
     this.bumpVersion(room)
     this.scheduleTurn(room)
     this.repo.transaction(() => this.writeState(room))

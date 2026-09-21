@@ -318,6 +318,9 @@ const chatPanelVisible = computed(() => drawerOpen.value && drawerSection.value 
 const unreadBoundaryId = ref<string | null>(null)
 
 const chatText = ref('')
+/** 聊天搜索关键词：只过滤展示，不改动消息本身。 */
+const chatQuery = ref('')
+const mentionMenu = ref<InstanceType<typeof Menu> | null>(null)
 const chatError = ref('')
 /** 中文输入法组合期间的回车只用于确认候选词，不能当成发送。 */
 const composing = ref(false)
@@ -360,6 +363,34 @@ function onChatKeydown(event: KeyboardEvent): void {
   submitChat()
 }
 
+/* ── @ 提醒：服务端按昵称解析 mentions，这里负责高亮与「插入 @」。 ── */
+
+const myPlayerId = computed(() => game.self?.playerId ?? null)
+
+function mentionsMe(message: ChatMessage): boolean {
+  return chat.mentionsMe(message, myPlayerId.value)
+}
+
+/** 被 @ 到的玩家一览（排除自己）；没有别人时菜单为空。 */
+const mentionItems = computed<MenuItem[]>(() =>
+  game.seats
+    .filter((seat): seat is NonNullable<typeof seat> => Boolean(seat) && seat?.playerId !== myPlayerId.value)
+    .map((seat) => ({
+      label: seat.nickname,
+      icon: 'pi pi-at',
+      command: () => insertMention(seat.nickname),
+    })),
+)
+
+function toggleMentionMenu(event: Event): void {
+  mentionMenu.value?.toggle(event)
+}
+
+function insertMention(nickname: string): void {
+  const prefix = chatText.value.length === 0 || chatText.value.endsWith(' ') ? chatText.value : `${chatText.value} `
+  chatText.value = `${prefix}@${nickname} `
+}
+
 function submitChat(): void {
   const text = chatText.value.trim()
   if (text.length === 0) return
@@ -376,10 +407,18 @@ function submitChat(): void {
   void scrollChatToBottom()
 }
 
-const unreadText = computed(() => (chat.unread > 99 ? '99+' : String(chat.unread)))
-const chatAria = computed(() =>
-  chat.unread > 0 ? `聊天，${String(chat.unread)} 条未读消息` : '聊天，没有未读消息',
+/** 提到了我的消息条数（用于按钮提示，不只靠红点）。 */
+const mentionCount = computed(
+  () => chat.messages.filter((message) => message.kind === 'user' && mentionsMe(message)).length,
 )
+
+const unreadText = computed(() => (chat.unread > 99 ? '99+' : String(chat.unread)))
+/** 按钮名称里同时报未读与「提到了你」，折叠进「更多」菜单后信息也不丢。 */
+const chatAria = computed(() => {
+  const parts = [chat.unread > 0 ? `聊天，${String(chat.unread)} 条未读消息` : '聊天，没有未读消息']
+  if (mentionCount.value > 0) parts.push(`${String(mentionCount.value)} 条提到了你`)
+  return parts.join('，')
+})
 const chatTitle = computed(() => (chat.unread > 0 ? `聊天（${String(chat.unread)} 条未读）` : '聊天'))
 
 /**
@@ -429,10 +468,23 @@ function chatDayLabel(at: number): string {
  * 分组只影响展示，消息数组仍是服务端下发的原始顺序。
  */
 const chatRows = computed<ChatRow[]>(() => {
+  const query = chatQuery.value.trim().toLowerCase()
+  const source = query
+    ? chat.messages.filter(
+        (message) =>
+          message.text.toLowerCase().includes(query) || message.nickname.toLowerCase().includes(query),
+      )
+    : chat.messages
   const rows: ChatRow[] = []
   let previous: ChatMessage | null = null
   let previousDay = ''
-  for (const message of chat.messages) {
+  for (const message of source) {
+    // 搜索时不再插入日期/间隔/未读分隔，避免与过滤结果互相干扰。
+    if (query) {
+      rows.push({ kind: 'message', key: message.id, message })
+      previous = message
+      continue
+    }
     const day = chatDayKey(message.at)
     if (day !== previousDay) {
       rows.push({ kind: 'day', key: `day-${day}`, label: chatDayLabel(message.at) })
@@ -455,6 +507,14 @@ watch(
     else chatHasNews.value = true
   },
 )
+
+/** 搜索结果提示：仅在有查询词时显示。 */
+const chatSearchText = computed(() => {
+  const query = chatQuery.value.trim()
+  if (!query) return ''
+  const shown = chatRows.value.filter((row) => row.kind === 'message').length
+  return `匹配 ${String(shown)} 条`
+})
 
 /* ───────────── 手牌历史（抽屉内的 history 分节） ───────────── */
 
@@ -891,6 +951,25 @@ async function leaveTable(): Promise<void> {
         <section v-else class="drawer-body drawer-body--chat" aria-label="聊天">
           <h3>聊天</h3>
 
+          <!-- 搜索：只过滤展示，不改动消息本身；有关键词时不再插入日期/未读分隔。 -->
+          <div class="chat-search">
+            <label class="sr-only" for="chat-search">搜索聊天记录</label>
+            <InputText
+              id="chat-search"
+              v-model="chatQuery"
+              size="small"
+              class="chat-search-input"
+              type="search"
+              autocomplete="off"
+              placeholder="搜索消息…"
+            />
+            <Button v-if="chatQuery" size="small" text :title="'清除搜索'" @click="chatQuery = ''">
+              <i class="pi pi-times" aria-hidden="true" />
+              <span>清除</span>
+            </Button>
+            <span v-if="chatSearchText" class="muted num" role="status">{{ chatSearchText }}</span>
+          </div>
+
           <div
             ref="chatListRef"
             class="chat-list thin-scroll"
@@ -899,7 +978,8 @@ async function leaveTable(): Promise<void> {
             aria-label="聊天消息"
             @scroll.passive="onChatScroll"
           >
-            <ol v-if="chat.count > 0" class="chat-msgs">
+            <!-- 用「有没有可渲染的行」判断，这样搜索无结果也能给出空态 -->
+            <ol v-if="chatRows.length > 0" class="chat-msgs">
               <template v-for="row in chatRows" :key="row.key">
                 <li v-if="row.kind === 'day'" class="chat-day">
                   <span>{{ row.label }}</span>
@@ -910,9 +990,18 @@ async function leaveTable(): Promise<void> {
                 <li v-else-if="row.kind === 'unread'" class="chat-unread" role="separator">
                   <span>以下为新消息</span>
                 </li>
-                <li v-else class="chat-msg" :class="{ 'is-own': isOwnMessage(row.message) }">
+                <li v-else-if="row.message.kind === 'system'" class="chat-system">
+                  <span>{{ row.message.text }}</span>
+                  <time class="num" :datetime="chatIso(row.message.at)">{{ chatTime(row.message.at) }}</time>
+                </li>
+                <li
+                  v-else
+                  class="chat-msg"
+                  :class="{ 'is-own': isOwnMessage(row.message), 'is-mention': mentionsMe(row.message) }"
+                >
                   <p class="chat-meta">
                     <span class="chat-who">{{ isOwnMessage(row.message) ? '你' : row.message.nickname }}</span>
+                    <span v-if="mentionsMe(row.message)" class="chat-mention-tag">提到了你</span>
                     <time
                       class="chat-time num"
                       :datetime="chatIso(row.message.at)"
@@ -925,7 +1014,7 @@ async function leaveTable(): Promise<void> {
                 </li>
               </template>
             </ol>
-            <p v-else class="hint chat-empty">还没有人说话</p>
+            <p v-else class="hint chat-empty">{{ chatQuery ? '没有匹配的消息' : '还没有人说话' }}</p>
           </div>
 
           <!-- 用户往上翻时出现：跳到底部由用户自己决定，不抢滚动位置。 -->
@@ -935,6 +1024,21 @@ async function leaveTable(): Promise<void> {
           </Button>
 
           <form class="chat-form" @submit.prevent="submitChat">
+            <Button
+              type="button"
+              size="small"
+              text
+              :aria-label="'插入 @ 提及'"
+              :title="'插入 @ 提及'"
+              aria-haspopup="true"
+              aria-controls="mention-menu"
+              :disabled="mentionItems.length === 0"
+              @click="toggleMentionMenu"
+            >
+              <i class="pi pi-at" aria-hidden="true" />
+            </Button>
+            <Menu id="mention-menu" ref="mentionMenu" :model="mentionItems" :popup="true" />
+
             <label class="sr-only" for="chat-input">聊天输入框</label>
             <InputText
               id="chat-input"
@@ -1679,6 +1783,47 @@ async function leaveTable(): Promise<void> {
   height: 1px;
   background: currentColor;
   opacity: 0.45;
+}
+
+/* 聊天搜索与 @ 提醒。 */
+.chat-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.chat-search-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-mention-tag {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--gold) 26%, transparent);
+  color: var(--gold);
+  font-size: 0.68rem;
+}
+
+.chat-msg.is-mention {
+  border-inline-start: 3px solid var(--gold);
+  background: color-mix(in srgb, var(--gold) 10%, transparent);
+  border-radius: var(--radius-sm);
+  padding-inline: 6px;
+}
+
+/* 房间事件（系统消息）：居中细线，与玩家发言区分开。 */
+.chat-system {
+  list-style: none;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  margin: 4px 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-align: center;
 }
 
 </style>

@@ -286,6 +286,14 @@ function handleMessage(text: string): void {
     return
   }
 
+  // 聊天是轻量事件：只进聊天列表，不参与对局状态替换。
+  if (message.type === 'chat.message') {
+    const chat = useChatStore()
+    chat.append(message.message)
+    if (soundEnabled.value && message.message.kind === 'user') playPing()
+    return
+  }
+
   if (message.type === 'room.error') {
     session.setError(message.error?.code ?? 'internal', message.error?.message ?? ERROR_MESSAGES.internal)
     // 过期版本已经由服务端回发最新快照，这里只提示、不阻断。
@@ -301,10 +309,6 @@ function handleMessage(text: string): void {
   // 进入房间 / 重连：服务端下发最近聊天与手牌历史，整体替换本地列表。
   if (message.chatHistory) chat.setHistory(message.chatHistory)
   if (message.handHistory) game.setHistory(message.handHistory)
-  if (message.chat) {
-    chat.append(message.chat)
-    if (soundEnabled.value) playPing()
-  }
 
   const wasMyTurn = game.isMyTurn
   game.applySnapshot(message.state, message.self)

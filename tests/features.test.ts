@@ -52,17 +52,22 @@ test('聊天：广播给房内所有人、重连能拿到历史、服务端限�
 
   const versionBefore = a.lastState()!.version
   a.send({ type: 'chat.send', requestId: rid(), text: '  大家好，开局吧  ' })
-  const receivedByB = await b.waitFor((message) => message.type === 'chat.message')
+  // 房间事件也会进聊天流（system），这里只等玩家发言。
+  const receivedByB = await b.waitFor(
+    (message) => message.type === 'chat.message' && message.message.kind === 'user',
+  )
   assert.ok(receivedByB.type === 'chat.message')
-  assert.equal(receivedByB.chat?.text, '大家好，开局吧', '首尾空白应被去掉')
-  assert.equal(receivedByB.chat?.nickname, '甲')
+  assert.equal(receivedByB.message.text, '大家好，开局吧', '首尾空白应被去掉')
+  assert.equal(receivedByB.message.nickname, '甲')
 
   // 聊天不是牌局状态：不得推进版本号，否则会误伤别人正在提交的动作
   assert.equal(a.lastState()!.version, versionBefore, '聊天不应推进房间版本号')
 
   // 另一位玩家发言，房主也能收到
   b.send({ type: 'chat.send', requestId: rid(), text: '来' })
-  const receivedByA = await a.waitFor((message) => message.type === 'chat.message' && message.chat?.nickname === '乙')
+  const receivedByA = await a.waitFor(
+    (message) => message.type === 'chat.message' && message.message.kind === 'user' && message.message.nickname === '乙',
+  )
   assert.ok(receivedByA.type === 'chat.message')
 
   // 长度校验：超长直接拒绝
@@ -178,6 +183,24 @@ test('全下摊牌：公共牌按翻牌 → 转牌 → 河牌逐段推送，最�
     .slice(0, settledIndex)
     .some((message) => message.type !== 'room.error' && 'state' in message && message.state.lastResult !== null)
   assert.equal(earlyResult, false, '逐张亮牌期间不应提前下发 lastResult')
+
+  // 结算日志既不能提前出现，也不能丢：必须在结算事件之后进入聊天流
+  const settleLogIndex = a.messages.findIndex(
+    (message) => message.type === 'chat.message' && message.message.kind === 'system' && /结算/.test(message.message.text),
+  )
+  // 日志与结算是同一时刻发出的（日志紧邻在前），关键是它绝不能出现在亮牌过程中。
+  assert.ok(
+    settleLogIndex >= settledIndex - 1,
+    `结算日志不应早于结算事件（日志下标 ${String(settleLogIndex)}，结算下标 ${String(settledIndex)}）`,
+  )
+  const lastRevealIndex = a.messages.reduce(
+    (last, message, index) =>
+      message.type !== 'room.error' && 'state' in message && message.state.board.length > 0 && message.state.board.length < 5
+        ? index
+        : last,
+    -1,
+  )
+  assert.ok(settleLogIndex > lastRevealIndex, '结算日志必须等亮牌结束后才出现')
 })
 
 test('观战：座位满了仍可进来观战，观战者看不到他人底牌，也不能行动，空位后可入座', async (t) => {
@@ -300,4 +323,80 @@ test('逐张亮牌期间被抢先开下一手：上一手结算不会丢', async
   const rejected = await a.waitFor((message) => message.type === 'room.error', 3000)
   assert.ok(rejected.type === 'room.error')
   assert.equal(rejected.error?.code, 'illegal_action')
+})
+
+test('聊天 @ 提醒：只认房间内真实昵称、排除自己；房间事件进入聊天日志且不占未读', async (t) => {
+  const server = await startTestServer()
+  t.after(server.stop)
+
+  const host = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '阿德', maxSeats: 3 })).data
+  const guest = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '小可' })).data
+
+  const a = new TestClient(server.wsUrl)
+  const b = new TestClient(server.wsUrl)
+  t.after(() => {
+    a.close()
+    b.close()
+  })
+  await Promise.all([a.open(), b.open()])
+  a.send(joinCommand(host))
+  await a.waitFor((message) => message.type === 'room.snapshot')
+  b.send(joinCommand(guest))
+  await b.waitFor((message) => message.type === 'room.snapshot')
+
+  const userMessages = (client: TestClient): Extract<ServerMessage, { type: 'chat.message' }>[] =>
+    client.messages.filter(
+      (message): message is Extract<ServerMessage, { type: 'chat.message' }> =>
+        message.type === 'chat.message' && message.message.kind === 'user',
+    )
+
+  // 1) @ 到对手：mentions 里应恰好是对手
+  a.send({ type: 'chat.send', requestId: rid(), text: '@小可 这手你跟不跟' })
+  const mentioned = await b.waitFor(
+    (message) => message.type === 'chat.message' && message.message.mentions?.length === 1,
+  )
+  assert.ok(mentioned.type === 'chat.message')
+  assert.deepEqual(mentioned.message.mentions, [guest.playerId], '@ 到自己人应被识别')
+
+  // 2) @ 不存在的昵称：不得凭空产生提及
+  a.send({ type: 'chat.send', requestId: rid(), text: '@查无此人 在吗' })
+  await delay(150)
+  const last = userMessages(b).at(-1)!
+  assert.deepEqual(last.message.mentions, [], '不存在的昵称不应产生提及')
+
+  // 3) @ 自己：不应把自己算进提及
+  a.send({ type: 'chat.send', requestId: rid(), text: '@阿德 我自己' })
+  await delay(150)
+  assert.deepEqual(userMessages(b).at(-1)!.message.mentions, [], '不应把自己算作被提及')
+
+  // 4) 房间事件进入聊天日志（开局/结算这类 system 消息），且不带 playerId
+  a.send({ type: 'game.start', requestId: rid() })
+  await a.waitFor((message) => message.type === 'hand.started')
+  // 房间里已经有过「XX 加入了房间」这类系统消息，这里等的是开局那条。
+  const systemMessage = await a.waitFor(
+    (message) =>
+      message.type === 'chat.message' && message.message.kind === 'system' && /手牌开始/.test(message.message.text),
+  )
+  assert.ok(systemMessage.type === 'chat.message')
+  assert.equal(systemMessage.message.playerId, '', '系统消息不属于任何玩家')
+  assert.match(systemMessage.message.text, /手牌开始/, `系统消息内容应说明发生了什么，实际：${systemMessage.message.text}`)
+
+  // 5) 重连时系统消息也在历史里（房间日志可回溯）
+  b.close()
+  await delay(120)
+  const reconnect = new TestClient(server.wsUrl)
+  t.after(() => reconnect.close())
+  await reconnect.open()
+  reconnect.send(joinCommand(guest))
+  const snapshot = await reconnect.waitFor((message) => message.type === 'connection.recovered')
+  assert.ok(snapshot.type === 'connection.recovered')
+  const history = snapshot.chatHistory ?? []
+  assert.ok(
+    history.some((message) => message.kind === 'system' && /手牌开始/.test(message.text)),
+    '重连后应能从历史里看到房间事件',
+  )
+  assert.ok(
+    history.some((message) => message.kind === 'user' && message.mentions?.includes(guest.playerId)),
+    '重连后 @ 提及信息也应保留',
+  )
 })
