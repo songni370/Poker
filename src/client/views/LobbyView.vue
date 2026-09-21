@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import Button from 'primevue/button'
 import InputText from 'primevue/inputtext'
@@ -17,6 +17,25 @@ import { useRoomStore } from '../stores/room.ts'
  */
 const router = useRouter()
 const room = useRoomStore()
+
+/** 服务器同时开放的桌数上限与当前占用（服务端全局最多 3 桌）。 */
+const roomLimit = ref<{ open: number; max: number } | null>(null)
+
+onMounted(async () => {
+  try {
+    const health = (await (await fetch('/api/health')).json()) as { rooms: number; maxRooms: number }
+    roomLimit.value = { open: health.rooms, max: health.maxRooms }
+  } catch {
+    roomLimit.value = null
+  }
+})
+
+const roomLimitText = computed(() => {
+  if (!roomLimit.value) return ''
+  return `当前开放 ${String(roomLimit.value.open)}/${String(roomLimit.value.max)} 桌`
+})
+
+const roomLimitReached = computed(() => Boolean(roomLimit.value && roomLimit.value.open >= roomLimit.value.max))
 
 const nickname = ref(room.nickname)
 const roomName = ref('')
@@ -151,7 +170,15 @@ async function joinRoom(): Promise<void> {
             />
           </label>
 
-          <Button :disabled="busy" :title="'创建房间并进入等待区'" @click="createRoom">
+          <p v-if="roomLimitText" class="hint" role="status">
+            {{ roomLimitText }}<template v-if="roomLimitReached">，已满：等其中一桌结束或关闭后再开新桌</template>
+          </p>
+
+          <Button
+            :disabled="busy"
+            :title="roomLimitReached ? '服务器桌数已达上限' : '创建房间并进入等待区'"
+            @click="createRoom"
+          >
             <i class="pi pi-plus" aria-hidden="true" />
             <span>创建并进入等待区</span>
           </Button>

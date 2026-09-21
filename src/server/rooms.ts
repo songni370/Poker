@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto'
 import { EngineError, HoldemTable, cryptoRng, type TableSnapshot } from '../engine/index.ts'
 import { TABLE_RULES } from '../shared/poker.ts'
 import {
+  CHAT_HISTORY_LIMIT,
+  DEFAULT_MAX_ROOMS,
   ERROR_MESSAGES,
+  HAND_HISTORY_LIMIT,
+  type ChatMessage,
+  type ChatSendCommand,
   type ClientCommand,
   type ErrorCode,
   type GameStatePublic,
@@ -45,6 +50,13 @@ export interface ClientSocket {
   send(data: string): void
   close(code?: number, reason?: string): void
 }
+
+/** 全下后逐张亮公共牌的间隔（毫秒）。 */
+const REVEAL_DELAY_MS = 750
+
+/** 聊天限流：窗口内最多几条。 */
+const CHAT_WINDOW_MS = 5000
+const CHAT_WINDOW_LIMIT = 5
 
 /** 房间快照结构版本；改动结构时必须同步提升，旧快照会被安全丢弃。 */
 export const SNAPSHOT_VERSION = 1
@@ -110,6 +122,16 @@ export class RoomRuntime {
   turnTimer: NodeJS.Timeout | null = null
   /** 已写入 SQLite 的手牌号，保证结算记录幂等。 */
   persistedHandId: string | null = null
+  /** 最近聊天（内存环形缓冲，不落库、不记录历史聊天内容）。 */
+  readonly chat: ChatMessage[] = []
+  /** 本房最近的手牌结算，进入房间时下发给客户端。 */
+  readonly history: HandResultPublic[] = []
+  /** 逐张亮牌的待执行定时器，开下一手或关房时必须清掉。 */
+  readonly revealTimers: NodeJS.Timeout[] = []
+  /** 已结算但还没广播出去的结算（逐张亮牌期间暂存），保证结果绝不丢失。 */
+  pendingSettlement: { result: HandResultPublic; notice?: string } | null = null
+  /** 聊天限流用的时间戳。 */
+  readonly chatRate = new Map<string, number[]>()
 
   private queue: Promise<unknown> = Promise.resolve()
 
@@ -197,6 +219,22 @@ export class RoomRuntime {
     return room
   }
 
+  pushChat(message: ChatMessage): void {
+    this.chat.push(message)
+    if (this.chat.length > CHAT_HISTORY_LIMIT) this.chat.shift()
+  }
+
+  pushHistory(result: HandResultPublic): void {
+    if (this.history.some((entry) => entry.handId === result.handId)) return
+    this.history.push(result)
+    if (this.history.length > HAND_HISTORY_LIMIT) this.history.shift()
+  }
+
+  clearRevealTimers(): void {
+    for (const timer of this.revealTimers) clearTimeout(timer)
+    this.revealTimers.length = 0
+  }
+
   /** 同一房间的所有命令、超时与状态发布都串行执行，避免并发交错。 */
   run<T>(task: () => Promise<T> | T): Promise<T> {
     const next = this.queue.then(task, task)
@@ -224,10 +262,16 @@ export class RoomRuntime {
 export class RoomManager {
   private readonly rooms = new Map<string, RoomRuntime>()
   private readonly repo: Repo
+  private readonly maxRooms: number
 
-  constructor(repo: Repo) {
+  constructor(repo: Repo, maxRooms = Number(process.env.MAX_ROOMS ?? DEFAULT_MAX_ROOMS)) {
     this.repo = repo
+    this.maxRooms = Number.isInteger(maxRooms) && maxRooms > 0 ? maxRooms : DEFAULT_MAX_ROOMS
     this.repo.pruneReceipts()
+  }
+
+  roomLimit(): number {
+    return this.maxRooms
   }
 
   get(roomId: string): RoomRuntime | undefined {
@@ -252,6 +296,7 @@ export class RoomManager {
       try {
         const snapshot = JSON.parse(row.state_json) as RoomSnapshot ?? undefined
         const room = RoomRuntime.fromSnapshot(snapshot)
+        for (const entry of this.repo.recentHandResults(room.id, HAND_HISTORY_LIMIT)) room.pushHistory(entry)
         this.rooms.set(room.id, room)
         restoredIds.add(room.id)
         restored += 1
@@ -276,6 +321,12 @@ export class RoomManager {
   }
 
   createRoom(input: { nickname: string; roomName?: string; maxSeats: number }): RoomCredentials {
+    if (this.rooms.size >= this.maxRooms) {
+      throw new CommandError(
+        'room_full',
+        `服务器最多同时开放 ${String(this.maxRooms)} 桌，请等其中一桌结束或关闭后再开新桌`,
+      )
+    }
     const roomId = newRoomId()
     const playerId = newPlayerId()
     const token = newReconnectToken()
@@ -328,12 +379,16 @@ export class RoomManager {
     const room = this.rooms.get(roomId)
     if (!room) throw new CommandError('room_not_found')
     if (room.status === 'closed') throw new CommandError('room_closed')
-    if (room.seatedCount() >= room.maxSeats) throw new CommandError('room_full')
-    if (room.members.size >= room.maxSeats * 2) throw new CommandError('room_full')
+
+    // 座位满了仍然可以进来观战；观战位也满了才拒绝（规格书 P0 的「房间已满」提示）。
+    const seat = this.firstFreeSeat(room)
+    if (seat === null) {
+      const observers = [...room.members.values()].filter((member) => member.seat === null).length
+      if (observers >= room.maxSeats) throw new CommandError('room_full', '座位与观战位都已满，请稍后再来')
+    }
 
     const playerId = newPlayerId()
     const token = newReconnectToken()
-    const seat = this.firstFreeSeat(room)
     const member: RoomMember = {
       playerId,
       nickname,
@@ -411,6 +466,7 @@ export class RoomManager {
   closeAll(): void {
     for (const room of this.rooms.values()) {
       if (room.turnTimer) clearTimeout(room.turnTimer)
+      room.clearRevealTimers()
       for (const member of room.members.values()) member.socket?.close(1001, 'server shutting down')
     }
   }
@@ -437,6 +493,7 @@ export class RoomManager {
       }
       if (connected > 0 || now - lastSeen < idleMs) continue
       if (room.turnTimer) clearTimeout(room.turnTimer)
+      room.clearRevealTimers()
       room.status = 'closed'
       this.repo.setRoomStatus(roomId, 'closed')
       this.repo.deleteSnapshot(roomId)
@@ -465,11 +522,19 @@ export class RoomManager {
     let eventType: ServerEventType = 'hand.state_changed'
     let notice: string | undefined
     let result: HandResultPublic | undefined
+    /** 全下摊牌时需要补发的中间公共牌张数（例如 0 → 3 → 4 → 5）。 */
+    let revealSteps: number[] = []
 
     try {
+      // 聊天不进游戏状态机：不改筹码、不推进版本号，也不落库（避免记录聊天内容）。
+      if (command.type === 'chat.send') {
+        this.handleChat(room, member, command)
+        return
+      }
+
       switch (command.type) {
         case 'seat.take': {
-          if (room.table.seatAt(command.seat)) throw new CommandError('seat_taken')
+          if (!room.table.isSeatAvailable(command.seat)) throw new CommandError('seat_taken')
           if (member.seat === command.seat) throw new CommandError('bad_request', '你已经在这个座位上')
           if (member.seat !== null) room.table.leave(playerId)
           room.table.sit(playerId, member.nickname, command.seat)
@@ -493,6 +558,15 @@ export class RoomManager {
         case 'game.start': {
           if (playerId !== room.hostPlayerId) throw new CommandError('not_host')
           if (room.table.isHandRunning()) throw new CommandError('illegal_action', '本手牌还在进行中')
+          // 有人抢在逐张亮牌结束前开下一手：先把上一手的结算补发出去，结果不能丢。
+          if (room.pendingSettlement) {
+            const pending = room.pendingSettlement
+            room.pendingSettlement = null
+            room.clearRevealTimers()
+            this.bumpVersion(room)
+            this.publish(room, 'hand.settled', { notice: pending.notice, result: pending.result })
+          }
+          room.clearRevealTimers()
           if (!room.table.canStartHand()) {
             throw new CommandError('illegal_action', '至少需要 2 名已入座且有筹码的玩家')
           }
@@ -517,11 +591,13 @@ export class RoomManager {
             this.sendSnapshot(room, playerId, 'room.snapshot')
             throw new CommandError('stale_version')
           }
+          const boardBefore = state.board.length
           room.table.act(playerId, command.action, command.amount)
           const settled = room.table.publicState().result
           if (settled && !room.table.isHandRunning()) {
             result = settled
             eventType = 'hand.settled'
+            revealSteps = this.revealStepsFor(settled, boardBefore)
             const winners = settled.winners.map((winner) => {
               const winnerMember = room.members.get(winner.playerId)
               return `${winnerMember?.nickname ?? winner.playerId} +${winner.amount}${winner.handName ? `（${winner.handName}）` : ''}`
@@ -545,7 +621,12 @@ export class RoomManager {
         this.writeState(room)
       })
       if (room.status === 'playing') this.repo.setRoomStatus(room.id, 'playing')
-      this.publish(room, eventType, { notice, result })
+      if (result && revealSteps.length > 0) {
+        // 全下后一次性发完 5 张太突兀：按翻牌 → 转牌 → 河牌逐段推送，最后再发结算。
+        this.scheduleReveals(room, result, revealSteps, notice)
+      } else {
+        this.publish(room, eventType, { notice, result })
+      }
     } catch (error) {
       const code = error instanceof CommandError ? error.code : error instanceof EngineError ? this.mapEngineError(error) : 'internal'
       if (code === 'internal') {
@@ -553,6 +634,101 @@ export class RoomManager {
         console.error('[room] 命令处理失败', { roomId: room.id, playerId, type: command.type, error })
       }
       this.sendError(room, playerId, code, error instanceof Error ? error.message : undefined)
+    }
+  }
+
+  /**
+   * 全下跑到摊牌时，公共牌是一次性发完的；这里算出需要补发的中间张数。
+   * 只在真正摊牌（showdown）且牌面从较短直接跳到 5 张时才补发。
+   */
+  private revealStepsFor(result: HandResultPublic, boardBefore: number): number[] {
+    if (!result.showdown || result.board.length !== 5) return []
+    return [3, 4].filter((count) => count > boardBefore && count < 5)
+  }
+
+  /** 按固定间隔逐段亮牌，最后再发结算事件。开下一手或关房时会清掉未执行的定时器。 */
+  private scheduleReveals(
+    room: RoomRuntime,
+    result: HandResultPublic,
+    steps: number[],
+    notice: string | undefined,
+  ): void {
+    const stillSameHand = (): boolean =>
+      !room.table.isHandRunning() && room.table.publicState().handId === result.handId
+
+    room.pendingSettlement = { ...(notice === undefined ? {} : { notice }), result }
+
+    steps.forEach((count, index) => {
+      const timer = setTimeout(
+        () => {
+          void room.run(() => {
+            if (!stillSameHand()) return
+            const street: 'flop' | 'turn' = count === 3 ? 'flop' : 'turn'
+            this.bumpVersion(room)
+            // 只覆盖展示用的公共牌与阶段：引擎此刻已经结算，不会再接受任何动作，
+            // 且不带 lastResult，避免结算叠层提前弹出。
+            this.publish(
+              room,
+              'hand.state_changed',
+              {},
+              {
+                ...this.publicState(room),
+                board: result.board.slice(0, count),
+                street,
+                phase: street,
+                lastResult: null,
+                // 结算时投入已清零，这里补上最终底池，避免亮牌过程中显示「底池 0」。
+                potTotal: result.potTotal,
+                pots: [{ amount: result.potTotal, eligiblePlayerIds: [] }],
+              },
+            )
+          })
+        },
+        REVEAL_DELAY_MS * (index + 1),
+      )
+      room.revealTimers.push(timer)
+    })
+
+    const finalTimer = setTimeout(
+      () => {
+        void room.run(() => {
+          if (!stillSameHand()) return
+          this.bumpVersion(room)
+          this.publish(room, 'hand.settled', { notice, result })
+        })
+      },
+      REVEAL_DELAY_MS * (steps.length + 1),
+    )
+    room.revealTimers.push(finalTimer)
+  }
+
+  /** 聊天：长度与限流都在服务端裁定，文本按纯文本下发。 */
+  private handleChat(room: RoomRuntime, member: RoomMember, command: ChatSendCommand): void {
+    const now = Date.now()
+    const recent = (room.chatRate.get(member.playerId) ?? []).filter((stamp) => now - stamp < CHAT_WINDOW_MS)
+    if (recent.length >= CHAT_WINDOW_LIMIT) {
+      throw new CommandError('rate_limited', '发言太快了，请稍后再试')
+    }
+    recent.push(now)
+    room.chatRate.set(member.playerId, recent)
+
+    const message: ChatMessage = {
+      id: randomUUID(),
+      playerId: member.playerId,
+      nickname: member.nickname,
+      text: command.text.trim(),
+      at: now,
+    }
+    room.pushChat(message)
+    this.repo.saveReceipt(command.requestId, room.id, member.playerId, command.type, '{"ok":true}')
+    this.publishChat(room, message)
+  }
+
+  private publishChat(room: RoomRuntime, message: ChatMessage): void {
+    const base = this.envelope(room, 'chat.message', { chat: message })
+    for (const member of room.members.values()) {
+      if (!this.isConnected(member)) continue
+      this.sendTo(member, { ...base, self: this.privateState(room, member.playerId) })
     }
   }
 
@@ -612,17 +788,25 @@ export class RoomManager {
     if (!chosen) return
 
     const settledBefore = room.table.publicState().result
+    const boardBefore = room.table.publicState().board.length
     room.table.act(member.playerId, chosen.action)
     const settled = room.table.publicState().result
+    const justSettled = Boolean(settled && settled !== settledBefore)
     room.status = 'playing'
+    const notice = `${member.nickname} 超时，系统自动${chosen.action === 'check' ? '过牌' : '弃牌'}`
 
     this.bumpVersion(room)
     this.scheduleTurn(room)
     this.repo.transaction(() => this.writeState(room))
-    this.publish(room, settled && settled !== settledBefore ? 'hand.settled' : 'hand.state_changed', {
-      notice: `${member.nickname} 超时，系统自动${chosen.action === 'check' ? '过牌' : '弃牌'}`,
-      result: settled && settled !== settledBefore ? settled : undefined,
-    })
+    const steps = justSettled && settled ? this.revealStepsFor(settled, boardBefore) : []
+    if (justSettled && settled && steps.length > 0) {
+      this.scheduleReveals(room, settled, steps, notice)
+    } else {
+      this.publish(room, justSettled ? 'hand.settled' : 'hand.state_changed', {
+        notice,
+        result: justSettled ? (settled ?? undefined) : undefined,
+      })
+    }
   }
 
   /* ───────────────────────── 持久化 ───────────────────────── */
@@ -647,6 +831,7 @@ export class RoomManager {
     if (result && result.handId !== room.persistedHandId) {
       this.repo.saveHandResult(room.id, result)
       room.persistedHandId = result.handId
+      room.pushHistory(result)
     }
     this.repo.saveSnapshot(room.id, room.version, JSON.stringify(room.serialize()))
   }
@@ -671,7 +856,7 @@ export class RoomManager {
 
   private firstFreeSeat(room: RoomRuntime): number | null {
     for (let seat = 0; seat < room.maxSeats; seat++) {
-      if (!room.table.seatAt(seat)) return seat
+      if (room.table.isSeatAvailable(seat)) return seat
     }
     return null
   }
@@ -775,7 +960,10 @@ export class RoomManager {
   private sendSnapshot(room: RoomRuntime, playerId: string, type: ServerEventType = 'room.snapshot'): void {
     const member = room.members.get(playerId)
     if (!member) return
-    this.sendTo(member, { ...this.envelope(room, type, {}), self: this.privateState(room, playerId) })
+    this.sendTo(member, {
+      ...this.envelope(room, type, { chatHistory: [...room.chat], handHistory: [...room.history] }),
+      self: this.privateState(room, playerId),
+    })
   }
 
   private sendError(room: RoomRuntime, playerId: string, code: ErrorCode, message?: string): void {
@@ -792,8 +980,14 @@ export class RoomManager {
    * 版本号由调用方在写快照之前推进（见 bumpVersion），这样落库的版本与广播的版本一致，
    * 重启恢复后客户端不会看到版本倒退。
    */
-  private publish(room: RoomRuntime, type: ServerEventType, extra: Partial<ServerEvent> = {}): void {
+  private publish(
+    room: RoomRuntime,
+    type: ServerEventType,
+    extra: Partial<ServerEvent> = {},
+    stateOverride?: GameStatePublic,
+  ): void {
     const base = this.envelope(room, type, extra)
+    if (stateOverride) base.state = stateOverride
     for (const member of room.members.values()) {
       if (!this.isConnected(member)) continue
       this.sendTo(member, { ...base, self: this.privateState(room, member.playerId) })

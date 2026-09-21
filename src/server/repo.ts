@@ -159,6 +159,23 @@ export class Repo {
       .all() as unknown as { room_id: string; state_json: string }[]
   }
 
+  /** 恢复房间时载入最近的手牌结算（旧→新）。 */
+  recentHandResults(roomId: string, limit: number): HandResultPublic[] {
+    const rows = this.db
+      .prepare('SELECT result_json FROM hand_results WHERE room_id = ? ORDER BY settled_at DESC LIMIT ?')
+      .all(roomId, limit) as unknown as { result_json: string }[]
+    return rows
+      .map((row) => {
+        try {
+          return JSON.parse(row.result_json) as HandResultPublic
+        } catch {
+          return null
+        }
+      })
+      .filter((entry): entry is HandResultPublic => entry !== null)
+      .reverse()
+  }
+
   deleteSnapshot(roomId: string): void {
     this.db.prepare('DELETE FROM room_snapshots WHERE room_id = ?').run(roomId)
   }

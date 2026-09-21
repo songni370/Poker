@@ -1,17 +1,29 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Button from 'primevue/button'
 import Drawer from 'primevue/drawer'
+import InputText from 'primevue/inputtext'
 import Select from 'primevue/select'
 import type { ActionType, Card } from '../../shared/poker.ts'
-import { STREET_NAMES, TABLE_RULES } from '../../shared/poker.ts'
-import { connectRoom, loadCredentials, nextRequestId, sendCommand, useSessionStore } from '../net/session.ts'
+import { STREET_NAMES, TABLE_RULES, formatCard } from '../../shared/poker.ts'
+import type { ChatMessage } from '../../shared/protocol.ts'
+import { CHAT_MAX_LENGTH } from '../../shared/protocol.ts'
+import {
+  connectRoom,
+  loadCredentials,
+  nextRequestId,
+  sendChat,
+  sendCommand,
+  useSessionStore,
+} from '../net/session.ts'
 import ActionBar from '../components/ActionBar.vue'
 import ConnectionBanner from '../components/ConnectionBanner.vue'
 import HandResultOverlay from '../components/HandResultOverlay.vue'
 import PlayingCard from '../components/PlayingCard.vue'
 import PokerTable from '../components/PokerTable.vue'
+import { playPing, soundEnabled, unlockAudio } from '../sound.ts'
+import { useChatStore } from '../stores/chat.ts'
 import { useConnectionStore } from '../stores/connection.ts'
 import { useGameStore } from '../stores/game.ts'
 import { useRoomStore } from '../stores/room.ts'
@@ -232,6 +244,194 @@ function openDrawer(section: 'rules' | 'history' | 'chat'): void {
   drawerOpen.value = true
 }
 
+/* ───────────── 聊天（抽屉内的 chat 分节） ─────────────
+ * 数据全部来自 chat store（服务端广播），这里只负责展示、未读与滚动行为。 */
+
+const chat = useChatStore()
+
+/**
+ * 时间交给 Intl 格式化，不硬编码 HH:mm。
+ * 界面语言固定为简体中文（<html lang="zh-CN">），这里显式指定区域，
+ * 避免浏览器区域是 en-US 时出现「06:48 PM」这类与界面不一致的格式。
+ */
+const chatTimeFormat = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' })
+const chatDayFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' })
+
+function isOwnMessage(message: ChatMessage): boolean {
+  const selfId = game.self?.playerId
+  return Boolean(selfId) && message.playerId === selfId
+}
+
+function chatTime(at: number): string {
+  return Number.isFinite(at) ? chatTimeFormat.format(at) : ''
+}
+
+function chatFullTime(at: number): string {
+  return Number.isFinite(at) ? chatDayFormat.format(at) : ''
+}
+
+/** <time datetime> 用：时间戳异常时不抛错，只省略属性。 */
+function chatIso(at: number): string | undefined {
+  return Number.isFinite(at) ? new Date(at).toISOString() : undefined
+}
+
+/** 抽屉是否正停在聊天分节：决定未读是否清零、消息是否即时标记已读。 */
+const chatPanelVisible = computed(() => drawerOpen.value && drawerSection.value === 'chat')
+
+const chatText = ref('')
+const chatError = ref('')
+/** 中文输入法组合期间的回车只用于确认候选词，不能当成发送。 */
+const composing = ref(false)
+
+const chatRemaining = computed(() => CHAT_MAX_LENGTH - chatText.value.length)
+const canSendChat = computed(() => chatText.value.trim().length > 0)
+
+const chatListRef = ref<HTMLElement | null>(null)
+/** 用户主动往上翻时置为 false：新消息只给提示，不抢滚动位置。 */
+const chatAtBottom = ref(true)
+const chatHasNews = ref(false)
+
+function onChatScroll(): void {
+  const element = chatListRef.value
+  if (!element) return
+  chatAtBottom.value = element.scrollHeight - element.scrollTop - element.clientHeight <= 24
+  if (chatAtBottom.value) chatHasNews.value = false
+}
+
+/** 滚到底部：只在用户本来就在底部（或自己刚发完消息）时调用。 */
+async function scrollChatToBottom(): Promise<void> {
+  await nextTick()
+  const element = chatListRef.value
+  if (!element) return
+  element.scrollTop = element.scrollHeight
+  chatAtBottom.value = true
+  chatHasNews.value = false
+}
+
+function onChatKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Enter') return
+  // Shift+Enter 不发送；顺带挡掉单行输入可能触发的原生表单提交。
+  if (event.shiftKey) {
+    event.preventDefault()
+    return
+  }
+  // 中文输入法组合期间的回车只用于确认候选词。
+  if (event.isComposing || composing.value) return
+  event.preventDefault()
+  submitChat()
+}
+
+function submitChat(): void {
+  const text = chatText.value.trim()
+  if (text.length === 0) return
+  if (text.length > CHAT_MAX_LENGTH) {
+    chatError.value = `消息最多 ${String(CHAT_MAX_LENGTH)} 个字，请删减后再发送。`
+    return
+  }
+  if (!sendChat(text)) {
+    chatError.value = '未连接，消息未发送'
+    return
+  }
+  chatText.value = ''
+  chatError.value = ''
+  void scrollChatToBottom()
+}
+
+const unreadText = computed(() => (chat.unread > 99 ? '99+' : String(chat.unread)))
+const chatAria = computed(() =>
+  chat.unread > 0 ? `聊天，${String(chat.unread)} 条未读消息` : '聊天，没有未读消息',
+)
+const chatTitle = computed(() => (chat.unread > 0 ? `聊天（${String(chat.unread)} 条未读）` : '聊天'))
+
+// 打开聊天面板即清零未读；面板开着时新消息也直接算已读。
+watch(
+  chatPanelVisible,
+  (visible) => {
+    if (!visible) return
+    chat.markRead()
+    void scrollChatToBottom()
+  },
+  { immediate: true },
+)
+
+watch(
+  () => chat.count,
+  () => {
+    if (chatPanelVisible.value) chat.markRead()
+    if (chatAtBottom.value) void scrollChatToBottom()
+    else chatHasNews.value = true
+  },
+)
+
+/* ───────────── 手牌历史（抽屉内的 history 分节） ───────────── */
+
+/** 昵称以当前座位快照为准；已离座玩家退化为占位文案。 */
+function nicknameOf(playerId: string): string {
+  return game.seats.find((seat) => seat?.playerId === playerId)?.nickname ?? '已离座玩家'
+}
+
+function boardText(cards: readonly Card[]): string {
+  return cards.map((card) => formatCard(card)).join(' ')
+}
+
+/** 旧→新的服务端历史，展示时反转为最新在最上面。 */
+const historyRows = computed(() =>
+  [...game.history].reverse().map((entry) => ({
+    ...entry,
+    boardLabel: boardText(entry.board),
+    winners: entry.winners.map((winner) => ({
+      ...winner,
+      nickname: nicknameOf(winner.playerId),
+      isHero: winner.playerId === game.self?.playerId,
+    })),
+  })),
+)
+
+const historyAria = computed(() =>
+  game.history.length > 0
+    ? `手牌历史，已记录 ${String(game.history.length)} 手`
+    : '手牌历史，暂无记录',
+)
+
+/* ───────────── 提示音开关 ─────────────
+ * soundEnabled 已持久化；打开时必须由用户手势解锁音频上下文。 */
+
+const soundAria = computed(() => `提示音：${soundEnabled.value ? '开' : '关'}`)
+
+function toggleSound(): void {
+  soundEnabled.value = !soundEnabled.value
+  if (soundEnabled.value) {
+    // 顺序不能反：ensureContext 会先检查开关是否打开。
+    unlockAudio()
+    playPing()
+    announcement.value = '提示音已打开。'
+    return
+  }
+  announcement.value = '提示音已关闭。'
+}
+
+/* ───────────── 观战者面板 ───────────── */
+
+const occupiedCount = computed(() => game.seats.filter(Boolean).length)
+const maxSeats = computed(() => game.state?.maxSeats ?? 0)
+
+/** 第一个空座位号；没有空位时为 null（入座按钮据此禁用）。 */
+const firstFreeSeat = computed<number | null>(() => {
+  const total = maxSeats.value
+  for (let index = 0; index < total; index += 1) {
+    if (!game.seats[index]) return index
+  }
+  return null
+})
+
+function takeFreeSeat(): void {
+  const seat = firstFreeSeat.value
+  if (seat === null) return
+  if (!sendCommand({ type: 'seat.take', requestId: nextRequestId(), seat })) {
+    announcement.value = '尚未连接到服务器，入座请求未发送。'
+  }
+}
+
 function submitAction(payload: { action: ActionType; amount?: number }): void {
   const state = game.state
   if (!state || !state.handId) {
@@ -264,18 +464,6 @@ async function leaveTable(): Promise<void> {
   await router.push({ name: 'room', params: { roomId: props.roomId } })
 }
 
-const historyEntries = computed(() => {
-  const result = game.state?.lastResult
-  if (!result) return []
-  return [
-    {
-      handNo: result.handNo,
-      street: STREET_NAMES.river,
-      pot: result.potTotal,
-      winners: result.winners.length,
-    },
-  ]
-})
 
 </script>
 
@@ -310,13 +498,28 @@ const historyEntries = computed(() => {
         <i class="pi pi-book" aria-hidden="true" />
         <span>规则</span>
       </Button>
-      <Button size="small" text aria-label="手牌历史" :title="'查看手牌历史'" @click="openDrawer('history')">
+      <Button size="small" text :aria-label="historyAria" :title="'查看手牌历史'" @click="openDrawer('history')">
         <i class="pi pi-list" aria-hidden="true" />
         <span>历史</span>
+        <!-- 手数只在宽屏显示，窄屏交给 aria-label 说明。 -->
+        <span v-if="game.history.length > 0" class="count-chip count-chip--history num" aria-hidden="true">{{ game.history.length }}</span>
       </Button>
-      <Button size="small" text aria-label="聊天" :title="'聊天（第 3 阶段开放）'" @click="openDrawer('chat')">
+      <Button size="small" text :aria-label="chatAria" :title="chatTitle" @click="openDrawer('chat')">
         <i class="pi pi-comments" aria-hidden="true" />
         <span>聊天</span>
+        <!-- 未读数：数字 + aria-label 双重说明，不靠颜色或红点单独表意。 -->
+        <span v-if="chat.unread > 0" class="count-chip count-chip--unread num" aria-hidden="true">{{ unreadText }}</span>
+      </Button>
+      <Button
+        size="small"
+        text
+        :aria-label="soundAria"
+        :aria-pressed="soundEnabled"
+        :title="`${soundAria}，点击切换`"
+        @click="toggleSound"
+      >
+        <i :class="soundEnabled ? 'pi pi-volume-up' : 'pi pi-volume-off'" aria-hidden="true" />
+        <span>提示音：{{ soundEnabled ? '开' : '关' }}</span>
       </Button>
       <Button
         v-if="canStartNextHand"
@@ -377,7 +580,7 @@ const historyEntries = computed(() => {
 
     <!-- 底部：本人底牌、剩余筹码、倒计时、下注控件与动作区。 -->
     <footer v-if="!unavailable" class="hero">
-      <div class="hero-cards">
+      <div v-if="game.isSeated" class="hero-cards">
         <span class="hero-label">你的底牌</span>
         <div class="cards">
           <PlayingCard v-for="card in myCards" :key="card" size="lg" upright :card="card" />
@@ -389,7 +592,43 @@ const historyEntries = computed(() => {
         </span>
       </div>
 
+      <!-- 观战者：只显示公开信息与入座入口，绝不渲染任何玩家的底牌。 -->
+      <section v-else-if="game.self" class="spectator" aria-labelledby="spectator-state">
+        <p id="spectator-state" class="spectator-state">
+          <i class="pi pi-eye" aria-hidden="true" />
+          <b>观战中</b>
+          <span class="muted">你正在旁观这桌牌局，只能看到已经公开的牌。</span>
+        </p>
+
+        <p class="spectator-seats">
+          <span class="muted">已入座</span>
+          <b class="num">{{ occupiedCount }}/{{ maxSeats }}</b>
+          <span v-if="firstFreeSeat !== null" class="muted">· 空位：{{ firstFreeSeat + 1 }} 号座位</span>
+        </p>
+
+        <div class="spectator-actions">
+          <Button
+            :disabled="firstFreeSeat === null"
+            :title="firstFreeSeat === null ? '座位已满，等有人离座' : `坐到 ${String(firstFreeSeat + 1)} 号座位`"
+            @click="takeFreeSeat"
+          >
+            <i class="pi pi-user-plus" aria-hidden="true" />
+            <span>入座</span>
+          </Button>
+          <Button outlined :title="'回到等待区'" @click="leaveTable">
+            <i class="pi pi-arrow-left" aria-hidden="true" />
+            <span>回等待区</span>
+          </Button>
+        </div>
+
+        <p v-if="firstFreeSeat === null" class="hint" role="status">座位已满，等有人离座。</p>
+        <p v-else class="hint spectator-tip">入座后即可参与下一手牌；观战期间不下注、不行动。</p>
+      </section>
+
+      <p v-else class="hint">正在载入你的座位信息…</p>
+
       <ActionBar
+        v-if="game.isSeated"
         class="hero-actions"
         :legal-actions="game.myLegalActions"
         :pot-total="potTotal"
@@ -406,69 +645,162 @@ const historyEntries = computed(() => {
 
     <!-- 侧边抽屉：规则 / 手牌历史 / 聊天；默认收起，不抢占桌面宽度。 -->
     <Drawer v-model:visible="drawerOpen" position="right" :header="'牌桌信息'" :style="{ width: 'min(92vw, 360px)' }">
-      <div class="drawer-tabs" role="tablist" aria-label="牌桌信息分类">
-        <Button
-          size="small"
-          :severity="drawerSection === 'rules' ? 'help' : 'secondary'"
-          :outlined="drawerSection !== 'rules'"
-          role="tab"
-          :aria-selected="drawerSection === 'rules'"
-          :title="'规则摘要'"
-          @click="drawerSection = 'rules'"
-        >
-          <span>规则</span>
-        </Button>
-        <Button
-          size="small"
-          :severity="drawerSection === 'history' ? 'help' : 'secondary'"
-          :outlined="drawerSection !== 'history'"
-          role="tab"
-          :aria-selected="drawerSection === 'history'"
-          :title="'手牌历史'"
-          @click="drawerSection = 'history'"
-        >
-          <span>历史</span>
-        </Button>
-        <Button
-          size="small"
-          :severity="drawerSection === 'chat' ? 'help' : 'secondary'"
-          :outlined="drawerSection !== 'chat'"
-          role="tab"
-          :aria-selected="drawerSection === 'chat'"
-          :title="'聊天'"
-          @click="drawerSection = 'chat'"
-        >
-          <span>聊天</span>
-        </Button>
+      <div class="drawer-inner">
+          <div class="drawer-tabs" role="tablist" aria-label="牌桌信息分类">
+          <Button
+            size="small"
+            :severity="drawerSection === 'rules' ? 'help' : 'secondary'"
+            :outlined="drawerSection !== 'rules'"
+            role="tab"
+            :aria-selected="drawerSection === 'rules'"
+            :title="'规则摘要'"
+            @click="drawerSection = 'rules'"
+          >
+            <span>规则</span>
+          </Button>
+          <Button
+            size="small"
+            :severity="drawerSection === 'history' ? 'help' : 'secondary'"
+            :outlined="drawerSection !== 'history'"
+            role="tab"
+            :aria-selected="drawerSection === 'history'"
+            :title="'手牌历史'"
+            @click="drawerSection = 'history'"
+          >
+            <span>历史</span>
+          </Button>
+          <Button
+            size="small"
+            :severity="drawerSection === 'chat' ? 'help' : 'secondary'"
+            :outlined="drawerSection !== 'chat'"
+            role="tab"
+            :aria-selected="drawerSection === 'chat'"
+            :title="'聊天'"
+            @click="drawerSection = 'chat'"
+          >
+            <span>聊天</span>
+          </Button>
+        </div>
+
+        <section v-if="drawerSection === 'rules'" class="drawer-body" aria-label="规则摘要">
+          <h3>本桌规则</h3>
+          <dl>
+            <div><dt>游戏</dt><dd>无限注德州扑克，52 张牌</dd></div>
+            <div><dt>盲注</dt><dd class="num">{{ TABLE_RULES.smallBlind }}/{{ TABLE_RULES.bigBlind }}</dd></div>
+            <div><dt>起始筹码</dt><dd class="num">{{ TABLE_RULES.startingStack }}</dd></div>
+            <div><dt>行动时间</dt><dd>{{ turnSeconds }} 秒，超时自动过牌或弃牌</dd></div>
+            <div><dt>牌型大小</dt><dd>同花顺 &gt; 四条 &gt; 葫芦 &gt; 同花 &gt; 顺子 &gt; 三条 &gt; 两对 &gt; 一对 &gt; 高牌</dd></div>
+            <div><dt>边池</dt><dd>每个边池只由该池合格玩家争夺</dd></div>
+            <div><dt>筹码性质</dt><dd>虚拟分数，不可充值、不可兑换、不可转让</dd></div>
+          </dl>
+        </section>
+
+        <section v-else-if="drawerSection === 'history'" class="drawer-body" aria-label="手牌历史">
+          <h3>手牌历史</h3>
+          <template v-if="historyRows.length > 0">
+            <p class="hint">已记录 {{ historyRows.length }} 手，最新的在最上面。</p>
+            <ul class="history">
+              <li v-for="entry in historyRows" :key="entry.handId" class="history-item">
+                <p class="history-head">
+                  <b class="history-no">第 {{ entry.handNo }} 手</b>
+                  <span class="history-pot">
+                    <span class="muted">底池</span>
+                    <b class="num">{{ entry.potTotal }}</b>
+                  </span>
+                </p>
+
+                <p class="history-board">
+                  <span class="history-board-label">公共牌</span>
+                  <span v-if="entry.board.length > 0" class="num board-cards">{{ entry.boardLabel }}</span>
+                  <span v-else class="muted">翻牌前结束，未发公共牌</span>
+                </p>
+
+                <ul class="history-winners">
+                  <li v-for="row in entry.winners" :key="`${row.playerId}-${String(row.potIndex)}`">
+                    <span class="winner-name" :class="{ 'is-hero': row.isHero }">{{ row.nickname }}</span>
+                    <span class="num winner-amount">+{{ row.amount }}</span>
+                    <span class="winner-hand">{{ row.handName ?? (entry.showdown ? '未亮牌' : '未摊牌') }}</span>
+                    <span class="winner-pot muted">
+                      {{ row.potIndex === 0 ? '主池' : `边池 ${String(row.potIndex)}` }}
+                    </span>
+                  </li>
+                </ul>
+
+                <p v-if="entry.winners.length > 1" class="hint">
+                  本手 {{ entry.winners.length }} 位玩家平分底池。
+                </p>
+                <p v-else-if="!entry.showdown" class="hint">其余玩家弃牌，底牌未公开。</p>
+              </li>
+            </ul>
+          </template>
+          <p v-else class="hint">还没有打完的手牌</p>
+        </section>
+
+        <section v-else class="drawer-body drawer-body--chat" aria-label="聊天">
+          <h3>聊天</h3>
+
+          <div
+            ref="chatListRef"
+            class="chat-list thin-scroll"
+            role="log"
+            aria-live="polite"
+            aria-label="聊天消息"
+            @scroll.passive="onChatScroll"
+          >
+            <ol v-if="chat.count > 0" class="chat-msgs">
+              <li
+                v-for="message in chat.messages"
+                :key="message.id"
+                class="chat-msg"
+                :class="{ 'is-own': isOwnMessage(message) }"
+              >
+                <p class="chat-meta">
+                  <span class="chat-who">{{ isOwnMessage(message) ? '你' : message.nickname }}</span>
+                  <time class="chat-time num" :datetime="chatIso(message.at)" :title="chatFullTime(message.at)">
+                    {{ chatTime(message.at) }}
+                  </time>
+                </p>
+                <p class="chat-text">{{ message.text }}</p>
+              </li>
+            </ol>
+            <p v-else class="hint chat-empty">还没有人说话</p>
+          </div>
+
+          <!-- 用户往上翻时出现：跳到底部由用户自己决定，不抢滚动位置。 -->
+          <Button v-if="chatHasNews" size="small" text class="chat-jump" :title="'跳到最新消息'" @click="scrollChatToBottom">
+            <i class="pi pi-arrow-down" aria-hidden="true" />
+            <span>有新消息，跳到最新</span>
+          </Button>
+
+          <form class="chat-form" @submit.prevent="submitChat">
+            <label class="sr-only" for="chat-input">聊天输入框</label>
+            <InputText
+              id="chat-input"
+              v-model="chatText"
+              class="chat-input"
+              type="text"
+              autocomplete="off"
+              :maxlength="CHAT_MAX_LENGTH"
+              :placeholder="'说点什么…'"
+              aria-describedby="chat-counter"
+              @keydown="onChatKeydown"
+              @compositionstart="composing = true"
+              @compositionend="composing = false"
+              @input="chatError = ''"
+            />
+            <Button type="submit" :disabled="!canSendChat" :title="canSendChat ? '发送消息（Enter）' : '请先输入内容'">
+              <i class="pi pi-send" aria-hidden="true" />
+              <span>发送</span>
+            </Button>
+          </form>
+
+          <p id="chat-counter" class="chat-counter muted num">
+            还可输入 {{ chatRemaining }} 字（上限 {{ CHAT_MAX_LENGTH }}）
+          </p>
+          <p v-if="chatError" class="chat-error" role="alert">{{ chatError }}</p>
+          <p class="hint">Enter 发送，Shift+Enter 不发送；消息仅本房间可见。</p>
+        </section>
       </div>
-
-      <section v-if="drawerSection === 'rules'" class="drawer-body" aria-label="规则摘要">
-        <h3>本桌规则</h3>
-        <dl>
-          <div><dt>游戏</dt><dd>无限注德州扑克，52 张牌</dd></div>
-          <div><dt>盲注</dt><dd class="num">{{ TABLE_RULES.smallBlind }}/{{ TABLE_RULES.bigBlind }}</dd></div>
-          <div><dt>起始筹码</dt><dd class="num">{{ TABLE_RULES.startingStack }}</dd></div>
-          <div><dt>行动时间</dt><dd>{{ turnSeconds }} 秒，超时自动过牌或弃牌</dd></div>
-          <div><dt>牌型大小</dt><dd>同花顺 &gt; 四条 &gt; 葫芦 &gt; 同花 &gt; 顺子 &gt; 三条 &gt; 两对 &gt; 一对 &gt; 高牌</dd></div>
-          <div><dt>边池</dt><dd>每个边池只由该池合格玩家争夺</dd></div>
-          <div><dt>筹码性质</dt><dd>虚拟分数，不可充值、不可兑换、不可转让</dd></div>
-        </dl>
-      </section>
-
-      <section v-else-if="drawerSection === 'history'" class="drawer-body" aria-label="手牌历史">
-        <h3>手牌历史</h3>
-        <ol v-if="historyEntries.length > 0">
-          <li v-for="entry in historyEntries" :key="entry.handNo">
-            第 {{ entry.handNo }} 手 · 底池 <span class="num">{{ entry.pot }}</span> · 赢家 {{ entry.winners }} 位
-          </li>
-        </ol>
-        <p v-else class="hint">还没有已结算的手牌。每手结束后这里会记录底池与赢家。</p>
-      </section>
-
-      <section v-else class="drawer-body" aria-label="聊天">
-        <h3>聊天</h3>
-        <p class="hint">聊天将在第 3 阶段随联机一起开放；当前版本不发送任何内容。</p>
-      </section>
     </Drawer>
 
     <!-- 结算叠层：赢家、牌型与各边池分配。 -->
@@ -583,6 +915,13 @@ const historyEntries = computed(() => {
   margin-inline: auto;
 }
 
+.drawer-inner {
+  display: flex;
+  flex-direction: column;
+  /* 不少于抽屉可视高度：内容少时输入区仍贴底，内容多时整段可滚动。 */
+  min-height: 100%;
+}
+
 .drawer-tabs {
   display: flex;
   gap: var(--space-1);
@@ -616,12 +955,282 @@ const historyEntries = computed(() => {
   margin: 0;
 }
 
-.drawer-body ol {
+/* ───────────── 顶栏角标：手数 / 未读数（数字 + aria-label 双重表意） ───────────── */
+
+.count-chip {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--gold-dim);
+  color: var(--gold);
+  font-size: 0.68rem;
+  line-height: 1;
+}
+
+.count-chip--unread {
+  background: var(--action);
+  color: #ffffff;
+  font-weight: 700;
+}
+
+/* ───────────── 观战者面板（!game.isSeated 时替换「你的底牌」区） ───────────── */
+
+.spectator {
+  display: grid;
+  gap: 6px;
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.spectator-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin: 0;
-  padding-left: 1.2em;
+  font-size: 0.88rem;
+}
+
+.spectator-state b {
+  color: var(--gold);
+  /* 「观战中」在窄屏不折行。 */
+  white-space: nowrap;
+}
+
+.spectator-seats {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.spectator-seats b {
+  color: var(--text);
+}
+
+.spectator-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}
+
+.spectator .hint {
+  font-size: 0.78rem;
+}
+
+/* ───────────── 手牌历史（最新在最上面） ───────────── */
+
+.history {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history-item {
   display: grid;
   gap: 4px;
+  padding: var(--space-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.history-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  margin: 0;
+  font-size: 0.86rem;
+}
+
+.history-no {
+  color: var(--gold);
+}
+
+.history-pot {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-left: auto;
+  font-size: 0.78rem;
+}
+
+.history-board {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.history-board-label {
+  color: var(--muted);
+}
+
+.board-cards {
+  /* 长牌面（5 张）允许换行，不横向撑破抽屉。 */
+  overflow-wrap: anywhere;
+}
+
+.history-winners {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8rem;
+}
+
+.history-winners li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.winner-name {
+  font-weight: 600;
+  /* 长昵称截断，避免把金额挤出可视区。 */
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.winner-name.is-hero {
+  color: var(--gold);
+}
+
+.winner-amount {
+  color: var(--positive);
+}
+
+.winner-hand,
+.winner-pot {
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+/* ───────────── 聊天 ───────────── */
+
+.drawer-body--chat {
+  display: flex;
+  flex-direction: column;
+  /* 抽屉高度内部分配：消息列表滚动，输入区固定在底部。 */
+  flex: 1;
+  gap: 6px;
+  min-height: 0;
+}
+
+.chat-list {
+  flex: 1;
+  min-height: 120px;
+  max-height: 60vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.chat-msgs {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: var(--space-1);
+  list-style: none;
+}
+
+.chat-msg {
+  display: grid;
+  gap: 2px;
+  max-width: 88%;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+/* 自己的消息：靠右 + 「你」标记 + 左侧描边，不只靠颜色区分。 */
+.chat-msg.is-own {
+  justify-self: end;
+  border-color: var(--gold-soft);
+  border-left-width: 3px;
+  text-align: right;
+}
+
+.chat-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.chat-msg.is-own .chat-meta {
+  flex-direction: row-reverse;
+}
+
+.chat-who {
+  font-weight: 600;
+  color: var(--text);
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-msg.is-own .chat-who {
+  color: var(--gold);
+}
+
+.chat-text {
+  margin: 0;
   font-size: 0.84rem;
+  line-height: 1.45;
+  /* 长文本与长英文串在气泡内换行，不撑破抽屉。 */
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.chat-empty {
+  padding: var(--space-1);
+}
+
+.chat-jump {
+  justify-self: start;
+}
+
+.chat-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-counter {
+  margin: 0;
+  font-size: 0.72rem;
+}
+
+.chat-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.78rem;
 }
 
 /* 竖屏窄屏：给出横屏引导；牌桌与操作区保持可用。 */
@@ -660,6 +1269,19 @@ const historyEntries = computed(() => {
 
   .bar :deep(.p-button > span:not([class])) {
     display: none;
+  }
+
+  /* 手数角标窄屏省略（按钮 aria-label 仍带手数）；未读角标始终保留。 */
+  .count-chip--history {
+    display: none;
+  }
+
+  .spectator {
+    padding: var(--space-1);
+  }
+
+  .chat-list {
+    max-height: none;
   }
 
   .hero-label {
@@ -727,6 +1349,33 @@ const historyEntries = computed(() => {
   .rotate-hint {
     margin-top: 2px;
   }
+
+  /* 观战面板在矮屏排成一行，把高度让给牌桌。 */
+  .spectator {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 6px var(--space-1);
+  }
+
+  .spectator-state {
+    font-size: 0.82rem;
+  }
+
+  /* 说明性提示让位；「座位已满」这类状态提示仍然保留。 */
+  .spectator-tip {
+    display: none;
+  }
+
+  .spectator-actions :deep(.p-button) {
+    padding-block: 8px;
+  }
+
+  .chat-list {
+    max-height: none;
+    min-height: 84px;
+  }
 }
 
 @media (max-height: 430px) and (max-width: 1100px) {
@@ -759,6 +1408,11 @@ const historyEntries = computed(() => {
 
   .scenario {
     min-width: 104px;
+  }
+
+  /* 手数角标在矮屏省略（按钮 aria-label 仍带手数）。 */
+  .count-chip--history {
+    display: none;
   }
 }
 

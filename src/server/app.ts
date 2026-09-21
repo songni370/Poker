@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path'
 import type { DbHandle } from './db/index.ts'
 import { Repo } from './repo.ts'
 import { RoomManager } from './rooms.ts'
+import { DEFAULT_MAX_ROOMS } from '../shared/protocol.ts'
 import { registerHttpRoutes } from './routes.ts'
 import { registerWebSocketRoutes } from './ws.ts'
 import { HealthResponseSchema, type HealthResponse, type ErrorResponse } from '../shared/protocol.ts'
@@ -31,6 +32,8 @@ const loggerOptions: FastifyServerOptions['logger'] = {
 
 export interface BuildAppOptions {
   clientDir?: string
+  /** 同时开放的房间上限，默认取 MAX_ROOMS 或 3。 */
+  maxRooms?: number
 }
 
 export interface BuiltApp {
@@ -46,7 +49,7 @@ export async function buildApp(handle: DbHandle, options: BuildAppOptions = {}):
   const startedAt = Date.now()
 
   const repo = new Repo(handle.db)
-  const rooms = new RoomManager(repo)
+  const rooms = new RoomManager(repo, options.maxRooms ?? Number(process.env.MAX_ROOMS ?? DEFAULT_MAX_ROOMS))
   rooms.startSweeper()
   // 第 4 阶段：进程重启后从 SQLite 快照恢复未关闭房间（含牌局与牌堆位置）。
   const recovery = rooms.restoreRooms()
@@ -68,6 +71,7 @@ export async function buildApp(handle: DbHandle, options: BuildAppOptions = {}):
       dbPath: handle.path,
       dbMigration: handle.migration,
       rooms: rooms.roomCount(),
+      maxRooms: rooms.roomLimit(),
       uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
       serverTime: Date.now(),
     }),

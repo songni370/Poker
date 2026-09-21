@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { GameStatePublic, LegalAction, PrivateSelfState, SeatPublic } from '../../shared/protocol.ts'
+import type { GameStatePublic, HandResultPublic, LegalAction, PrivateSelfState, SeatPublic } from '../../shared/protocol.ts'
+import { HAND_HISTORY_LIMIT } from '../../shared/protocol.ts'
 
 /**
  * 牌局公共状态 + 本人私有状态。
@@ -13,6 +14,8 @@ export const useGameStore = defineStore('game', () => {
   const state = ref<GameStatePublic | null>(null)
   /** 只有本人底牌与合法动作。 */
   const self = ref<PrivateSelfState | null>(null)
+  /** 本房最近的手牌结算（新→旧由展示层决定），重连时由服务端整体替换。 */
+  const history = ref<HandResultPublic[]>([])
 
   /** 整体替换快照：重连、乱序、丢包都收敛到这一份服务端真相。 */
   function applySnapshot(next: GameStatePublic, nextSelf: PrivateSelfState): void {
@@ -20,9 +23,21 @@ export const useGameStore = defineStore('game', () => {
     self.value = nextSelf
   }
 
+  /** 用服务端下发的历史整体替换（进入房间 / 重连）。 */
+  function setHistory(next: readonly HandResultPublic[]): void {
+    history.value = [...next]
+  }
+
+  /** 一手结算后追加，最多保留 HAND_HISTORY_LIMIT 条，且同一 handId 不重复。 */
+  function appendHistory(result: HandResultPublic): void {
+    if (history.value.some((entry) => entry.handId === result.handId)) return
+    history.value = [...history.value, result].slice(-HAND_HISTORY_LIMIT)
+  }
+
   function clear(): void {
     state.value = null
     self.value = null
+    history.value = []
   }
 
   /* ───────────────── 便捷 getter ───────────────── */
@@ -68,7 +83,10 @@ export const useGameStore = defineStore('game', () => {
   return {
     state,
     self,
+    history,
     applySnapshot,
+    setHistory,
+    appendHistory,
     clear,
     seats,
     board,

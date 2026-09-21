@@ -98,12 +98,15 @@ npm run dev        # 客户端 http://localhost:5173 · 服务端 http://localho
 | `POST` | `/api/rooms` | 建房。body `{ nickname, roomName?, maxSeats? }`，返回玩家凭证（含重连凭证） |
 | `POST` | `/api/rooms/:roomId/join` | 加入房间。body `{ nickname }`，返回玩家凭证 |
 | `GET` | `/api/rooms/:roomId` | 邀请链接落地页预检：只返回房间公开信息（不泄露任何凭证） |
+
+> **房间数上限**：服务器同时最多开放 **3 桌**（`MAX_ROOMS` 可覆盖，默认 3）。上限只约束新建；
+> 已在进行的牌局不会被强制关闭，等其中一桌结束或被回收后才允许开新桌。大厅会显示「当前开放 x/3 桌」。
 | `WS` | `/ws` | 同端口 WebSocket：订阅、心跳、动作、重连 |
 
 **WebSocket 协议**（类型与 zod 校验集中在 `src/shared/protocol.ts`）
 
-- 客户端 → 服务端：`room.join`、`seat.take`、`seat.leave`、`room.ready`、`game.start`、`game.action`、`heartbeat`
-- 服务端 → 客户端：`room.snapshot`、`room.player_joined`、`room.player_left`、`hand.started`、`hand.state_changed`、`turn.started`、`hand.settled`、`room.error`、`connection.recovered`、`pong`
+- 客户端 → 服务端：`room.join`、`seat.take`、`seat.leave`、`room.ready`、`game.start`、`game.action`、`chat.send`、`heartbeat`
+- 服务端 → 客户端：`room.snapshot`、`room.player_joined`、`room.player_left`、`hand.started`、`hand.state_changed`、`turn.started`、`hand.settled`、`room.error`、`connection.recovered`、`chat.message`、`pong`
 - 每条事件都携带完整「公共状态 + 本人私有状态」（`state` / `self`），客户端整体替换本地快照，重连与丢包都收敛到同一份服务端真相。
 - 动作命令带 `requestId`（幂等去重）与 `expectedVersion`（过期即拒绝并回发最新快照）。
 - **`state` 中永远不含他人未公开底牌**；`self.holeCards` 只发给本人。该约束有自动化测试覆盖（见下）。
@@ -116,7 +119,16 @@ npm test     # Node 内置测试运行器，直接执行 TypeScript
 
 覆盖内容：牌型/踢脚/低顺与循环顺、边池分层与余数分配、双人桌与三人桌盲位、最小加注与未满额 All-in 不重开加注、随机对局筹码守恒不变量、SQLite 迁移幂等；
 真实 WebSocket 联机闭环：两个独立会话建房入座 → 打完一手摊牌 → **摊牌前不泄露对手底牌**（含反向对照）、重复请求幂等、过期版本拒绝、断线重连一致性与冒名凭证拒绝；
-第 4 阶段可靠性：引擎快照往返一致性与损坏快照拒收、**单进程重启后从 SQLite 恢复同一手牌并继续打完**、重启后不重复结算、按持久化截止时间判定超时动作。
+第 4 阶段可靠性：引擎快照往返一致性与损坏快照拒收、**单进程重启后从 SQLite 恢复同一手牌并继续打完**、重启后不重复结算、按持久化截止时间判定超时动作；
+体验与节奏：服务器房间数上限、聊天广播/历史/限流/长度校验、全下逐张亮牌（含被抢先开下一手时结算不丢）、观战者无底牌无动作且可在空位后入座。
+
+## 对局体验
+
+- **聊天**：`chat.send` 只在服务端校验长度（200 字）与频率（5 秒内最多 5 条），文本按纯文本下发；**不落库**（避免记录聊天内容），进入/重连时下发最近 50 条。聊天不推进牌局版本号，因此不会误伤别人正在提交的动作。
+- **手牌历史**：每房保留最近 20 手结算（重启后从 `hand_results` 重新载入），进入房间时随快照下发，抽屉里可查看每手的公共牌、底池、赢家与牌型。
+- **提示音**：轮到你行动与结算时各有一声提示，用 Web Audio 现场合成（不引入任何音频素材），默认关闭、可在顶栏开关，状态本地持久化。
+- **观战**：座位满了仍可进来观战（观战位上限 = 座位数）；观战者拿不到任何人的底牌、也没有可执行动作，有人离座后可以直接入座（本手不参与，下一手开始发牌）。
+- **全下逐张亮牌**：所有人全下时不再一次性弹出 5 张公共牌，服务端按「翻牌 → 转牌 → 河牌」（每段 750ms）分段推送，最后才发结算事件；期间若有人抢先开下一手，上一手结算会被补发，结果绝不丢失。
 
 ## 持久化与重启恢复
 

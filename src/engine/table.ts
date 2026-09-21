@@ -146,8 +146,19 @@ export class HoldemTable {
     return this.seats.find((seat) => seat.playerId === playerId)
   }
 
+  /**
+   * 取座位占用者。手牌进行中离座的玩家会以 pendingLeave 保留到本手结束
+   * （筹码还留在池里、底牌已弃），这个座位对新玩家来说其实是空的，
+   * 因此这里优先返回真正在座的那一个，只有在没有在座者时才退回到「正在离座」的条目。
+   */
   seatAt(seat: number): Seat | undefined {
-    return this.seats.find((entry) => entry.seat === seat)
+    let leaving: Seat | undefined
+    for (const entry of this.seats) {
+      if (entry.seat !== seat) continue
+      if (!entry.pendingLeave) return entry
+      leaving ??= entry
+    }
+    return leaving
   }
 
   seatedPlayers(): { playerId: string; nickname: string; seat: number; stack: number }[] {
@@ -162,11 +173,18 @@ export class HoldemTable {
     return !this.isHandRunning() && this.seats.filter((seat) => seat.stack > 0).length >= 2
   }
 
+  /** 该座位现在能否立刻坐人：正在离座（pendingLeave）的玩家不算占用。 */
+  isSeatAvailable(seat: number): boolean {
+    const occupant = this.seatAt(seat)
+    return occupant === undefined || occupant.pendingLeave
+  }
+
   sit(playerId: string, nickname: string, seat: number, stack = this.config.startingStack): void {
     if (!Number.isInteger(seat) || seat < 0 || seat >= this.config.maxSeats) {
       throw new EngineError('bad_state', '座位号超出范围')
     }
-    if (this.seatAt(seat)) throw new EngineError('bad_state', '该座位已被占用')
+    const occupant = this.seatAt(seat)
+    if (occupant && !occupant.pendingLeave) throw new EngineError('bad_state', '该座位已被占用')
     if (this.seatOf(playerId)) throw new EngineError('bad_state', '你已经入座')
     this.seats.push({
       playerId,

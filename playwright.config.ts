@@ -30,7 +30,9 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   webServer: {
-    command: `HOST=127.0.0.1 PORT=${PORT} DATABASE_PATH=./data/e2e.sqlite NODE_ENV=production node dist/server/index.js`,
+    // MAX_ROOMS 放宽：整个 e2e 轮次共用这一个服务端，多个用例各自建房会撞上「最多 3 桌」的
+    // 产品上限（该上限本身由 tests/features.test.ts 单独覆盖）。
+    command: `HOST=127.0.0.1 PORT=${PORT} DATABASE_PATH=./data/e2e.sqlite NODE_ENV=production MAX_ROOMS=20 node dist/server/index.js`,
     url: `${BASE_URL}/api/health`,
     reuseExistingServer: false,
     timeout: 30_000,

@@ -12,6 +12,7 @@ export const HealthResponseSchema = z.object({
   dbPath: z.string(),
   dbMigration: z.number().int(),
   rooms: z.number().int(),
+  maxRooms: z.number().int(),
   uptimeSec: z.number().int(),
   serverTime: z.number().int(),
 })
@@ -60,6 +61,9 @@ export const ErrorResponseSchema = z.object({
   serverTime: z.number().int(),
 })
 export type ErrorResponse = z.infer<typeof ErrorResponseSchema>
+
+/** 服务器同时允许开放的房间数上限（可用 MAX_ROOMS 覆盖）。 */
+export const DEFAULT_MAX_ROOMS = 3
 
 /* ────────────────────────────── 房间与牌局公开状态 ────────────────────────────── */
 
@@ -159,6 +163,21 @@ export interface PrivateSelfState {
   legalActions: LegalAction[]
 }
 
+/* ────────────────────────────── 聊天与手牌历史 ────────────────────────────── */
+
+export const CHAT_MAX_LENGTH = 200
+/** 每个房间保留的聊天条数与手牌历史条数。 */
+export const CHAT_HISTORY_LIMIT = 50
+export const HAND_HISTORY_LIMIT = 20
+
+export interface ChatMessage {
+  id: string
+  playerId: string
+  nickname: string
+  text: string
+  at: number
+}
+
 /* ────────────────────────────── 服务端 → 客户端事件 ────────────────────────────── */
 
 export const SERVER_EVENT_TYPES = [
@@ -171,6 +190,7 @@ export const SERVER_EVENT_TYPES = [
   'hand.settled',
   'room.error',
   'connection.recovered',
+  'chat.message',
   'pong',
 ] as const
 export type ServerEventType = (typeof SERVER_EVENT_TYPES)[number]
@@ -194,6 +214,12 @@ export interface ServerEvent {
   error?: { code: ErrorCode; message: string }
   /** 系统提示文案（如「XX 加入了房间」）。 */
   notice?: string
+  /** 仅 chat.message 携带：一条新聊天。 */
+  chat?: ChatMessage
+  /** 仅 room.snapshot / connection.recovered 携带：最近聊天记录。 */
+  chatHistory?: ChatMessage[]
+  /** 仅 room.snapshot / connection.recovered 携带：最近手牌历史。 */
+  handHistory?: HandResultPublic[]
 }
 
 /* ────────────────────────────── 轻量消息（无房间状态） ────────────────────────────── */
@@ -258,6 +284,12 @@ export const ActionCommandSchema = z.object({
   amount: z.number().int().nonnegative().optional(),
 })
 
+export const ChatSendCommandSchema = z.object({
+  type: z.literal('chat.send'),
+  requestId,
+  text: z.string().trim().min(1).max(CHAT_MAX_LENGTH),
+})
+
 export const HeartbeatCommandSchema = z.object({
   type: z.literal('heartbeat'),
   requestId,
@@ -270,10 +302,12 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
   LeaveSeatCommandSchema,
   ReadyCommandSchema,
   StartHandCommandSchema,
+  ChatSendCommandSchema,
   ActionCommandSchema,
   HeartbeatCommandSchema,
 ])
 export type ClientCommand = z.infer<typeof ClientCommandSchema>
+export type ChatSendCommand = z.infer<typeof ChatSendCommandSchema>
 export type ActionCommand = z.infer<typeof ActionCommandSchema>
 
 /* ────────────────────────────── HTTP：建房 / 加房 ────────────────────────────── */

@@ -11,6 +11,8 @@ import type {
   ServerMessage,
 } from '../../shared/protocol.ts'
 import { ERROR_MESSAGES } from '../../shared/protocol.ts'
+import { playPing, playYourTurn, soundEnabled } from '../sound.ts'
+import { useChatStore } from '../stores/chat.ts'
 import { useConnectionStore } from '../stores/connection.ts'
 import { useGameStore } from '../stores/game.ts'
 import { useRoomStore } from '../stores/room.ts'
@@ -156,6 +158,7 @@ export function disconnectRoom(): void {
   current?.close(1000, 'client left')
   useConnectionStore().setStatus('idle')
   useGameStore().clear()
+  useChatStore().clear()
   activeCredentials = null
 }
 
@@ -172,6 +175,11 @@ export function sendCommand(command: ClientCommand): boolean {
 
 export function sendAction(action: ClientCommand): boolean {
   return sendCommand(action)
+}
+
+/** 发送一条聊天；文本长度由服务端 zod 再校验一次。 */
+export function sendChat(text: string): boolean {
+  return sendCommand({ type: 'chat.send', requestId: nextRequestId(), text: text.trim() } satisfies ClientCommand)
 }
 
 function clearTimers(): void {
@@ -287,7 +295,26 @@ function handleMessage(text: string): void {
     return
   }
 
-  useGameStore().applySnapshot(message.state, message.self)
+  const game = useGameStore()
+  const chat = useChatStore()
+
+  // 进入房间 / 重连：服务端下发最近聊天与手牌历史，整体替换本地列表。
+  if (message.chatHistory) chat.setHistory(message.chatHistory)
+  if (message.handHistory) game.setHistory(message.handHistory)
+  if (message.chat) {
+    chat.append(message.chat)
+    if (soundEnabled.value) playPing()
+  }
+
+  const wasMyTurn = game.isMyTurn
+  game.applySnapshot(message.state, message.self)
+  if (message.type === 'hand.settled' && message.result) game.appendHistory(message.result)
+
+  // 提示音：轮到自己行动、以及本手结算。
+  if (soundEnabled.value) {
+    if (!wasMyTurn && game.isMyTurn) playYourTurn()
+    else if (message.type === 'hand.settled') playPing()
+  }
   useRoomStore().setCredentials({
     ...(useRoomStore().credentials ?? (activeCredentials as RoomCredentials)),
     roomId: message.state.roomId,
