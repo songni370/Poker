@@ -343,10 +343,25 @@ const tableStatus = computed(() => {
 
 /* 横屏手机：压低桌面高度，给底部操作区留出空间。 */
 @media (max-height: 430px) {
+  /*
+   * 矮屏下座位面板与底池/公共牌在同一条垂直线上。`.center` 因为 transform 自成一个层叠上下文，
+   * 光给 `.pot` 加 z-index 是逃不出去的，必须把整个中心区抬到座位之上：
+   * 座位 z-index 2/3、下注筹码 4，这里给 5，保证「底池与公共牌」永远可读。
+   */
+  .center {
+    z-index: 5;
+  }
+
+  .pot {
+    background: color-mix(in srgb, var(--felt-deep) 88%, black);
+    padding: 1px 10px;
+  }
+
   .table {
     --table-h: min(35vh, 118px);
-    /* 座位锚点向内收：顶部座位不越出桌面，底部座位不压住公共牌。 */
-    --seat-anchor-y: 46%;
+    /* 座位锚点外移：面板已收窄（见 PlayerSeat 矮屏规则），外移后正好贴住桌沿，
+       顶部座位不压公共牌、底部座位不压操作区。 */
+    --seat-anchor-y: 58%;
     /* 横屏手机同样收窄座位面板，给公共牌与操作区留出宽度。 */
     --seat-w: 116px;
   }

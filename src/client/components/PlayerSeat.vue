@@ -326,6 +326,20 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   /* 矮屏：座位收窄，避免挡住中央的公共牌。 */
   .seat {
     width: 104px;
+    gap: 2px;
+  }
+
+  /*
+   * 矮屏下座位面板有 ~100px 高，无论锚点怎么调都会压到公共牌/底池（实测 9 人桌 740×360
+   * 时底池被完全盖住）。这里让所有座位只保留「姓名 + 筹码」两项关键信息：
+   *   - 头像与光环让位；行动提示仍由「面板描边 + YOUR TURN 文本 + 进度条」三重给出；
+   *   - 本人座位的底牌在下方操作区已有大图，座位里重复的小牌一并省掉。
+   * 面板因此缩到 ~55px，公共牌与底池不再被遮挡。
+   */
+  .seat .avatar,
+  .seat .seat-aura,
+  .seat .cards {
+    display: none;
   }
 
   .status {
