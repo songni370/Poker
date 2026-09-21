@@ -4,8 +4,7 @@
 // 用法：先 npm run build && npm start，然后 node scripts/e2e-browser.mjs
 // 环境变量：E2E_BASE_URL、E2E_OUT_DIR、CHROME_PATH、E2E_DEBUG_PORT
 import { spawn } from 'node:child_process'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -225,13 +224,18 @@ async function main() {
   mkdirSync(OUT_DIR, { recursive: true })
   await waitForHttp(`${BASE}/api/health`)
 
-  const profileDir = join(tmpdir(), `poker-e2e-profile-${Date.now()}`)
+  // 固定复用同一个 profile 目录：每次新建 --user-data-dir 会让 macOS 把 Chrome
+  // 当成一个全新实例，Dock 里就会不停冒出新的图标。
+  const profileDir = process.env.E2E_PROFILE_DIR ?? join(OUT_DIR, 'chrome-profile')
+  mkdirSync(profileDir, { recursive: true })
   const chrome = spawn(
     CHROME,
     [
       '--headless=new',
       `--remote-debugging-port=${DEBUG_PORT}`,
       `--user-data-dir=${profileDir}`,
+      '--disable-crash-reporter',
+      '--disable-breakpad',
       '--no-first-run',
       '--no-default-browser-check',
       // 受限环境（容器/沙箱）里 Chrome 自身的沙箱无法初始化，会以 SIGTRAP 直接退出。
@@ -242,17 +246,29 @@ async function main() {
       '--window-size=1440,900',
       'about:blank',
     ],
-    { stdio: 'ignore' },
+    // detached：让 Chrome 自成进程组，退出时可以整组回收，
+    // 否则 renderer / crashpad 等 helper 会变成孤儿进程继续挂在系统里。
+    { stdio: 'ignore', detached: true },
   )
 
+  let cleaned = false
   const cleanup = () => {
+    if (cleaned) return
+    cleaned = true
     try {
-      chrome.kill('SIGKILL')
+      process.kill(-chrome.pid, 'SIGKILL')
     } catch {
-      // 忽略
+      try {
+        chrome.kill('SIGKILL')
+      } catch {
+        // 已经退出
+      }
     }
-    rmSync(profileDir, { recursive: true, force: true })
   }
+  process.once('SIGINT', () => {
+    cleanup()
+    process.exit(130)
+  })
 
   try {
     await waitForHttp(`http://127.0.0.1:${DEBUG_PORT}/json/version`)
@@ -352,6 +368,8 @@ async function main() {
     cdp.close()
   } finally {
     cleanup()
+    // 给内核一点时间回收进程组，避免 CI/脚本里紧接着检查进程时看到残留。
+    await sleep(300)
   }
 }
 

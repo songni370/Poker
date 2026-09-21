@@ -7,3 +7,4 @@ data/
 *.log
 .DS_Store
 .npm-cache/
+artifacts/e2e/chrome-profile/
