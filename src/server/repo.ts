@@ -10,6 +10,8 @@ export interface RoomRecord {
   smallBlind: number
   bigBlind: number
   startingStack: number
+  /** 房主自定义的买入上限（老库为 NULL，调用方回落到 startingStack）。 */
+  buyInMax?: number
   maxSeats: number
   turnSeconds: number
 }
@@ -76,8 +78,8 @@ export class Repo {
     this.db
       .prepare(
         `INSERT INTO rooms (room_id, room_name, host_player_id, status, small_blind, big_blind,
-           starting_stack, max_seats, turn_seconds, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           starting_stack, buy_in_max, max_seats, turn_seconds, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         room.roomId,
@@ -87,6 +89,7 @@ export class Repo {
         room.smallBlind,
         room.bigBlind,
         room.startingStack,
+        room.buyInMax ?? null,
         room.maxSeats,
         room.turnSeconds,
         now,

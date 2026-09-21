@@ -38,14 +38,28 @@ export class TestClient {
     this.socket.close()
   }
 
-  async waitFor(predicate: (message: ServerMessage) => boolean, timeoutMs = 5000): Promise<ServerMessage> {
+  /**
+   * 等到一条满足条件的消息。
+   * fromIndex 用于「必须等新消息」的场景（例如坐回保留座位时，旧快照也能满足条件）。
+   */
+  async waitFor(
+    predicate: (message: ServerMessage) => boolean,
+    timeoutMs = 5000,
+    fromIndex = 0,
+  ): Promise<ServerMessage> {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
-      const found = this.messages.find(predicate)
-      if (found) return found
+      for (let index = fromIndex; index < this.messages.length; index++) {
+        const message = this.messages[index]!
+        if (predicate(message)) return message
+      }
       await delay(20)
     }
-    throw new Error('等待服务端消息超时')
+    const tail = this.messages.slice(fromIndex)
+    const seen = tail.map((message) => message.type).join(',')
+    const failure = tail.find((message) => message.type === 'room.error')
+    const reason = failure && failure.type === 'room.error' ? ` / 服务端错误：${failure.error.code} ${failure.error.message}` : ''
+    throw new Error(`等待服务端消息超时（从下标 ${String(fromIndex)} 起收到：${seen || '无'}${reason}）`)
   }
 
   lastState(): GameStatePublic | undefined {
@@ -105,6 +119,31 @@ export async function postJson<T>(url: string, body: unknown): Promise<{ status:
     body: JSON.stringify(body),
   })
   return { status: response.status, data: (await response.json()) as T }
+}
+
+/**
+ * 落座（新流程）：建房/加入后所有人都是旁观者，必须显式 seat.take 才能入座，
+ * 首次入座可带买入额（缺省 = 本桌买入上限）。
+ */
+export async function takeSeat(client: TestClient, seat: number, buyIn?: number): Promise<void> {
+  // 只看「最新一条」不行：坐回保留座位时历史快照也满足条件，必须从发送前的下标之后找。
+  const from = client.messages.length
+  client.send({
+    type: 'seat.take',
+    requestId: rid(),
+    seat,
+    ...(buyIn === undefined ? {} : { buyIn }),
+  })
+  await client.waitFor(
+    (message) =>
+      message.type !== 'room.error' &&
+      'self' in message &&
+      message.self.seat === seat &&
+      'state' in message &&
+      message.state.seats[seat]?.away === false,
+    5000,
+    from,
+  )
 }
 
 export function joinCommand(credentials: RoomCredentials): ClientCommand {

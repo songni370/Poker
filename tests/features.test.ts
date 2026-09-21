@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { CHAT_MAX_LENGTH } from '../src/shared/protocol.ts'
 import type { ChatMessage, RoomCredentials, ServerMessage } from '../src/shared/protocol.ts'
-import { TestClient, delay, joinCommand, postJson, rid, startTestServer } from './helpers.ts'
+import { TestClient, delay, joinCommand, postJson, rid, startTestServer, takeSeat } from './helpers.ts'
 
 test('房间上限：服务器最多同时开放 3 桌，关闭一桌后可以再开', async (t) => {
   const server = await startTestServer({ maxRooms: 3 })
@@ -49,6 +49,9 @@ test('聊天：广播给房内所有人、重连能拿到历史、服务端限�
   await a.waitFor((message) => message.type === 'room.snapshot')
   b.send(joinCommand(guest))
   await b.waitFor((message) => message.type === 'room.snapshot')
+  // 新流程：加入后都是旁观者，要显式落座才能进牌局
+  await takeSeat(a, 0)
+  await takeSeat(b, 1)
 
   const versionBefore = a.lastState()!.version
   a.send({ type: 'chat.send', requestId: rid(), text: '  大家好，开局吧  ' })
@@ -116,6 +119,9 @@ test('全下摊牌：公共牌按翻牌 → 转牌 → 河牌逐段推送，最�
   await a.waitFor((message) => message.type === 'room.snapshot')
   b.send(joinCommand(guest))
   await b.waitFor((message) => message.type === 'room.snapshot')
+  // 新流程：加入后都是旁观者，要显式落座才能进牌局
+  await takeSeat(a, 0)
+  await takeSeat(b, 1)
 
   a.send({ type: 'game.start', requestId: rid() })
   await a.waitFor((message) => message.type === 'hand.started')
@@ -215,19 +221,26 @@ test('观战：座位满了仍可进来观战，观战者看不到他人底牌�
   assert.equal(watcher.data.nickname, '丙')
 
   const a = new TestClient(server.wsUrl)
+  const b0 = new TestClient(server.wsUrl)
   const c = new TestClient(server.wsUrl)
   t.after(() => {
     a.close()
+    b0.close()
     c.close()
   })
-  await Promise.all([a.open(), c.open()])
+  await Promise.all([a.open(), b0.open(), c.open()])
   a.send(joinCommand(host))
   await a.waitFor((message) => message.type === 'room.snapshot')
+  b0.send(joinCommand(guest))
+  await b0.waitFor((message) => message.type === 'room.snapshot')
   c.send(joinCommand(watcher.data))
   await c.waitFor((message) => message.type === 'room.snapshot')
 
   assert.equal(c.lastSelf()!.seat, null, '观战者不应有座位')
   assert.deepEqual(c.lastSelf()!.holeCards, [], '观战者不应拿到任何底牌')
+  // 甲还没落座：让甲先坐下，乙也坐下，然后再开手
+  await takeSeat(a, 0)
+  await takeSeat(b0, 1)
 
   a.send({ type: 'game.start', requestId: rid() })
   await a.waitFor((message) => message.type === 'hand.started')
@@ -240,23 +253,29 @@ test('观战：座位满了仍可进来观战，观战者看不到他人底牌�
   const anyRevealed = watcherState.seats.some((seat) => seat && seat.revealedCards && seat.revealedCards.length > 0)
   assert.equal(anyRevealed, false, '未摊牌时观战者不得看到任何已公开底牌')
 
-  // 有人离座后，观战者可以入座
-  const guest2 = guest // 乙离座
-  const b = new TestClient(server.wsUrl)
-  t.after(() => b.close())
-  await b.open()
-  b.send(joinCommand(guest2))
-  await b.waitFor((message) => message.type === 'room.snapshot')
-  b.send({ type: 'seat.leave', requestId: rid() })
-  await delay(120)
-
+  // 乙「离座」只是保留座位：座位仍归乙，别人坐不进来
+  b0.send({ type: 'seat.leave', requestId: rid() })
+  await b0.waitFor(
+    (message) =>
+      message.type !== 'room.error' &&
+      'state' in message &&
+      message.state.seats[1] !== null &&
+      message.state.seats[1]!.away,
+  )
   c.send({ type: 'seat.take', requestId: rid(), seat: 1 })
-  const seated = await c.waitFor((message: ServerMessage) => {
-    if (message.type === 'room.error' || !('self' in message)) return false
-    return message.self.seat === 1
-  })
-  assert.ok(seated.type !== 'room.error' && 'self' in seated)
-  assert.equal(seated.self.seat, 1, '空出的座位应能被观战者坐上')
+  const rejected = await c.waitFor((message) => message.type === 'room.error')
+  assert.ok(rejected.type === 'room.error')
+  assert.equal(c.lastSelf()!.seat, null, '保留的座位不能被别人占')
+
+  // 乙「坐回」自己的座位：筹码照旧，随时可以接着玩
+  await takeSeat(b0, 1)
+  assert.equal(b0.lastState()!.seats[1]!.away, false, '坐回后应恢复为在座')
+
+  // 只有「退出房间」才真正释放座位：丙这时才能坐下
+  b0.send({ type: 'room.leave', requestId: rid() })
+  await delay(120)
+  await takeSeat(c, 1)
+  assert.equal(c.lastState()!.seats[1]!.playerId, watcher.data.playerId, '退出后释放的座位应能被观战者坐上')
   assert.equal(c.lastSelf()!.holeCards.length, 0, '本手已开始，入座者要等下一手才有底牌')
 })
 
@@ -277,6 +296,9 @@ test('逐张亮牌期间被抢先开下一手：上一手结算不会丢', async
   await a.waitFor((message) => message.type === 'room.snapshot')
   b.send(joinCommand(guest))
   await b.waitFor((message) => message.type === 'room.snapshot')
+  // 新流程：加入后都是旁观者，要显式落座才能进牌局
+  await takeSeat(a, 0)
+  await takeSeat(b, 1)
 
   a.send({ type: 'game.start', requestId: rid() })
   await a.waitFor((message) => message.type === 'hand.started')
@@ -343,6 +365,9 @@ test('聊天 @ 提醒：只认房间内真实昵称、排除自己；房间事�
   await a.waitFor((message) => message.type === 'room.snapshot')
   b.send(joinCommand(guest))
   await b.waitFor((message) => message.type === 'room.snapshot')
+  // 新流程：加入后都是旁观者，要显式落座才能进牌局
+  await takeSeat(a, 0)
+  await takeSeat(b, 1)
 
   const userMessages = (client: TestClient): Extract<ServerMessage, { type: 'chat.message' }>[] =>
     client.messages.filter(

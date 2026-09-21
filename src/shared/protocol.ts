@@ -91,8 +91,10 @@ export interface SeatPublic {
   /** 是否参与当前这手牌（未入座/已离座/等待下一手为 false）。 */
   inHand: boolean
   isHost: boolean
-  /** 已准备（等待区用；主持人据此决定是否开局）。 */
+  /** 已准备（保留字段：现在由主持人直接开局，客户端不再发送 room.ready）。 */
   ready: boolean
+  /** 已离座但座位与筹码仍为本人保留（只有本人能坐回）。 */
+  away: boolean
   isDealer: boolean
   isSmallBlind: boolean
   isBigBlind: boolean
@@ -145,6 +147,10 @@ export interface GameStatePublic {
   smallBlind: number
   bigBlind: number
   startingStack: number
+  /** 本桌买入范围与步进（房主在创建房间时定上限）。 */
+  buyInMin: number
+  buyInMax: number
+  buyInStep: number
   maxSeats: number
   turnSeconds: number
   /** 座位数组，下标即座位号，空位为 null。 */
@@ -270,10 +276,18 @@ export const TakeSeatCommandSchema = z.object({
   type: z.literal('seat.take'),
   requestId,
   seat: z.number().int().min(0).max(TABLE_RULES.maxSeats - 1),
+  /** 买入额：首次入座用；坐回保留座位时忽略（筹码照旧，只有 0 筹码时按新的买入补充）。 */
+  buyIn: z.number().int().positive().max(TABLE_RULES.maxBuyInLimit).optional(),
 })
 
 export const LeaveSeatCommandSchema = z.object({
   type: z.literal('seat.leave'),
+  requestId,
+})
+
+/** 退出房间：释放座位并离开（与「离座」不同，离座只保留座位）。 */
+export const LeaveRoomCommandSchema = z.object({
+  type: z.literal('room.leave'),
   requestId,
 })
 
@@ -314,6 +328,7 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
   JoinCommandSchema,
   TakeSeatCommandSchema,
   LeaveSeatCommandSchema,
+  LeaveRoomCommandSchema,
   ReadyCommandSchema,
   StartHandCommandSchema,
   ChatSendCommandSchema,
@@ -336,6 +351,13 @@ export const CreateRoomRequestSchema = z.object({
   nickname: NicknameSchema,
   roomName: z.string().trim().max(ROOM_NAME_MAX).optional(),
   maxSeats: z.number().int().min(TABLE_RULES.minSeats).max(TABLE_RULES.maxSeats).default(6),
+  /** 买入上限（房主自定义）：默认等于起始筹码；下限 10 个大盲，步进为小盲。 */
+  buyInMax: z
+    .number()
+    .int()
+    .min(TABLE_RULES.minBuyInFloor)
+    .max(TABLE_RULES.maxBuyInLimit)
+    .optional(),
 })
 export type CreateRoomRequest = z.infer<typeof CreateRoomRequestSchema>
 
@@ -360,6 +382,9 @@ export const RoomInfoResponseSchema = z.object({
   status: z.enum(['waiting', 'playing', 'closed']),
   seated: z.number().int(),
   maxSeats: z.number().int(),
+  buyInMin: z.number().int(),
+  buyInMax: z.number().int(),
+  buyInStep: z.number().int(),
   smallBlind: z.number().int(),
   bigBlind: z.number().int(),
   startingStack: z.number().int(),

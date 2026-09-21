@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { EngineError, HoldemTable, cryptoRng, type TableSnapshot } from '../engine/index.ts'
-import { TABLE_RULES } from '../shared/poker.ts'
+import { TABLE_RULES, normalizeBuyIn, minBuyInFor } from '../shared/poker.ts'
 import {
   CHAT_HISTORY_LIMIT,
   DEFAULT_MAX_ROOMS,
@@ -58,6 +58,9 @@ const REVEAL_DELAY_MS = 750
 const CHAT_WINDOW_MS = 5000
 const CHAT_WINDOW_LIMIT = 5
 
+/** 掉线宽限期：成员掉线后超过这个时间仍没回来，就释放他占的座位（可用环境变量覆盖，测试用短值）。 */
+const SEAT_RELEASE_MS = Number(process.env.SEAT_RELEASE_MS ?? 5 * 60 * 1000)
+
 /** 房间快照结构版本；改动结构时必须同步提升，旧快照会被安全丢弃。 */
 export const SNAPSHOT_VERSION = 1
 
@@ -74,6 +77,8 @@ export interface RoomSnapshot {
   smallBlind: number
   bigBlind: number
   startingStack: number
+  /** 房主自定义的买入上限（老快照没有该字段时回落到 startingStack）。 */
+  buyInMax: number
   turnSeconds: number
   status: RoomStatus
   version: number
@@ -100,18 +105,22 @@ interface RoomInit {
   bigBlind: number
   startingStack: number
   turnSeconds: number
+  buyInMax?: number
 }
 
 /** 单个房间的运行时：内存权威状态 + 每房串行命令队列 + 行动计时器。 */
 export class RoomRuntime {
   readonly id: string
   readonly name: string
-  readonly hostPlayerId: string
+  /** 主持人可以移交：原主持人退出房间时交给下一位成员。 */
+  hostPlayerId: string
   readonly maxSeats: number
   readonly smallBlind: number
   readonly bigBlind: number
   readonly startingStack: number
   readonly turnSeconds: number
+  /** 房主自定义的买入上限；买入下限 = 10 个大盲，步进 = 小盲。 */
+  readonly buyInMax: number
   table: HoldemTable
   readonly members = new Map<string, RoomMember>()
   readonly createdAt = Date.now()
@@ -132,6 +141,8 @@ export class RoomRuntime {
   pendingSettlement: { result: HandResultPublic; notice?: string } | null = null
   /** 聊天限流用的时间戳。 */
   readonly chatRate = new Map<string, number[]>()
+  /** 掉线宽限定时器：超时后释放该成员的座位（键为 playerId）。 */
+  readonly seatReleaseTimers = new Map<string, NodeJS.Timeout>()
 
   private queue: Promise<unknown> = Promise.resolve()
 
@@ -144,6 +155,7 @@ export class RoomRuntime {
     this.bigBlind = init.bigBlind
     this.startingStack = init.startingStack
     this.turnSeconds = init.turnSeconds
+    this.buyInMax = init.buyInMax ?? init.startingStack
     this.table = new HoldemTable({
       smallBlind: init.smallBlind,
       bigBlind: init.bigBlind,
@@ -163,6 +175,7 @@ export class RoomRuntime {
       smallBlind: this.smallBlind,
       bigBlind: this.bigBlind,
       startingStack: this.startingStack,
+      buyInMax: this.buyInMax,
       turnSeconds: this.turnSeconds,
       status: this.status,
       version: this.version,
@@ -195,6 +208,7 @@ export class RoomRuntime {
       smallBlind: snapshot.smallBlind,
       bigBlind: snapshot.bigBlind,
       startingStack: snapshot.startingStack,
+      buyInMax: snapshot.buyInMax ?? snapshot.startingStack,
       turnSeconds: snapshot.turnSeconds,
     })
     for (const entry of snapshot.members) {
@@ -341,7 +355,7 @@ export class RoomManager {
     return { restored, discarded }
   }
 
-  createRoom(input: { nickname: string; roomName?: string; maxSeats: number }): RoomCredentials {
+  createRoom(input: { nickname: string; roomName?: string; maxSeats: number; buyInMax?: number }): RoomCredentials {
     if (this.rooms.size >= this.maxRooms) {
       throw new CommandError(
         'room_full',
@@ -359,13 +373,20 @@ export class RoomManager {
       smallBlind: TABLE_RULES.smallBlind,
       bigBlind: TABLE_RULES.bigBlind,
       startingStack: TABLE_RULES.startingStack,
+      buyInMax: normalizeBuyIn(
+        input.buyInMax ?? TABLE_RULES.startingStack,
+        TABLE_RULES.bigBlind,
+        TABLE_RULES.maxBuyInLimit,
+        TABLE_RULES.smallBlind,
+      ),
       turnSeconds: TABLE_RULES.turnSeconds,
     })
 
+    // 主持人不自动入座：建房后直接进牌桌，自己选座位并确认买入（与加入者一致）。
     const member: RoomMember = {
       playerId,
       nickname: input.nickname,
-      seat: 0,
+      seat: null,
       ready: false,
       isHost: true,
       reconnectHash: hashToken(token),
@@ -373,7 +394,6 @@ export class RoomManager {
       disconnectedAt: null,
     }
     room.members.set(playerId, member)
-    room.table.sit(playerId, input.nickname, 0)
 
     this.repo.transaction(() => {
       this.repo.insertRoom({
@@ -384,6 +404,7 @@ export class RoomManager {
         smallBlind: room.smallBlind,
         bigBlind: room.bigBlind,
         startingStack: room.startingStack,
+        buyInMax: room.buyInMax,
         maxSeats: room.maxSeats,
         turnSeconds: room.turnSeconds,
       })
@@ -401,11 +422,10 @@ export class RoomManager {
     if (!room) throw new CommandError('room_not_found')
     if (room.status === 'closed') throw new CommandError('room_closed')
 
-    // 座位满了仍然可以进来观战；观战位也满了才拒绝（规格书 P0 的「房间已满」提示）。
-    const seat = this.firstFreeSeat(room)
-    if (seat === null) {
-      const observers = [...room.members.values()].filter((member) => member.seat === null).length
-      if (observers >= room.maxSeats) throw new CommandError('room_full', '座位与观战位都已满，请稍后再来')
+    // 加入后先以旁观者身份进桌（自己挑座位并确认买入）；观战位满了才拒绝。
+    const observers = [...room.members.values()].filter((member) => member.seat === null).length
+    if (observers >= room.maxSeats * 2) {
+      throw new CommandError('room_full', '这个房间人太多了，请稍后再来')
     }
 
     const playerId = newPlayerId()
@@ -413,7 +433,7 @@ export class RoomManager {
     const member: RoomMember = {
       playerId,
       nickname,
-      seat,
+      seat: null,
       ready: false,
       isHost: false,
       reconnectHash: hashToken(token),
@@ -421,7 +441,6 @@ export class RoomManager {
       disconnectedAt: null,
     }
     room.members.set(playerId, member)
-    if (seat !== null) room.table.sit(playerId, nickname, seat)
 
     this.repo.transaction(() => {
       this.repo.upsertPlayer(this.playerRecord(room, member))
@@ -453,6 +472,7 @@ export class RoomManager {
     const reconnected = member.disconnectedAt !== null
     member.socket = socket
     member.disconnectedAt = null
+    this.clearAwayTimer(room, playerId)
 
     void room.run(() => {
       this.sendSnapshot(room, member.playerId, reconnected ? 'connection.recovered' : 'room.snapshot')
@@ -472,6 +492,8 @@ export class RoomManager {
     if (!room || !member || member.socket !== socket) return
     member.socket = null
     member.disconnectedAt = Date.now()
+    // 掉线只影响展示；但座位不能无限期占着：宽限期到了就释放（见 scheduleSeatRelease）。
+    if (member.seat !== null) this.scheduleSeatRelease(room, playerId)
     void room.run(() => {
       this.bumpVersion(room)
       this.persist(room)
@@ -516,6 +538,8 @@ export class RoomManager {
       if (connected > 0 || now - lastSeen < idleMs) continue
       if (room.turnTimer) clearTimeout(room.turnTimer)
       room.clearRevealTimers()
+      for (const timer of room.seatReleaseTimers.values()) clearTimeout(timer)
+      room.seatReleaseTimers.clear()
       room.status = 'closed'
       this.repo.setRoomStatus(roomId, 'closed')
       this.repo.deleteSnapshot(roomId)
@@ -523,6 +547,40 @@ export class RoomManager {
       closed += 1
     }
     return closed
+  }
+
+  /** 取消某成员的掉线释放定时器（重连或坐回时调用）。 */
+  clearAwayTimer(room: RoomRuntime, playerId: string): void {
+    const timer = room.seatReleaseTimers.get(playerId)
+    if (timer) {
+      clearTimeout(timer)
+      room.seatReleaseTimers.delete(playerId)
+    }
+  }
+
+  /**
+   * 掉线宽限期：成员掉线后开始计时，超时仍未回来就释放他的座位（筹码也一并结算掉），
+   * 成员身份保留为旁观，回来可以重新买入入座。在线离座（away）不受影响——
+   * 那种情况座位一直保留，随时能坐回。
+   */
+  scheduleSeatRelease(room: RoomRuntime, playerId: string): void {
+    this.clearAwayTimer(room, playerId)
+    const timer = setTimeout(() => {
+      room.seatReleaseTimers.delete(playerId)
+      void room.run(() => {
+        const member = room.members.get(playerId)
+        if (!member || member.socket !== null || member.seat === null) return
+        room.table.removePlayer(playerId)
+        member.seat = null
+        this.bumpVersion(room)
+        this.persist(room)
+        this.publish(room, 'room.player_left', {
+          notice: `${member.nickname} 掉线超过宽限期，座位已释放`,
+        })
+      })
+    }, SEAT_RELEASE_MS)
+    timer.unref?.()
+    room.seatReleaseTimers.set(playerId, timer)
   }
 
   /* ───────────────────────── 命令执行 ───────────────────────── */
@@ -556,20 +614,53 @@ export class RoomManager {
 
       switch (command.type) {
         case 'seat.take': {
-          if (!room.table.isSeatAvailable(command.seat)) throw new CommandError('seat_taken')
-          if (member.seat === command.seat) throw new CommandError('bad_request', '你已经在这个座位上')
-          if (member.seat !== null) room.table.leave(playerId)
-          room.table.sit(playerId, member.nickname, command.seat)
+          const seated = room.table.seatOf(playerId)
+          if (seated) {
+            // 坐回自己保留的座位：筹码照旧（只有 0 筹码时才用新的买入额补充）。
+            if (seated.seat !== command.seat) {
+              throw new CommandError('bad_request', '你已经有一个保留的座位，先退出房间才能换座')
+            }
+          } else if (!room.table.isSeatAvailable(command.seat)) {
+            throw new CommandError('seat_taken', '这个座位已经有人了')
+          }
+          const buyIn = normalizeBuyIn(
+            command.buyIn ?? room.buyInMax,
+            room.bigBlind,
+            room.buyInMax,
+            room.smallBlind,
+          )
+          room.table.sit(playerId, member.nickname, command.seat, seated && seated.stack > 0 ? seated.stack : buyIn)
+          const wasAway = seated !== undefined
           member.seat = command.seat
-          notice = `${member.nickname} 入座 ${command.seat + 1} 号位`
+          member.ready = true
+          this.clearAwayTimer(room, playerId)
+          notice = wasAway
+            ? `${member.nickname} 回到了 ${command.seat + 1} 号位`
+            : `${member.nickname} 买入 ${buyIn} 入座 ${command.seat + 1} 号位`
           eventType = 'room.player_joined'
           break
         }
         case 'seat.leave': {
           if (member.seat === null) throw new CommandError('bad_request', '你还没有入座')
+          // 座位与筹码保留，只有本人能坐回；手牌进行中会先自动弃牌。
           room.table.leave(playerId)
-          member.seat = null
-          notice = `${member.nickname} 已离座`
+          notice = `${member.nickname} 已离座（座位为你保留）`
+          eventType = 'room.player_left'
+          break
+        }
+        case 'room.leave': {
+          if (member.seat !== null) room.table.removePlayer(playerId)
+          room.members.delete(playerId)
+          this.clearAwayTimer(room, playerId)
+          // 主持人退出：把主持权交给还在房间里的下一位（否则没人能开局）。
+          if (playerId === room.hostPlayerId) {
+            const next = [...room.members.values()][0]
+            if (next) {
+              room.hostPlayerId = next.playerId
+              next.isHost = true
+            }
+          }
+          notice = `${member.nickname} 退出了房间`
           eventType = 'room.player_left'
           break
         }
@@ -947,9 +1038,10 @@ export class RoomManager {
         isDealer: table.buttonSeat === member.seat,
         isSmallBlind: table.smallBlindSeat === member.seat,
         isBigBlind: table.bigBlindSeat === member.seat,
-        holeCardCount: engineSeat.inHand ? 2 : 0,
+        holeCardCount: engineSeat.inHand && !engineSeat.away ? 2 : 0,
         revealedCards: engineSeat.revealedCards,
         lastAction: engineSeat.lastAction,
+        away: engineSeat.away,
       }
     }
 
@@ -971,6 +1063,9 @@ export class RoomManager {
       smallBlind: room.smallBlind,
       bigBlind: room.bigBlind,
       startingStack: room.startingStack,
+      buyInMin: minBuyInFor(room.bigBlind),
+      buyInMax: room.buyInMax,
+      buyInStep: room.smallBlind,
       maxSeats: room.maxSeats,
       turnSeconds: room.turnSeconds,
       seats,

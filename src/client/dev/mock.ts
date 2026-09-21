@@ -16,6 +16,7 @@ import type {
   SeatPublic,
 } from '../../shared/protocol.ts'
 import type { ActionType, Card, HandCategory, Street } from '../../shared/poker.ts'
+import { minBuyInFor } from '../../shared/poker.ts'
 import { HAND_CATEGORY_NAMES, TABLE_RULES } from '../../shared/poker.ts'
 
 /* ────────────────────────────── 基础工具 ────────────────────────────── */
@@ -42,6 +43,7 @@ interface SeatOptions {
   allIn?: boolean
   connected?: boolean
   inHand?: boolean
+  away?: boolean
   lastAction?: ActionType | null
   revealedCards?: Card[] | null
 }
@@ -60,6 +62,7 @@ function seatAt(seat: number, options: SeatOptions): SeatPublic {
     inHand: options.inHand ?? true,
     isHost: seat === 0,
     ready: true,
+    away: options.away ?? false,
     isDealer: false,
     isSmallBlind: options.isSmallBlind ?? false,
     isBigBlind: options.isBigBlind ?? false,
@@ -132,6 +135,9 @@ function buildState(init: StateInit): GameStatePublic {
     smallBlind: TABLE_RULES.smallBlind,
     bigBlind: TABLE_RULES.bigBlind,
     startingStack: TABLE_RULES.startingStack,
+    buyInMin: minBuyInFor(TABLE_RULES.bigBlind),
+    buyInMax: TABLE_RULES.startingStack,
+    buyInStep: TABLE_RULES.smallBlind,
     maxSeats: init.maxSeats,
     turnSeconds: TABLE_RULES.turnSeconds,
     seats: init.seats,
@@ -820,6 +826,9 @@ export const MOCK_ROOM_INFO: RoomInfoResponse = {
   status: 'waiting',
   seated: 2,
   maxSeats: 6,
+  buyInMin: minBuyInFor(TABLE_RULES.bigBlind),
+  buyInMax: TABLE_RULES.startingStack,
+  buyInStep: TABLE_RULES.smallBlind,
   smallBlind: TABLE_RULES.smallBlind,
   bigBlind: TABLE_RULES.bigBlind,
   startingStack: TABLE_RULES.startingStack,

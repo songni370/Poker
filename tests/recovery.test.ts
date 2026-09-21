@@ -109,6 +109,22 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
   return (await response.json()) as T
 }
 
+/** 落座（新流程）：加入后先是旁观者，必须显式 seat.take 才能进牌局。 */
+async function takeSeat(client: TestClient, seat: number): Promise<void> {
+  const from = client.messages.length
+  client.send({ type: 'seat.take', requestId: rid(), seat })
+  await client.waitFor(
+    (m) =>
+      m.type !== 'room.error' &&
+      'self' in m &&
+      m.self.seat === seat &&
+      'state' in m &&
+      m.state.seats[seat]?.away === false,
+    5000,
+    from,
+  )
+}
+
 function joinCommand(credentials: RoomCredentials): ClientCommand {
   return {
     type: 'room.join',
@@ -161,6 +177,8 @@ test('单进程重启：从 SQLite 快照恢复一致牌局，继续打完且不
   await clientA.waitFor((m) => m.type === 'room.snapshot')
   clientB.send(joinCommand(guest))
   await clientB.waitFor((m) => m.type === 'room.snapshot')
+  await takeSeat(clientA, 0)
+  await takeSeat(clientB, 1)
 
   clientA.send({ type: 'game.start', requestId: rid() })
   await clientA.waitFor((m) => m.type === 'hand.started')
@@ -286,7 +304,19 @@ test('重启恢复：从未开过手的等待房间也必须存活（无牌堆�
     roomName: '等待中的房',
     maxSeats: 3,
   })
-  await postJson<RoomCredentials>(`${first.base}/api/rooms/${host.roomId}/join`, { nickname: '先到的' })
+  const early = await postJson<RoomCredentials>(`${first.base}/api/rooms/${host.roomId}/join`, { nickname: '先到的' })
+  // 先让两人落座（等待区页面已删除，座位来自牌桌上的 seat.take），再重启验证快照恢复
+  const seatA = new TestClient(first.wsUrl)
+  const seatB = new TestClient(first.wsUrl)
+  await Promise.all([seatA.open(), seatB.open()])
+  seatA.send(joinCommand(host))
+  await seatA.waitFor((m) => m.type === 'room.snapshot')
+  seatB.send(joinCommand(early))
+  await seatB.waitFor((m) => m.type === 'room.snapshot')
+  await takeSeat(seatA, 0)
+  await takeSeat(seatB, 1)
+  seatA.close()
+  seatB.close()
   await first.stop()
 
   const second = await startServer(dbPath)
@@ -319,12 +349,19 @@ test('重启后按持久化的截止时间判定超时：已过期则立即执�
 
   const first = await startServer(dbPath)
   const host = await postJson<RoomCredentials>(`${first.base}/api/rooms`, { nickname: '甲', maxSeats: 2 })
-  await postJson<RoomCredentials>(`${first.base}/api/rooms/${host.roomId}/join`, { nickname: '乙' })
+  const guest = await postJson<RoomCredentials>(`${first.base}/api/rooms/${host.roomId}/join`, { nickname: '乙' })
 
   const clientA = new TestClient(first.wsUrl)
   await clientA.open()
   clientA.send(joinCommand(host))
   await clientA.waitFor((m) => m.type === 'room.snapshot')
+  await takeSeat(clientA, 0)
+  const guestClient = new TestClient(first.wsUrl)
+  t.after(() => guestClient.close())
+  await guestClient.open()
+  guestClient.send(joinCommand(guest))
+  await guestClient.waitFor((m) => m.type === 'room.snapshot')
+  await takeSeat(guestClient, 1)
   clientA.send({ type: 'game.start', requestId: rid() })
   await clientA.waitFor((m) => m.type === 'hand.started')
 

@@ -33,6 +33,8 @@ export interface EngineSeatPublic {
   folded: boolean
   allIn: boolean
   inHand: boolean
+  /** 已离座但座位与筹码保留（只有本人能坐回）。 */
+  away: boolean
   lastAction: ActionType | null
   revealedCards: Card[] | null
 }
@@ -58,7 +60,10 @@ export interface TablePublicState {
 interface Seat extends Omit<EngineSeatPublic, 'revealedCards'> {
   holeCards: Card[]
   revealedCards: Card[] | null
-  pendingLeave: boolean
+  /** 已离座但座位与筹码仍为本人保留（只有本人能坐回）。 */
+  away: boolean
+  /** 已退出房间：本手结束后连座位一起移除（筹码还在池里时必须等本手结束）。 */
+  pendingRemoval: boolean
 }
 
 export const TABLE_SNAPSHOT_VERSION = 1
@@ -76,7 +81,8 @@ export interface SeatSnapshot {
   lastAction: ActionType | null
   holeCards: Card[]
   revealedCards: Card[] | null
-  pendingLeave: boolean
+  away: boolean
+  pendingRemoval: boolean
 }
 
 /**
@@ -147,18 +153,12 @@ export class HoldemTable {
   }
 
   /**
-   * 取座位占用者。手牌进行中离座的玩家会以 pendingLeave 保留到本手结束
-   * （筹码还留在池里、底牌已弃），这个座位对新玩家来说其实是空的，
-   * 因此这里优先返回真正在座的那一个，只有在没有在座者时才退回到「正在离座」的条目。
+   * 取座位占用者。
+   * 离座（away）的玩家仍然占着这个座位与筹码——只有本人能坐回，别人坐不进来，
+   * 因此这里不再区分「正在离座」，一个座位只会有一个主人。
    */
   seatAt(seat: number): Seat | undefined {
-    let leaving: Seat | undefined
-    for (const entry of this.seats) {
-      if (entry.seat !== seat) continue
-      if (!entry.pendingLeave) return entry
-      leaving ??= entry
-    }
-    return leaving
+    return this.seats.find((entry) => entry.seat === seat)
   }
 
   seatedPlayers(): { playerId: string; nickname: string; seat: number; stack: number }[] {
@@ -169,23 +169,43 @@ export class HoldemTable {
     return this.phase !== 'waiting' && this.phase !== 'settlement'
   }
 
+  /** 能开局的条件：至少 2 名「在座且有筹码」的玩家（离座保留座位的人不算）。 */
   canStartHand(): boolean {
-    return !this.isHandRunning() && this.seats.filter((seat) => seat.stack > 0).length >= 2
+    return !this.isHandRunning() && this.seats.filter((seat) => seat.stack > 0 && !seat.away).length >= 2
   }
 
-  /** 该座位现在能否立刻坐人：正在离座（pendingLeave）的玩家不算占用。 */
+  /** 该座位现在能否坐人：离座保留的座位仍属于原主人，别人不能占。 */
   isSeatAvailable(seat: number): boolean {
-    const occupant = this.seatAt(seat)
-    return occupant === undefined || occupant.pendingLeave
+    return this.seatAt(seat) === undefined
+  }
+
+  /** 玩家是否已经离座但保留座位。 */
+  isAway(playerId: string): boolean {
+    return this.seatOf(playerId)?.away ?? false
+  }
+
+  /** 已入座且在座（未离座）的人数。 */
+  presentSeatCount(): number {
+    return this.seats.filter((seat) => !seat.away).length
   }
 
   sit(playerId: string, nickname: string, seat: number, stack = this.config.startingStack): void {
     if (!Number.isInteger(seat) || seat < 0 || seat >= this.config.maxSeats) {
       throw new EngineError('bad_state', '座位号超出范围')
     }
-    const occupant = this.seatAt(seat)
-    if (occupant && !occupant.pendingLeave) throw new EngineError('bad_state', '该座位已被占用')
-    if (this.seatOf(playerId)) throw new EngineError('bad_state', '你已经入座')
+    const existing = this.seatOf(playerId)
+    if (existing) {
+      // 离座保留的座位：本人坐回，筹码照旧；输光了（0 筹码）则按本次买入补充（重新买入）。
+      if (existing.seat !== seat) {
+        throw new EngineError('bad_state', '你已经有一个保留的座位，先退出房间才能换座')
+      }
+      if (!existing.away) throw new EngineError('bad_state', '你已经入座')
+      existing.away = false
+      existing.pendingRemoval = false
+      if (existing.stack <= 0) existing.stack = stack
+      return
+    }
+    if (this.seatAt(seat)) throw new EngineError('bad_state', '该座位已被占用')
     this.seats.push({
       playerId,
       nickname,
@@ -199,20 +219,50 @@ export class HoldemTable {
       lastAction: null,
       holeCards: [],
       revealedCards: null,
-      pendingLeave: false,
+      away: false,
+      pendingRemoval: false,
     })
     this.seats.sort((a, b) => a.seat - b.seat)
   }
 
-  /** 离座：手牌进行中先记为弃牌，筹码留在池中，本手结束后移除。 */
+  /**
+   * 离座（seat.leave）：座位与筹码都留着，只有本人能坐回。
+   * 手牌进行中离座会先自动弃牌，已投入的筹码留在池中（本手照样参与分池），
+   * 本手结束后座位仍然保留，随时可以坐回来接着玩。
+   */
   leave(playerId: string): void {
     const seat = this.seatOf(playerId)
     if (!seat) return
+    seat.away = true
+    if (this.isHandRunning() && seat.inHand && !seat.folded) {
+      this.foldOut(seat)
+    }
+  }
+
+  /**
+   * 让一个座位在本手出局（离座 / 退出房间时用）。
+   * 必须完全照 fold 动作来做：从 needsToAct 里移除并推进——否则：
+   *   - 不推进：只剩一人时本手不会结算（实测离座后牌局卡在 preflop）；
+   *   - 只在自己行动时推进：别人行动时弃牌会漏掉「其余全弃牌」的结算。
+   */
+  private foldOut(seat: Seat): void {
+    seat.folded = true
+    seat.lastAction = 'fold'
+    this.needsToAct.delete(seat.seat)
+    this.progress()
+  }
+
+  /**
+   * 退出房间：真正释放座位。
+   * 手牌进行中且筹码还在池里时只能先弃牌 + 标记，等本手结算后再移除（否则筹码会凭空消失）。
+   */
+  removePlayer(playerId: string): void {
+    const seat = this.seatOf(playerId)
+    if (!seat) return
     if (this.isHandRunning() && seat.inHand) {
-      seat.folded = true
-      seat.lastAction = 'fold'
-      seat.pendingLeave = true
-      if (this.actingSeat === seat.seat) this.progress()
+      seat.away = true
+      seat.pendingRemoval = true
+      if (!seat.folded) this.foldOut(seat)
       return
     }
     this.seats = this.seats.filter((entry) => entry.playerId !== playerId)
@@ -230,15 +280,17 @@ export class HoldemTable {
   /* ───────────────────────── 开局 ───────────────────────── */
 
   suggestButtonSeat(): number {
-    if (this.buttonSeat === null) return this.seats.find((seat) => seat.stack > 0)?.seat ?? 0
-    return this.nextSeatWhere(this.buttonSeat, (seat) => seat.stack > 0) ?? this.buttonSeat
+    const playable = (seat: Seat): boolean => seat.stack > 0 && !seat.away
+    if (this.buttonSeat === null) return this.seats.find(playable)?.seat ?? 0
+    return this.nextSeatWhere(this.buttonSeat, playable) ?? this.buttonSeat
   }
 
   startHand(options: { handId: string; rng: Rng; buttonSeat?: number; deck?: readonly Card[] }): void {
     if (this.isHandRunning()) throw new EngineError('bad_state', '当前手牌尚未结束')
 
-    this.seats = this.seats.filter((seat) => !seat.pendingLeave)
-    const participants = this.seats.filter((seat) => seat.stack > 0)
+    this.seats = this.seats.filter((seat) => !seat.pendingRemoval)
+    // 离座保留座位的人不参与本手（座位与筹码留着，坐回来即可继续）。
+    const participants = this.seats.filter((seat) => seat.stack > 0 && !seat.away)
     if (participants.length < 2) throw new EngineError('bad_state', '至少需要 2 名有筹码的玩家')
 
     this.handId = options.handId
@@ -252,7 +304,7 @@ export class HoldemTable {
     this.minRaise = this.config.bigBlind
 
     for (const seat of this.seats) {
-      seat.inHand = seat.stack > 0
+      seat.inHand = seat.stack > 0 && !seat.away
       seat.folded = false
       seat.allIn = false
       seat.committedHand = 0
@@ -264,7 +316,8 @@ export class HoldemTable {
 
     const headsUp = participants.length === 2
     this.buttonSeat = options.buttonSeat ?? this.suggestButtonSeat()
-    if (!this.seatAt(this.buttonSeat) || this.seatAt(this.buttonSeat)!.stack <= 0) {
+    const buttonSeat = this.buttonSeat === null ? undefined : this.seatAt(this.buttonSeat)
+    if (!buttonSeat || buttonSeat.stack <= 0 || buttonSeat.away) {
       this.buttonSeat = this.seats.find((seat) => seat.inHand)?.seat ?? this.buttonSeat
     }
 
@@ -549,6 +602,8 @@ export class HoldemTable {
     this.actingSeat = null
     this.needsToAct.clear()
     this.raiseAllowed.clear()
+    // 本手结束：退出房间的人现在可以真正让出座位（筹码已经结算完了）。
+    this.seats = this.seats.filter((seat) => !seat.pendingRemoval)
   }
 
   private postBlind(seatNumber: number, amount: number): void {
@@ -653,6 +708,7 @@ export class HoldemTable {
         folded: seat.folded,
         allIn: seat.allIn,
         inHand: seat.inHand,
+        away: seat.away,
         lastAction: seat.lastAction,
         revealedCards: seat.revealedCards ? [...seat.revealedCards] : null,
       })),
@@ -683,7 +739,8 @@ export class HoldemTable {
         lastAction: seat.lastAction,
         holeCards: [...seat.holeCards],
         revealedCards: seat.revealedCards ? [...seat.revealedCards] : null,
-        pendingLeave: seat.pendingLeave,
+        away: seat.away,
+        pendingRemoval: seat.pendingRemoval,
       })),
       deck: [...this.deck],
       burn: [...this.burn],
@@ -771,7 +828,9 @@ export class HoldemTable {
         lastAction: entry.lastAction,
         holeCards: [...entry.holeCards],
         revealedCards: entry.revealedCards ? [...entry.revealedCards] : null,
-        pendingLeave: entry.pendingLeave,
+        // 老快照没有这两个字段：默认 false，兼容旧数据。
+        away: entry.away ?? false,
+        pendingRemoval: entry.pendingRemoval ?? false,
       }
     })
     table.seats.sort((a, b) => a.seat - b.seat)

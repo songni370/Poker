@@ -17,6 +17,25 @@ import type {
 let requestCounter = 0
 const rid = (): string => `req-${++requestCounter}`
 
+/**
+ * 落座（新流程）：建房/加入后所有人都是旁观者，必须显式 seat.take 才能入座。
+ * 只接受「发送之后」的新消息，否则坐回保留座位时会匹配到历史快照。
+ */
+async function takeSeat(client: TestClient, seat: number, buyIn?: number): Promise<void> {
+  const from = client.messages.length
+  client.send({ type: 'seat.take', requestId: rid(), seat, ...(buyIn === undefined ? {} : { buyIn }) })
+  await client.waitFor(
+    (message) =>
+      message.type !== 'room.error' &&
+      'self' in message &&
+      message.self.seat === seat &&
+      'state' in message &&
+      message.state.seats[seat]?.away === false,
+    5000,
+    from,
+  )
+}
+
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 /** 真实 WebSocket 客户端：记录全部原始报文，供信息安全核查使用。 */
@@ -59,8 +78,12 @@ class TestClient {
     this.socket.close()
   }
 
-  waitFor(predicate: (message: ServerMessage) => boolean, timeoutMs = 4000): Promise<ServerMessage> {
-    const existing = this.messages.find(predicate)
+  waitFor(
+    predicate: (message: ServerMessage) => boolean,
+    timeoutMs = 4000,
+    fromIndex = 0,
+  ): Promise<ServerMessage> {
+    const existing = this.messages.slice(fromIndex).find(predicate)
     if (existing) return Promise.resolve(existing)
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('等待服务端消息超时')), timeoutMs)
@@ -222,7 +245,11 @@ test('联机闭环：两个独立会话建房入座、打完一手摊牌，且�
   const snapA = await a.waitFor((message) => message.type === 'room.snapshot')
   const snapB = await b.waitFor((message) => message.type === 'room.snapshot')
   assert.ok(snapA.type === 'room.snapshot' && snapB.type === 'room.snapshot')
-  assert.equal(snapA.state.seats.filter(Boolean).length, 2, '两名玩家各占一席')
+  assert.equal(snapA.self.seat, null, '加入后先是旁观者，需要自己落座')
+  assert.equal(snapA.state.seats.filter(Boolean).length, 0, '还没人落座')
+  await takeSeat(a, 0)
+  await takeSeat(b, 1)
+  assert.equal(a.lastState()!.seats.filter(Boolean).length, 2, '两名玩家各占一席')
   assert.equal(snapA.self.holeCards.length, 0, '开局前没有底牌')
   assert.equal(snapA.state.phase, 'waiting')
 
@@ -328,6 +355,8 @@ test('连续两手：结算后可以开始下一手，庄位轮转且筹码继�
     reconnectToken: guest.reconnectToken,
   })
   await b.waitFor((message) => message.type === 'room.snapshot')
+  await takeSeat(a, 0)
+  await takeSeat(b, 1)
 
   const clients = new Map([
     [host.playerId, a],
@@ -412,6 +441,8 @@ test('网络一致性：重复请求幂等、过期版本被拒绝', async (t) =
     reconnectToken: guest.reconnectToken,
   })
   await b.waitFor((message) => message.type === 'room.snapshot')
+  await takeSeat(a, 0)
+  await takeSeat(b, 1)
 
   a.send({ type: 'game.start', requestId: rid() })
   await a.waitFor((message) => message.type === 'hand.started')
@@ -493,6 +524,8 @@ test('断线重连：凭证正确可拿到一致快照，凭证错误被拒绝',
     reconnectToken: host.reconnectToken,
   })
   await hostClient.waitFor((message) => message.type === 'room.snapshot')
+  await takeSeat(first, 0)
+  await takeSeat(hostClient, 1)
 
   hostClient.send({ type: 'game.start', requestId: rid() })
   // 两名玩家都收到 hand.started 后再读取，避免把推送时延误判成数据缺失。

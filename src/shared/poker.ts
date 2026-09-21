@@ -109,11 +109,29 @@ export const ACTION_NAMES: Record<ActionType, string> = {
 export const TABLE_RULES = {
   minSeats: 2,
   maxSeats: 9,
+  /** 默认买入上限（= 起始筹码）。房主创建房间时可以自定义，见 minBuyInFloor / maxBuyInLimit。 */
   startingStack: 2000,
   smallBlind: 10,
   bigBlind: 20,
   turnSeconds: 20,
+  /** 最低买入 = 10 个大盲。 */
+  minBuyInBlinds: 10,
+  /** 房主可选买入上限的允许区间；步进等于小盲。 */
+  minBuyInFloor: 200,
+  maxBuyInLimit: 20000,
 } as const
+
+/** 本桌最低买入（10 个大盲）。 */
+export function minBuyInFor(bigBlind: number): number {
+  return bigBlind * TABLE_RULES.minBuyInBlinds
+}
+
+/** 把买入额夹到本桌允许的范围并按小盲取整。 */
+export function normalizeBuyIn(amount: number, bigBlind: number, maxBuyIn: number, smallBlind: number): number {
+  const min = Math.min(minBuyInFor(bigBlind), maxBuyIn)
+  const clamped = Math.min(Math.max(amount, min), maxBuyIn)
+  return Math.round(clamped / smallBlind) * smallBlind
+}
 
 export const ROOM_NAME_MAX = 24
 export const NICKNAME_MAX = 12
