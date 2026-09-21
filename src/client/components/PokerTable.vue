@@ -67,14 +67,6 @@ function polarFor(index: number): { angle: number } {
   return { angle: ((index - offset) / total) * Math.PI * 2 + Math.PI / 2 }
 }
 
-function offsetFor(index: number): { x: number; y: number } {
-  const { angle } = polarFor(index)
-  // 下注筹码朝桌心挪 30%，始终留在桌布范围内。
-  const dx = -Math.cos(angle) * RX * 0.3
-  const dy = -Math.sin(angle) * RY * 0.3
-  return { x: 50 + RX * Math.cos(angle) + dx, y: 50 + RY * Math.sin(angle) + dy }
-}
-
 /** 庄家按钮贴着对应座位的面板外沿，与座位一起旋转对齐。 */
 function dealerStyle(index: number): Record<string, string> {
   const { angle } = polarFor(index)
@@ -100,8 +92,18 @@ function seatStyle(index: number): Record<string, string> {
 }
 
 function chipStyle(index: number): Record<string, string> {
-  const { x, y } = offsetFor(index)
-  return { left: `${String(x)}%`, top: `${String(y)}%` }
+  const { angle } = polarFor(index)
+  /*
+   * 下注筹码朝桌心收：横向 30%、纵向 39%。
+   * 纵向比横向收得多，是因为上下两排座位面板（本人 36+47=83px 高）与中央块之间只剩
+   * 这条空隙——单挑时本人的筹码正好落在自己面板下沿下面一点点（实测 25% 半径：
+   * 上面板 2px、下面中央块 2px），多收一点就会压住自己的筹码数字。
+   * 小屏（矮屏横屏 / 竖屏）不画浮动筹码，改由座位面板角标显示（见 PlayerSeat 的 .panel-bet）。
+   */
+  return {
+    left: `${String(50 + RX * 0.7 * Math.cos(angle))}%`,
+    top: `${String(50 + RY * 0.61 * Math.sin(angle))}%`,
+  }
 }
 
 /** 已入座人数：用于空桌引导与状态播报。 */
@@ -122,6 +124,13 @@ function isSideSeat(index: number): boolean {
   return Math.abs(Math.cos(polarFor(index).angle)) >= 0.85
 }
 
+/**
+ * 9 人满桌：环上相邻座位只有 40° 间距（纵向 sin 差最小 0.592），
+ * 完整面板（底牌背面 36 + 面板 47 + 状态行 14）在 RY=41% 的椭圆上必然互相压住。
+ * 这一档不再画座位里的小底牌背面（见 .is-full-ring 样式）。
+ */
+const isFullRing = computed(() => props.maxSeats >= 9)
+
 /** 桌面中央的一句话状态，用 aria-live 播报给屏幕阅读器。 */
 const tableStatus = computed(() => {
   const street = props.street ? STREET_NAMES[props.street] : '等待发牌'
@@ -131,7 +140,7 @@ const tableStatus = computed(() => {
 
 <template>
   <div class="table-wrap">
-    <div class="table">
+    <div class="table" :class="{ 'is-full-ring': isFullRing }">
       <span class="felt-texture" aria-hidden="true" />
       <span class="betting-line" aria-hidden="true" />
 
@@ -178,8 +187,13 @@ const tableStatus = computed(() => {
           />
         </div>
 
-        <!-- 本轮下注：朝桌心方向显示筹码与数额。 -->
-        <div v-if="seat && seat.committedStreet > 0" class="bet" :style="chipStyle(index)">
+        <!-- 本轮下注：朝桌心方向显示筹码与数额。data-seat 供几何探针区分「自己的筹码」与「别人的」。 -->
+        <div
+          v-if="seat && seat.committedStreet > 0"
+          class="bet"
+          :style="chipStyle(index)"
+          :data-seat="index + 1"
+        >
           <span class="chip" aria-hidden="true" />
           <span class="num">{{ seat.committedStreet }}</span>
         </div>
@@ -336,6 +350,18 @@ const tableStatus = computed(() => {
   transform: translate(-50%, -50%);
 }
 
+/*
+ * 9 人满桌：座位面板不画底牌背面。
+ * 环上相邻座位只有 40° 间距，纵向最小 sin 差 0.592：在 RY=41% 的 1280×720 桌面上
+ * 相邻座位中心只差约 80px，而「底牌 36 + 面板 47 + 状态 14」的完整面板有 106px 高，
+ * 于是左列三个面板互相压住（实测 15×127px）。去掉底牌背面后面板降到 65px，净空 15px。
+ * 信息不丢：还在牌局里的信息由「面板淡化 + 已弃牌/全下/已断线文本 + 桌面下注筹码」给出，
+ * 本人底牌在底部操作区有大图；2–8 人桌照常显示底牌背面。矮屏与竖屏本来就不画（见各自规则）。
+ */
+.table.is-full-ring .seat-slot :deep(.cards) {
+  display: none;
+}
+
 .chip {
   width: 11px;
   height: 11px;
@@ -412,6 +438,12 @@ const tableStatus = computed(() => {
   }
 
   /* 贴边座位：只留「昵称 + 筹码」，头像与光环让位给公共牌。 */
+  .seat-slot {
+    /* 非贴边座位 96px：9 人桌上相邻面板（本人↔两侧 ±50° 位、下沿的两个 sin 0.94 位）
+       才不会互相压住；再宽一点就要靠截断昵称来换，没必要。 */
+    --seat-w: 96px;
+  }
+
   .seat-slot.is-side-seat {
     --seat-w: 64px;
   }
@@ -447,6 +479,16 @@ const tableStatus = computed(() => {
 
   /* 边池明细行同横屏矮屏：会让中央块宽过两侧座位之间的净宽，明细交给 sr-only 与结算叠层。 */
   .pots {
+    display: none;
+  }
+
+  /*
+   * 下注筹码：竖屏座位面板很窄，默认 70% 半径的落点必然压住东西——
+   * 压自己的筹码数字（实测 15×16px）、压公共牌最外侧那张牌，二者之间没有净空
+   * （公共牌宽度与贴边座位面板内沿在竖屏基本贴合）。
+   * 因此竖屏不画浮动筹码，改由座位面板右下角的角标显示本轮下注（见 PlayerSeat 的 .panel-bet）。
+   */
+  .bet {
     display: none;
   }
 }
@@ -512,6 +554,11 @@ const tableStatus = computed(() => {
   }
 
   .pots {
+    display: none;
+  }
+
+  /* 下注筹码同样改用面板角标：118px 高的桌面上，浮动筹码会压到公共牌或自己的筹码数字。 */
+  .bet {
     display: none;
   }
 

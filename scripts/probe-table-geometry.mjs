@@ -53,6 +53,7 @@ for (const mock of MOCKS) {
         return { top: box.top, bottom: box.bottom, left: box.left, right: box.right, width: box.width, height: box.height }
       }
       const table = rect(document.querySelector('.table'))
+      if (!table) throw new Error('找不到 .table')
       const local = (el) => {
         const box = rect(el)
         return box
@@ -70,9 +71,19 @@ for (const mock of MOCKS) {
         center: local(document.querySelector('.center')),
         pot: local(document.querySelector('.pot')),
         pots: local(document.querySelector('.pots')),
-        street: local(document.querySelector('.board .street')),
-        board: local(document.querySelector('.board .row')),
-        chips: [...document.querySelectorAll('.bet')].map((el, index) => ({ index, box: local(el) })),
+        street: local(document.querySelector('.table .board .street')),
+        board: local(document.querySelector('.table .board .row')),
+        chips: [...document.querySelectorAll('.bet')].map((el) => ({
+          seat: Number(el.dataset.seat ?? 0),
+          box: local(el),
+          text: el.textContent.trim(),
+        })),
+        // 可读文字：被别的元素压住才算问题（几何重叠本身不算）
+        texts: [...document.querySelectorAll('.table .seat-slot .name, .table .seat-slot .stack, .table .seat-slot .status, .table .board .street, .table .board .card, .table .pot')].map((el) => ({
+          label: `${el.className.split(' ')[0]}「${el.textContent.trim().slice(0, 6)}」`,
+          owner: el.closest('.seat-slot') ? [...document.querySelectorAll('.seat-slot')].indexOf(el.closest('.seat-slot')) : -1,
+          box: local(el),
+        })),
         seats: [...document.querySelectorAll('.seat-slot')].map((el, index) => ({
           seat: index + 1,
           hero: el.classList.contains('is-hero-slot'),
@@ -120,6 +131,22 @@ for (const mock of MOCKS) {
     // 页面溢出单独归类：极矮机型（≤360×740）本来就放不下全部内容，
     // 属于已知限制，不该让探针以失败退出。
     const warnings = []
+    // 筹码/别的座位面板压住可读文字 → 真正的问题（几何重叠不等于信息被挡）
+    const covers = [
+      // 筹码连自己座位的文字也算遮挡（「筹码压住自己的筹码数字」正是竖屏踩过的坑）；
+      // 面板只跟自己座位比较（面板不会挡住它自己的文字）。
+      ...data.chips.map((chip) => ({ label: `筹码${chip.text}`, box: chip.box, ownSeat: -1 })),
+      ...data.seats.map((seat) => ({ label: `座位${String(seat.seat)}面板`, box: seat.box, ownSeat: seat.seat })),
+    ]
+    for (const text of data.texts) {
+      if (!text.box) continue
+      const ownerSeat = text.owner < 0 ? 0 : text.owner + 1
+      for (const cover of covers) {
+        if (!cover.box || cover.ownSeat === ownerSeat) continue
+        const hit = overlap(text.box, cover.box)
+        if (hit) issues.push(`${cover.label}压住文字 ${text.label} ${String(hit.v)}×${String(hit.h)}px`)
+      }
+    }
     if (data.scrollX > 0) warnings.push(`横向溢出 ${String(data.scrollX)}px`)
     if (data.scrollY > 0) warnings.push(`纵向溢出 ${String(data.scrollY)}px`)
     if (pageErrors.length > 0) issues.push(`页面错误：${pageErrors.join(';')}`)

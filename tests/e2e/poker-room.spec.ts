@@ -279,6 +279,10 @@ test('牌桌小屏几何：740×360 / 844×390 / 390×844 无横向溢出且座�
     expect(result.collisions, `${width}×${height} 座位面板不应压住底池/公共牌：${result.collisions.join('；')}`).toEqual([])
     expect(result.boardInsideTable, `${width}×${height} 公共牌应完全落在桌面内`).toBe(true)
     expect(result.seatCount).toBeGreaterThanOrEqual(2)
+    // 小屏不画桌面中央的浮动下注筹码（会压住公共牌或自己的筹码数字），
+    // 本轮下注改由座位面板右下角的角标给出（盲注已经下过，所以至少有 1 个）。
+    await expect(host.locator('.table .bet:visible')).toHaveCount(0)
+    expect(await host.locator('.seat-slot .panel-bet:visible').count()).toBeGreaterThan(0)
     await host.screenshot({ path: `artifacts/e2e/13-table-geometry-${width}x${height}.png` })
   }
 

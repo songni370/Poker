@@ -60,6 +60,7 @@ const avatarText = computed(() => props.seat.nickname.slice(0, 1) || '?')
 const spoken = computed(() => {
   const parts = [`座位 ${String(props.seat.seat + 1)}`, props.seat.nickname, `筹码 ${String(props.seat.stack)}`]
   if (roleText.value) parts.push(roleText.value)
+  if (props.seat.committedStreet > 0) parts.push(`本轮下注 ${String(props.seat.committedStreet)}`)
   if (statusText.value) parts.push(statusText.value)
   if (props.isActing) parts.push('正在行动')
   return parts.join('，')
@@ -113,6 +114,13 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
         <i class="pi pi-wifi" />
       </span>
       <span v-else-if="seat.allIn" class="flag flag--allin" aria-hidden="true">ALL IN</span>
+
+      <!-- 本轮下注：小屏（矮屏横屏 / 竖屏）专用的面板角标。
+           那些尺寸里桌子中央挤不下浮动的下注筹码（要么压住自己的筹码数字，要么压住公共牌），
+           改成写在座位面板右下角；无障碍读法在 aria-label 里（见 spoken）。 -->
+      <span v-if="seat.committedStreet > 0" class="panel-bet num" aria-hidden="true">
+        {{ seat.committedStreet }}
+      </span>
     </div>
 
     <!-- 状态行：文本形式（不仅靠颜色）。
@@ -262,6 +270,28 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   font-weight: 700;
 }
 
+/*
+ * 本人座位不重复显示「YOUR TURN + 进度条」：底部操作区已经有更大的同一套提示
+ *（文本 + 秒数 + 整条进度条），环上这块省下来给别人面板留净空——
+ * 单挑（2 人桌）时本人的下注筹码正好落在这一行上（实测压住 YOUR TURN 约 14×41px）。
+ * 头像光环与 aria-label 里的「正在行动」仍在，颜色不是唯一提示。
+ */
+.is-hero .status,
+.is-hero .timer {
+  display: none;
+}
+
+/* 本轮下注角标：默认隐藏（桌面用桌面中央的下注筹码），只在矮屏与竖屏由各自规则打开。 */
+.panel-bet {
+  display: none;
+  position: absolute;
+  right: 3px;
+  bottom: 1px;
+  color: var(--gold);
+  font-size: 0.62rem;
+  line-height: 1.4;
+}
+
 .status {
   margin: 0;
   font-size: 0.68rem;
@@ -341,9 +371,9 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
     display: none;
   }
 
-  .is-hero .status,
-  .is-hero .timer {
-    display: none;
+  /* 本轮下注改由面板角标给出（桌面中央浮动的下注筹码在竖屏会压住公共牌或筹码数字）。 */
+  .panel-bet {
+    display: inline-flex;
   }
 }
 
@@ -376,6 +406,20 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
 
   .name {
     font-size: 0.74rem;
+  }
+
+  /*
+   * 面板内边距收到 3px：面板高度 47 → 41px。
+   * 9 人桌相邻座位的纵向中心距在这一档只有约 44.7px（sin 差 0.592 × 64% × 118px），
+   * 47px 的面板会互相压住 2.3px，41px 才有净空。
+   */
+  .panel {
+    padding: 3px 6px;
+  }
+
+  /* 同上：矮屏横屏也用面板角标显示本轮下注。 */
+  .panel-bet {
+    display: inline-flex;
   }
 }
 </style>
