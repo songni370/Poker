@@ -119,7 +119,9 @@ export async function playUntilSettled(pages: Page[], timeoutMs = 45_000): Promi
   while (Date.now() < deadline) {
     for (const page of pages) {
       if (await page.getByRole('button', { name: '知道了' }).isVisible().catch(() => false)) return true
-      for (const pattern of [/^过牌/, /^跟注/]) {
+      // 动作按钮改成「英文主 + 中文辅」后，可访问名称是「CHECK 过牌」/「CALL 跟注 20」，
+      // 所以这里不能再锚定开头，只按中文子串匹配。
+      for (const pattern of [/过牌/, /跟注/]) {
         const button = page.getByRole('button', { name: pattern })
         if ((await button.count()) === 0) continue
         if (!(await button.first().isEnabled().catch(() => false))) continue

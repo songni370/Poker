@@ -62,6 +62,8 @@ const roleText = computed(() => {
  * 位置从「桌面上的庄家按钮」搬到座位面板内：桌面按钮会压住底牌背面或底池
  * （实测 740×360 压住底池 6.9×22px），面板内角标则永远只占面板自己的空间。
  * 双人桌时同一座位可能既是庄家又是小盲，所以是一组角标。
+ * 头像圆与首字头像已删除：左侧这一块改成纯粹的「牌局角色」槽位，
+ * 没有角色时整块不渲染也不占位（昵称与筹码因此拿到更多宽度）。
  */
 const roleBadges = computed(() => {
   const badges: { key: string; label: string; tone: 'dealer' | 'blind' }[] = []
@@ -70,8 +72,6 @@ const roleBadges = computed(() => {
   if (props.seat.isBigBlind) badges.push({ key: 'bb', label: 'BB', tone: 'blind' })
   return badges
 })
-
-const avatarText = computed(() => props.seat.nickname.slice(0, 1) || '?')
 
 /** 屏幕阅读器摘要：昵称、筹码、当前状态，一次读完。 */
 const spoken = computed(() => {
@@ -112,8 +112,16 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
     </div>
 
     <div class="panel">
-      <span class="seat-aura" aria-hidden="true" />
-      <span class="avatar" aria-hidden="true">{{ avatarText }}</span>
+      <!--
+        面板左侧 = 牌局角色槽位（庄家 / 小盲 / 大盲）。
+        角色胶囊只是视觉，完整说法在座位 aria-label 的「庄家位 / 小盲 / 大盲」里；
+        没有角色时整块不渲染，左侧不留空位，昵称与筹码直接顶到面板内边距。
+      -->
+      <span v-if="roleBadges.length > 0" class="roles" aria-hidden="true">
+        <span v-for="badge in roleBadges" :key="badge.key" class="role-badge" :class="`role-badge--${badge.tone}`">
+          {{ badge.label }}
+        </span>
+      </span>
 
       <span class="meta">
         <span class="name">
@@ -121,13 +129,6 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
           <span v-if="isHero" class="tag tag--hero">你</span>
         </span>
         <span class="stack num">{{ seat.stack }}</span>
-      </span>
-
-      <!-- 庄家 / 盲位：角标文字只是视觉，完整说法在 aria-label（庄家位 / 小盲 / 大盲）。 -->
-      <span v-if="roleBadges.length > 0" class="role-badges" aria-hidden="true">
-        <span v-for="badge in roleBadges" :key="badge.key" class="role-badge" :class="`role-badge--${badge.tone}`">
-          {{ badge.label }}
-        </span>
       </span>
 
       <span v-if="!seat.connected" class="flag flag--off" aria-hidden="true">
@@ -189,8 +190,12 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
+  /* 6px：头像没了以后，左侧角色槽位与昵称之间不需要原来 8px 的呼吸位。 */
+  gap: 6px;
   width: 100%;
+  /* min-width: 0 是必需的：窄屏（贴边座位 64px）下面板的 min-content 由角色胶囊 + 昵称决定，
+     不放开的话面板会顶出座位宽度（实测多出 5.6px），把两侧的净空吃掉。 */
+  min-width: 0;
   padding: 6px 8px;
   border-radius: var(--radius-md);
   border: 1px solid var(--line);
@@ -221,34 +226,13 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   border-color: var(--gold);
 }
 
-/* 头像光环：颜色之外还有动画与 YOUR TURN 文本。 */
-.seat-aura {
-  position: absolute;
-  left: 8px;
-  top: 50%;
-  width: 34px;
-  height: 34px;
-  margin-top: -17px;
-  border-radius: 50%;
-  pointer-events: none;
-}
-
-.avatar {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  background: var(--felt-deep);
-  border: 1px solid var(--gold-soft);
-  color: var(--text);
-  font-size: 0.95rem;
-  font-weight: 600;
-}
-
+/*
+ * 昵称 + 筹码：占据角色槽位以外的全部宽度，并且可以收缩到比内容更窄
+ * （min-width: 0 才能让里面的 .name 触发省略号，而不是把面板撑宽）。
+ */
 .meta {
   display: grid;
+  flex: 1 1 auto;
   gap: 1px;
   min-width: 0;
 }
@@ -280,6 +264,9 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
 .stack {
   font-size: 0.78rem;
   color: var(--muted);
+  /* 筹码是数字，宁可整段省略也不要把面板顶宽。 */
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .flag {
@@ -298,17 +285,15 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
 }
 
 /*
- * 庄家 / 盲位角标：绝对定位在面板内（面板是 position: relative）。
- * 默认压在头像左上角（头像只是装饰圆），头像被隐藏的紧凑布局改贴右上角内边距，
- * 两种情况都不会碰到座位上的底牌背面或别人面板里的文字。
+ * 牌局角色槽位：面板最左侧的一列胶囊，是面板内唯一的「非本人信息」元素。
+ * 双人桌同一座位可能同时是庄家与小盲（D + SB），所以是一组而不是一个；
+ * 面板高度由昵称+筹码（约 33px）决定，两个胶囊横排约 13px，不会把面板撑高。
  */
-.role-badges {
-  position: absolute;
-  left: 3px;
-  top: 2px;
+.roles {
   display: flex;
-  gap: 2px;
-  pointer-events: none;
+  flex: none;
+  align-items: center;
+  gap: 3px;
 }
 
 .role-badge {
@@ -402,26 +387,29 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
     width: var(--seat-w, 108px);
   }
 
-  .avatar {
-    width: 28px;
-    height: 28px;
-    font-size: 0.85rem;
-  }
-
-  .seat-aura {
-    left: 8px;
-    width: 28px;
-    height: 28px;
-    margin-top: -14px;
-  }
-
   .name {
     font-size: 0.74rem;
   }
 
   /*
+   * 竖屏最窄的座位（贴边位）只有 64px：昵称与筹码要留得下，
+   * 角色胶囊就竖排成一列并收到最小尺寸（约 11px 宽），省出来的一列全给昵称。
+   */
+  .roles {
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .role-badge {
+    min-width: 0;
+    padding: 0 2px;
+    font-size: 0.5rem;
+    line-height: 1.4;
+  }
+
+  /*
    * 竖屏只有 ~358px 宽、9 个座位环成一圈：座位面板每高 10px，公共牌就被吃掉 10px。
-   * 这里只保留「头像 + 昵称 + 筹码」，面板从 ~105px 收到 ~47px，公共牌区不再被压住：
+   * 这里只保留「角色 + 昵称 + 筹码」，面板从 ~105px 收到 ~47px，公共牌区不再被压住：
    *   - 底牌：本人底牌在下方操作区有大图；他人只画背面，弃牌/全下的状态由面板淡化与 ALL IN 标记给出；
    *   - 「上一手动作」文本：下注筹码本身就在桌上显示金额；
    *   - 行动提示：本人由底部 YOUR TURN + 进度条给出，他人由操作区的「等待 X 行动」给出；
@@ -447,8 +435,8 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
 
   /*
    * 矮屏下座位面板有 ~100px 高，无论锚点怎么调都会压到公共牌/底池（实测 9 人桌 740×360
-   * 时底池被完全盖住）。这里让所有座位只保留「姓名 + 筹码」两项关键信息：
-   *   - 头像与光环让位；行动提示仍由「面板描边 + YOUR TURN 文本 + 进度条」三重给出；
+   * 时底池被完全盖住）。这里让所有座位只保留「角色 + 姓名 + 筹码」三项关键信息：
+   *   - 行动提示仍由「面板描边 + YOUR TURN 文本 + 进度条」三重给出；
    *   - 本人座位的底牌在下方操作区已有大图，座位里重复的小牌一并省掉。
    *
    * 进一步：状态行（YOUR TURN + 进度条、上一手动作文字）让面板从 47px 长到 67px，
@@ -457,18 +445,10 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
    *   - 轮到别人：操作区显示「等待 X 行动」，也是文本；
    *   - 已弃牌 / 全下 / 已断线：仍由面板淡化、ALL IN 标记、断线图标与虚线边框给出（不靠颜色）。
    */
-  .seat .avatar,
-  .seat .seat-aura,
   .seat .cards,
   .seat .status,
   .seat .timer {
     display: none;
-  }
-
-  /* 头像没了，角标改贴面板右上角，不压昵称与筹码。 */
-  .role-badges {
-    left: auto;
-    right: 3px;
   }
 
   .name {
@@ -479,6 +459,7 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
    * 面板内边距收到 3px：面板高度 47 → 41px。
    * 9 人桌相邻座位的纵向中心距在这一档只有约 44.7px（sin 差 0.592 × 64% × 118px），
    * 47px 的面板会互相压住 2.3px，41px 才有净空。
+   * 角色胶囊横排即可（这一档座位宽 104px，D + SB 两个胶囊也不影响昵称与筹码）。
    */
   .panel {
     padding: 3px 6px;

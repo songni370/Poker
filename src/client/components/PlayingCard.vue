@@ -78,16 +78,17 @@ const isTen = computed(() => rank.value === 'T')
 
     <template v-else>
       <!--
-        牌面：左上角「点数 + 花色」角标 + 中央大花色 + 右下角镜像角标。
+        牌面：只有左上角「点数 + 花色」角标 + 右下角镜像角标，中间不再画大花色。
         点数用真实字形而不是七段数码：26px 的座位牌上，七段数字的 8/9/6 几乎分不出来，
-        而且 10 会被画成 T。字号随牌宽缩放（--cw），12–58px 各档都做过截图核对。
+        而且 10 会被画成 T。花色与点数同处一个角标（形状 + 颜色两重区分），
+        所以中央那块地方可以整块让出来——牌面更干净，也不再有「中央花色顶到右下角标」的约束。
+        中央花色消失后角标整体放大一档（点数 0.38 → 0.46 牌宽）补偿辨识度，
+        26 / 38 / 42 / 58px 与竖屏 clamp 到 24–34px 各档都做过截图核对。
       -->
       <span class="corner corner--tl" aria-hidden="true">
         <span class="rank">{{ rankText }}</span>
         <span class="suit">{{ suitSymbol }}</span>
       </span>
-
-      <span class="pip" aria-hidden="true">{{ suitSymbol }}</span>
 
       <!-- 右下角标：桌上的牌朝向桌心（rotate 180），操作区的牌保持正向。 -->
       <span class="corner corner--br" :class="{ 'corner--br-flat': upright }" aria-hidden="true">
@@ -154,6 +155,9 @@ const isTen = computed(() => rank.value === 'T')
 /*
  * 角标：点在上、花色在下，紧贴左上角；字号按牌宽等比缩放。
  * 10 是两位数，字号略收一点并压紧字距，避免在 26px 的牌上顶出边界。
+ * 放大后的上限由「两个角标互不接触」定死：角标块高 (点数 + 花色) × 0.92 ≈ 0.72 牌宽，
+ * 相比之下牌高 1.4 牌宽，上下两个角标在纵向必然有重叠带，靠横向错开（左 8% / 右 8%）分开；
+ * 点数最大 0.46 时「10」的角标宽约 0.38 牌宽，左右角标之间还有 0.08 牌宽的净空。
  */
 .corner {
   position: absolute;
@@ -182,36 +186,17 @@ const isTen = computed(() => rank.value === 'T')
 
 .rank {
   font-family: var(--font-sans);
-  font-size: calc(var(--cw) * 0.38);
+  font-size: calc(var(--cw) * 0.46);
   letter-spacing: -0.06em;
 }
 
 .is-ten .rank {
-  font-size: calc(var(--cw) * 0.32);
+  font-size: calc(var(--cw) * 0.4);
   letter-spacing: -0.08em;
 }
 
 .suit {
-  font-size: calc(var(--cw) * 0.26);
-}
-
-/*
- * 中央大花色：小尺寸下也能一眼认出花色（配合角标与颜色三重区分）。
- * 正中对齐，并收小到 0.42 牌宽——再大就会顶到右下角的镜像角标。
- */
-.pip {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  font-size: calc(var(--cw) * 0.42);
-  line-height: 1;
-  opacity: 0.92;
-}
-
-/* 26px 的座位牌：中央花色再收一点，保证角标完整。 */
-.card--sm .pip {
-  font-size: calc(var(--cw) * 0.38);
+  font-size: calc(var(--cw) * 0.32);
 }
 
 /* 牌桌上朝向桌心的牌：小尺寸下右下角标不旋转，字形更清楚。 */

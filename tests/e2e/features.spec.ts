@@ -6,6 +6,7 @@ import {
   joinRoomByLink,
   leaveSeat,
   openDrawerSection,
+  playUntilSettled,
   startHand,
   takeSeat,
   watchErrors,
@@ -461,4 +462,215 @@ test('观战选座：9 人桌空位在窄屏仍是一排，点空位买入即可
   await hostContext.close()
   await guestContext.close()
   await watcherContext.close()
+})
+
+/**
+ * 界面改造回归（本轮 4 项需求）：
+ *   1. 牌面不再画中央大花色：只有左上「点数 + 花色」与右下镜像角标；
+ *   2. 座位面板左侧是牌局角色槽位（D / SB / BB），头像圆已删除，没有角色时整块不渲染；
+ *   3. 底部「你的底牌」区实时显示当前最大牌型（翻牌前 → 河牌）；
+ *   4. 操作区动作按钮英文主 + 中文辅，并多出 1/2、2/3、满池、超池 四个快捷额度。
+ *
+ * 用 3 人桌：庄家 / 小盲 / 大盲都有角色，第三家没有角色——
+ * 一屏里能同时看到「有角色」与「无角色」两种座位面板。
+ */
+test('界面改造：牌面无中央花色、座位角色槽位、底部当前牌型、操作区快捷额度', async ({ browser }) => {
+  const hostContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const guestContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const thirdContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const host = await hostContext.newPage()
+  const guest = await guestContext.newPage()
+  const third = await thirdContext.newPage()
+  const errors = [...watchErrors(host), ...watchErrors(guest), ...watchErrors(third)]
+
+  const stamp = String(Date.now() % 1000)
+  const roomId = await createRoom(host, `界面${stamp}`, '界面回归', { maxSeats: 6 })
+  await joinRoomByLink(guest, roomId, `乙${stamp}`)
+  await joinRoomByLink(third, roomId, `丙${stamp}`)
+  await takeSeat(host, 1)
+  await takeSeat(guest, 2)
+  await takeSeat(third, 3)
+  await startHand(host)
+
+  /* ① 牌面：没有 .pip，两个角标，role=img + 中文 aria-label 都还在。 */
+  const faces = await host.evaluate(() => {
+    const cards = [...document.querySelectorAll('.table .board .card, .hero-cards .card')]
+    return {
+      cards: cards.length,
+      pips: document.querySelectorAll('.pip').length,
+      cornerCounts: cards.map((el) => el.querySelectorAll('.corner').length),
+      roles: cards.map((el) => el.getAttribute('role')),
+      labels: cards.map((el) => el.getAttribute('aria-label') ?? ''),
+    }
+  })
+  expect(faces.cards).toBeGreaterThan(0)
+  expect(faces.pips, '牌面上不应再有中央大花色 .pip').toBe(0)
+  expect(faces.cornerCounts.every((count) => count === 2), '每张正面牌都要有左上 + 右下两个角标').toBe(true)
+  expect(faces.roles.every((role) => role === 'img')).toBe(true)
+  expect(
+    faces.labels.every((label) => /^(黑桃|红桃|方块|梅花) /.test(label)),
+    `读屏仍要读出花色与点数：${faces.labels.join('、')}`,
+  ).toBe(true)
+
+  /* ② 座位面板：没有头像，左侧是角色槽位；角色胶囊对读屏隐藏，完整说法在 aria-label。 */
+  const seatInfo = await host.evaluate(() =>
+    [...document.querySelectorAll('.seat-slot')].map((slot) => ({
+      avatars: slot.querySelectorAll('.avatar').length,
+      roles: [...slot.querySelectorAll('.roles .role-badge')].map((badge) => badge.textContent.trim()),
+      rolesHidden: slot.querySelector('.roles')?.getAttribute('aria-hidden') ?? null,
+      aria: slot.querySelector('.seat')?.getAttribute('aria-label') ?? '',
+    })),
+  )
+  expect(seatInfo.length).toBeGreaterThanOrEqual(3)
+  expect(seatInfo.every((seat) => seat.avatars === 0), '头像圆应已删除').toBe(true)
+  const withRoles = seatInfo.filter((seat) => seat.roles.length > 0)
+  // 3 人桌：庄家、小盲、大盲各占一个座位（庄家与小盲是两个人）。
+  expect(withRoles.map((seat) => seat.roles.join('+')).sort()).toEqual(['BB', 'D', 'SB'])
+  expect(withRoles.every((seat) => seat.rolesHidden === 'true'), '角色胶囊只是视觉').toBe(true)
+  expect(withRoles.every((seat) => /庄家位|小盲|大盲/.test(seat.aria)), '完整说法仍在座位 aria-label').toBe(true)
+  // 没有角色的座位：槽位整块不渲染（不是渲染成空盒子）。
+  expect(withRoles.length).toBe(3)
+  expect(await host.locator('.seat .roles').count()).toBe(3)
+  await host.locator('.table').screenshot({ path: 'artifacts/e2e/28-seat-role-slots.png' })
+
+  /* ③ 翻牌前的当前牌型：两张底牌也要给结论。 */
+  const handName = host.locator('.hero-hand .hand-name')
+  await expect(handName).toBeVisible()
+  await expect(handName).toHaveText(/^(一对 |高牌 )/)
+  await host.locator('.hero-meta').screenshot({ path: 'artifacts/e2e/29-hero-hand-name-preflop.png' })
+
+  /* ④ 操作区：英文主 + 中文辅，且有四个快捷额度。 */
+  let actor = null as typeof host | null
+  for (let i = 0; i < 40 && actor === null; i += 1) {
+    for (const page of [host, guest, third]) {
+      if (await page.locator('.action-bar .quick-btn').first().isVisible().catch(() => false)) {
+        actor = page
+        break
+      }
+    }
+    if (actor === null) await host.waitForTimeout(250)
+  }
+  expect(actor, '开局后总有一方轮到自己下注/加注').not.toBeNull()
+  const bettor = actor!
+
+  const actions = await bettor.evaluate(() =>
+    [...document.querySelectorAll('.action-bar .buttons .p-button')].map((el) => ({
+      aria: el.getAttribute('aria-label') ?? '',
+      en: el.querySelector('.act-en')?.textContent?.trim() ?? '',
+      zh: el.querySelector('.act-zh')?.textContent?.trim() ?? '',
+      height: Math.round(el.getBoundingClientRect().height),
+    })),
+  )
+  expect(actions.length).toBeGreaterThanOrEqual(3)
+  for (const action of actions) {
+    expect(action.en, '英文主文本').not.toBe('')
+    expect(action.zh, '中文小字').not.toBe('')
+    // 可访问名称必须同时包含英文动作词与中文，不能只留英文。
+    expect(action.aria).toContain(action.en.split(' ')[0]!)
+    expect(action.aria).toContain(action.zh.split(' ')[0]!)
+    expect(action.height, `${action.aria} 的触控高度`).toBeGreaterThanOrEqual(40)
+  }
+
+  const quick = await bettor.evaluate(() => {
+    const range = document.querySelector('.action-bar .range')?.textContent ?? ''
+    const [min, max] = range.split('–').map((value) => Number(value.trim()))
+    const buttons = [...document.querySelectorAll('.action-bar .quick-btn')].map((el) => {
+      const box = el.getBoundingClientRect()
+      return {
+        // 英文是主文本（官方叫法），中文只是下方小字；两者都要在。
+        en: el.querySelector('.quick-ratio')?.textContent?.trim() ?? '',
+        zh: el.querySelector('.quick-zh')?.textContent?.trim() ?? '',
+        value: Number(el.querySelector('.quick-value')?.textContent?.trim() ?? 'NaN'),
+        disabled: el.hasAttribute('disabled'),
+        title: el.closest('.quick-slot')?.getAttribute('title') ?? '',
+        left: Math.round(box.left),
+        right: Math.round(box.right),
+        width: Math.round(box.width),
+        height: Math.round(box.height),
+      }
+    })
+    return {
+      min,
+      max,
+      overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      buttons,
+      // 相邻档位的间距：不小于 8px，手指不会点到隔壁档位。
+      gaps: buttons.slice(1).map((button, index) => button.left - buttons[index]!.right),
+    }
+  })
+  expect(quick.buttons.map((button) => button.en)).toEqual(['1/2 POT', '2/3 POT', 'POT', 'OVERBET'])
+  expect(quick.buttons.map((button) => button.zh)).toEqual(['半池', '2/3 池', '满池', '超池'])
+  expect(Number.isFinite(quick.min) && Number.isFinite(quick.max)).toBe(true)
+  expect(quick.overflowX, '操作区不应横向溢出').toBe(0)
+  for (const button of quick.buttons) {
+    expect(button.height, `${button.en} 的触控高度`).toBeGreaterThanOrEqual(40)
+    expect(button.width, `${button.en} 的触控宽度`).toBeGreaterThanOrEqual(40)
+    expect(Number.isInteger(button.value)).toBe(true)
+    // 关键：按钮上写的数必须落在服务端给的合法区间内，点下去一定不会被拒。
+    expect(button.value).toBeGreaterThanOrEqual(quick.min)
+    expect(button.value).toBeLessThanOrEqual(quick.max)
+    expect(button.title.length, `${button.en} 要有 title 说明`).toBeGreaterThan(0)
+  }
+  for (const gap of quick.gaps) {
+    expect(gap, '相邻快捷额度之间至少 8px').toBeGreaterThanOrEqual(8)
+  }
+
+  const potButton = bettor.locator('.action-bar .quick-btn').nth(2)
+  const potValue = ((await potButton.locator('.quick-value').textContent()) ?? '').trim()
+  await potButton.click()
+  await expect(bettor.locator('#bet-amount')).toHaveValue(potValue)
+  await bettor.locator('.action-bar').screenshot({ path: 'artifacts/e2e/31-action-bar-quick-sizes.png' })
+
+  /* ③+ 河牌：公共牌发到 5 张后，牌型文案跟着更新（结算叠层里是引擎的同一个说法）。 */
+  expect(await playUntilSettled([host, guest, third])).toBe(true)
+  await expect(host.locator('.best-five .card').first()).toBeVisible()
+  await host.screenshot({ path: 'artifacts/e2e/24-card-face-no-center-pip.png' })
+  await host.locator('.best-five').first().screenshot({ path: 'artifacts/e2e/26-card-face-best-five-26px.png' })
+
+  const settledFace = await host.evaluate(() => ({
+    pips: document.querySelectorAll('.pip').length,
+    // 平分底池时每个赢家各列一行「最佳五张」：这里按「每组 5 张」校验，
+    // 不能写死总数 5，否则两人平分（10 张）会误判成失败。
+    bestFiveGroups: [...document.querySelectorAll('.best-five')].map(
+      (group) => group.querySelectorAll('.card').length,
+    ),
+    board: document.querySelectorAll('.table .board .card').length,
+  }))
+  expect(settledFace.pips, '结算叠层的最佳五张同样不画中央花色').toBe(0)
+  expect(settledFace.bestFiveGroups.length, '至少要有一个赢家列出最佳五张').toBeGreaterThan(0)
+  expect(
+    settledFace.bestFiveGroups.every((count) => count === 5),
+    `每个赢家都列 5 张：${settledFace.bestFiveGroups.join('、')}`,
+  ).toBe(true)
+  expect(settledFace.board).toBe(5)
+
+  await dismissResult(host)
+  const riverName = host.locator('.hero-hand .hand-name')
+  await expect(riverName).toBeVisible()
+  await expect(riverName).toHaveText(
+    /^(高牌（|一对 |两对（|三条 |顺子（|同花（|葫芦（|四条 |同花顺（)/,
+  )
+  await host.locator('.hero-meta').screenshot({ path: 'artifacts/e2e/30-hero-hand-name-river.png' })
+  await host.locator('.hero-cards .cards').screenshot({ path: 'artifacts/e2e/25-card-face-hero-58px.png' })
+  await host.locator('.table').screenshot({ path: 'artifacts/e2e/27-card-face-board-42px.png' })
+
+  /* ②+ 单挑（双人桌）：庄家同时是小盲，同一个座位的角色槽位要同时挂 D 与 SB。 */
+  await dismissResult(guest)
+  // 丙也必须先关掉自己屏幕上的结算叠层：它是模态遮罩，会拦住「退出房间」的点击
+  //（本手是平分底池，三个客户端都弹了结算，实测遮罩让 exitRoom 一直重试到 90s 超时）。
+  await dismissResult(third)
+  await exitRoom(third)
+  await startHand(host)
+  const headsUp = await host.evaluate(() =>
+    [...document.querySelectorAll('.seat-slot')]
+      .map((slot) => [...slot.querySelectorAll('.roles .role-badge')].map((badge) => badge.textContent.trim()).join('+'))
+      .filter((roles) => roles !== ''),
+  )
+  expect(headsUp.sort()).toEqual(['BB', 'D+SB'])
+  await host.locator('.table').screenshot({ path: 'artifacts/e2e/32-seat-role-slots-heads-up.png' })
+
+  expect(errors).toEqual([])
+  await hostContext.close()
+  await guestContext.close()
+  await thirdContext.close()
 })

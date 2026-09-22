@@ -512,7 +512,7 @@ const tableStatus = computed(() => {
     top: 50%;
   }
 
-  /* 贴边座位：只留「昵称 + 筹码」，头像与光环让位给公共牌。 */
+  /* 贴边座位：只留「角色 + 昵称 + 筹码」，头像圆已整体删除（见 PlayerSeat）。 */
   .seat-slot {
     /* 非贴边座位 96px：9 人桌上相邻面板（本人↔两侧 ±50° 位、下沿的两个 sin 0.94 位）
        才不会互相压住；再宽一点就要靠截断昵称来换，没必要。 */
@@ -523,9 +523,10 @@ const tableStatus = computed(() => {
     --seat-w: 64px;
   }
 
-  .seat-slot.is-side-seat :deep(.avatar),
-  .seat-slot.is-side-seat :deep(.seat-aura) {
-    display: none;
+  /* 贴边座位只有 64px：面板内边距从 8px 收到 5px，把 6px 让给「昵称 + 筹码」。
+     不这么做的话，同时挂着 BB 胶囊的座位会把筹码「2640」省略成「264…」（实测 24/30px）。 */
+  .seat-slot.is-side-seat :deep(.panel) {
+    padding-inline: 5px;
   }
 
   /* 公共牌宽度跟着视口走：两侧贴边座位各占 64px + 4px 边距后剩下的横向空间，

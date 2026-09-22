@@ -1,0 +1,425 @@
+# 项目上下文文档（给下一个会话）
+
+> 面向对象：接手的 AI 助手 / 开发者。目标：**5 分钟看懂现状、10 分钟能改代码、不重犯已经踩过的坑**。
+> 产品需求与验收标准以 [`DeepSeek_Harness_德州扑克开发规格书.md`](./DeepSeek_Harness_德州扑克开发规格书.md) 为准；本文只记录**工程事实**。
+> 本文覆盖了旧的 `HANDOFF.md`（已删除），旧文里的过期信息（等候页、`/room/:id`、35 项单测、12 项 e2e）一律以本文为准。
+>
+> **维护约定：每次代码变更后必须同步更新本文第 9 节的「验证记录」、第 6 节的「已知问题」与第 11 节的「变更日志」。**
+
+---
+
+## 0. TL;DR
+
+- **Web 联机德州扑克**（虚拟、不可兑换筹码），朋友之间开私人房；**不含**充值/提现/真钱/可兑换代币。
+- 规格书 §13 的第 0–5 阶段**全部完成**，之后又补做了聊天/房间日志、手牌历史、提示音、全下逐张亮牌、
+  多桌上限、观战、顶栏收纳、小屏紧凑牌桌、删除等候页（落座即买入）、离座保留座位、主持人移除玩家、
+  以及本轮的 4 项界面改造（见 §7）。
+- 硬约束（不可违反）：**一个仓库 / 一个 `package.json` / 一个 Node 进程 / 一个 HTTP 端口 / 一次部署**；
+  SQLite 单文件；**禁止** Redis / MySQL / 独立前端部署 / 微服务 / 生产双进程。
+- 当前分支工作区状态：**有一批未提交的界面改造改动**（见第 11 节变更日志），提交由用户决定。
+
+最快跑起来：
+
+```bash
+cd /Volumes/MyFiles/Projects/FSPoke
+npm ci && npm run build && npm start     # 生产：单进程 http://localhost:3000
+npm run dev                              # 开发：Vite 5173 + API 3000（两个进程，仅开发期）
+npm run lint && npm run typecheck && npm test && npm run e2e   # 全量验收
+```
+
+主要流程：大厅建房 / 打开邀请链接 → **直接落在牌桌（此时是旁观者）** → 点空位 → 确认买入 →
+落座 → 主持人点「开始牌局」→ 离座只保留座位与筹码（可随时坐回），**退出房间**才释放座位。
+
+---
+
+## 1. 技术栈与环境（都是实际验证过的）
+
+| 项 | 事实 |
+|---|---|
+| Node | **v24.18.0**（`node:sqlite` 与「node 直接执行 `.ts`」都需要 ≥ 24） |
+| npm | 11.x；仓库内 `.npmrc` 固定 `cache=./.npm-cache` |
+| 数据库 | **`node:sqlite` 标准库**，无 better-sqlite3、无独立数据库进程 |
+| 测试 | **`node --test` 直接跑 `.ts`**；没有 vitest / jest / tsx |
+| 客户端 | Vue 3.5 + vue-router 5 + Pinia 4 + **PrimeVue 4.5.5** + Vite 8 |
+| 服务端 | Fastify 5 + `@fastify/static` + `@fastify/websocket` + zod 4 |
+| e2e | `@playwright/test` 1.63，**复用系统已装 Chrome**（`channel: 'chrome'`），不下载内核 |
+| TS 构建 | 源码用 `.ts` 扩展名导入，靠 `rewriteRelativeImportExtensions` 在产物里改写成 `.js` |
+
+### 1.1 两个环境陷阱
+
+1. **`.npmrc` 的 `cache=./.npm-cache`**：本项目最初所在沙箱不允许写 `~/.npm`，`npm ci` 会 `EPERM`。
+   普通机器可删掉该文件；若环境变量 `npm_config_cache` 存在会覆盖 `.npmrc`，此时显式加 `--cache ./.npm-cache`。
+2. **PrimeVue 许可证**：`primevue@5.x` / `primeicons@8.x` 已改为 PrimeTek 商业许可，未配 key 时生产界面
+   右下角常驻 “Invalid PrimeUI License” 水印（实测截图确认）。依赖**锁定在最后一批 MIT 版本**：
+   `primevue@4.5.5` / `@primevue/themes@4.5.4` / `primeicons@7.0.0`。升级 5.x 前必须先确认许可。
+
+---
+
+## 2. 命令与真实验收基线
+
+```bash
+npm run lint         # ESLint：0 error
+npm run typecheck    # vue-tsc（客户端）+ tsc --noEmit（服务端）
+npm test             # node --test：48 项单测/集成
+npm run e2e          # 先 build → 重置 data/e2e.sqlite → 13 项 Playwright（真实 Chrome，端口 3300）
+npm run probe:table  # 牌桌几何探针（需先 npm run dev）：重叠像素 + 页面溢出，有重叠退出码非 0
+npm run check:deploy # 对已启动服务做单进程部署自检（8 项）
+npm run backup       # SQLite 备份/恢复演练（9 项）
+npm run dev          # 开发：Vite 5173 + API 3000
+npm start            # 生产单进程（默认 127.0.0.1:3000；生产用 HOST=0.0.0.0 PORT=3000）
+```
+
+**最近一次全绿的真实结果见第 9 节**（本文档每次代码变更后更新该节）。
+
+---
+
+## 3. 代码地图
+
+```
+src/shared/      (2)   poker.ts（牌 / 牌型名 / 桌规常量）   protocol.ts（zod 命令 + 事件类型 + 错误码）
+src/engine/      (5)   deck.ts  evaluate.ts（含 describeHand）  pots.ts  table.ts（状态机 + 快照）  index.ts
+src/server/      (7)   index.ts（唯一生产入口）  app.ts  routes.ts（HTTP）  ws.ts
+                       rooms.ts（RoomManager / RoomRuntime，最核心）  repo.ts（SQLite 仓储）  db/index.ts（迁移）
+src/client/     (23)   main.ts  router.ts  sound.ts
+                       stores/{room,game,connection,chat}.ts
+                       net/session.ts（HTTP + WebSocket 单例、重连、时钟同步、致命错误收敛）
+                       views/{Lobby,Table,Error}View.vue
+                       components/{PokerTable,PlayerSeat,PlayingCard,CommunityCards,ActionBar,
+                                   ConnectionBanner,HandResultOverlay}.vue
+                       components/action-bar-sizing.ts（下注额度的纯换算函数，可单测）
+                       styles/theme.css（设计变量 + 全局焦点环 + reduced-motion）
+                       dev/mock.ts（开发期模拟场景，生产构建不打包）
+tests/          (11)   helpers.ts + db / engine / features / integration / recovery / table-ui .test.ts
+                       e2e/room-helpers.ts（建房/落座/开局/退出等共享流程）+ e2e/{poker-room,features,settlement}.spec.ts
+migrations/      (2)   001_init.sql  002_room_buy_in.sql
+scripts/         (5)   dev.mjs  deploy-check.mjs  backup-drill.mjs  reset-e2e-db.mjs  probe-table-geometry.mjs
+```
+
+> `src/client/views/RoomView.vue`（424 行）已**无人引用**：等待页在「第 5 项需求」里被删除，
+> 路由与导入都已摘掉，只剩文件本身。可以安全删除（删除属于可选清理，未擅自执行）。
+
+**关键数据流**：浏览器 → 同源 HTTP（建房/加房）+ WebSocket（`/ws`）→ `RoomManager.execute()`
+（**每房一条串行队列**）→ `HoldemTable`（唯一筹码真相）→ 同一 SQLite 事务写
+`command_receipts` / `players` / `hand_results` / `room_snapshots` → `publish()` 给每个在线成员
+各发一份「公共状态 + 本人私有状态」。**任何时刻都不给客户端发别人未公开的底牌。**
+
+---
+
+## 4. 功能现状（已实现，全部有测试或 e2e 覆盖）
+
+- **大厅**：创建私人房（房名 / 2–9 人桌 / 买入上限）、邀请链接加入、房间不存在/满员提示、当前开放桌数。
+- **座位与买入**：无等候页；邀请链接直接进牌桌（旁观者）→ 点空位 → 确认买入（下限 10 个大盲、
+  上限由房主定、步进 = 小盲，服务端同样收敛）→ 落座；**离座 = 保留座位与筹码**（虚线描边 + 「已离座」），
+  **退出房间 = 释放座位**；掉线超宽限期（默认 5 分钟，`SEAT_RELEASE_MS`）自动释放。
+- **牌局**：无限注德州，服务端洗牌/发牌/裁定；盲注 10/20（含双人桌例外）、最小加注、未满额 all-in 不重开加注、
+  边池与平分、行动倒计时（20s，超时 check/fold）、全下逐张亮牌（翻牌→转牌→河牌，每段 750ms）。
+- **网络一致性**：重连快照、命令幂等（`requestId`）、过期版本拒绝、断线重连与时钟偏移校正。
+- **聊天**：玩家发言 + 系统房间日志（入座/离座/开局/超时/结算/被移除）、未读数、日期/时间分组、
+  未读分隔线、**@ 提醒**（服务端按昵称解析）、消息搜索、同人连续发言折叠。
+- **手牌历史**：每房最近 20 手，重启后从 `hand_results` 重载，抽屉内可查。
+- **提示音**：Web Audio 现场合成（无音频素材），默认关，顶栏开关，本地持久化。
+- **主持人移除玩家**：`room.kick`（含旁观者名单 `room.members`）；被移除者定向收到 `unauthorized`
+  → 错误页 + 清本地凭证；座位按「退出房间」同样规则释放。
+- **观战**：座位满了仍可进（观战位上限 = 座位数），拿不到任何底牌、无操作区，可自选空位入座。
+- **多桌上限**：服务器全局最多同时 3 桌（`MAX_ROOMS` 可覆盖）。
+- **响应式**：桌面 1440×900 / 1280×720，横屏 844×390 / 740×360，竖屏 390×844；
+  矮屏与竖屏各有紧凑环形布局，9 人桌零重叠（靠 `npm run probe:table` 量像素确认）。
+
+---
+
+## 5. 运行与部署要点
+
+- **生产**：`npm run build` → `npm start`；Fastify 一个进程同时提供 `dist/client` 静态页、HTTP API、WebSocket。
+- **默认端口 3000**；e2e 用 **3300 + `data/e2e.sqlite`**，演练脚本用 3200/3400，**不要动用户自己起的服务**。
+- **数据库**：首次启动自动建 `data/poker.sqlite` + 执行 `migrations/`（当前 2 个版本）+ `WAL` + 外键；
+  启动时恢复未关闭房间（日志 `restored` / `discarded`）。`data/`、`.env` 已在 `.gitignore`，
+  **部署升级严禁删除数据目录**。
+- 环境变量：`HOST` / `PORT` / `DATABASE_PATH` / `MAX_ROOMS` / `SEAT_RELEASE_MS`；示例见 `.env.example`。
+- 发布自检：`npm run check:deploy`（对着已启动的服务跑 8 项检查，零依赖，可在生产机执行）。
+
+---
+
+## 6. UI 与交互契约（用户明确要求过的部分，改动前先读这一节）
+
+### 6.1 牌面（`PlayingCard.vue`）
+
+- 只有**左上角**「点数 + 花色」与**右下角镜像**角标；**中间不画大花色**（`.pip` 已删除，e2e 断言其数量为 0）。
+- 点数用真实字形：`2–10 / J / Q / K / A`，**10 就是「10」**（不是七段数码管的 T，也不是 `T`）。
+- 花色字形与点数同处一个角标（形状 + 颜色双重区分）；颜色不是唯一区分手段。
+- 角标字号按牌宽缩放：点数 `0.46 × 牌宽`（10 为 `0.4`）、花色 `0.32 × 牌宽`。
+  上限由「左右两个角标不接触」定死，改字号前先看该文件里的推导注释。
+- 无障碍：`role="img"` + 中文 `aria-label`（如「黑桃 A」）；背面是「盖住的牌」。
+- 尺寸档位：`sm` 26px（座位/结算最佳五张）、`md` 42px（公共牌）、`lg` 58px（本人底牌）。
+
+### 6.2 玩家座位面板（`PlayerSeat.vue`）
+
+- 面板**左侧 = 牌局角色槽位**：`D`（庄家）/ `SB`（小盲）/ `BB`（大盲）胶囊，双人桌同一座位可能同时挂 `D + SB`。
+- **不画头像框、不画首字头像**（`.avatar` / `.seat-aura` 已整体删除，e2e 断言数量为 0）；
+  **没有角色时整块不渲染也不占位**，昵称与筹码直接顶到内边距。
+- 角色胶囊是纯视觉（`aria-hidden="true"`），完整说法在座位 `aria-label` 的「庄家位 / 小盲 / 大盲」里。
+- 面板其余信息：昵称（+ 本人「你」标签）、筹码、断线图标 / `ALL IN` 标记、本轮下注角标（矮屏与竖屏）。
+- **本人座位不画底牌**（底部操作区有更大的同一副牌），桌面端也不画 `YOUR TURN` + 进度条
+  （底部操作区有同一套；单挑时本人的下注筹码正好落在那一行）。
+- **座位面板高度是小屏的硬通货**：矮屏（`max-height: 430px`）与竖屏（`max-width: 560px` + portrait）
+  只保留「角色 + 昵称 + 筹码 + 状态标记」，内边距收到 3px。
+
+### 6.3 底部「你的底牌」区（`TableView.vue`）
+
+- 左：`你的底牌` 标签 + 两张 `lg` 正向牌；本人不在本手时给「本手没有底牌」占位。
+- 右：`当前牌型 <牌型名>` 与 `筹码 <数值>` 一组（`.hero-meta`），再往右是「离座 / 退出房间」。
+- **当前牌型 = 本人两张底牌 + 已翻出的公共牌**的最大牌型，**公共牌每翻一段实时更新**：
+  翻牌前算 2 张（给「一对 Q / 高牌 A」），翻牌 5 张、转牌 6 张、河牌 7 张。
+- 判定来自引擎纯函数 `describeHand()`（`src/engine/evaluate.ts`，只依赖 `src/shared/poker.ts`，
+  浏览器可直接 import）；5–7 张走 `evaluateHand()`，**与结算叠层的牌型名同源同说法**。
+- 本人底牌为空时（本手已结束/未参与）返回空串并整块不渲染，避免把「公共牌的牌型」显示成「你的牌型」。
+
+### 6.4 底部操作区（`ActionBar.vue`）
+
+- **动作按钮：英文主文本（大号加粗）+ 中文小字辅助**，官方叫法：
+  `FOLD 弃牌` / `CHECK 过牌` / `CALL <额> 跟注 <额>` / `BET <额> 下注 <额>` / `RAISE <额> 加注 <额>` / `ALL IN <额> 全下 <额>`。
+  `aria-label` **同时包含英文与中文**（只留英文会让中文用户与既有 e2e 选择器找不到按钮）。
+- **额度台（`.sizing`）**：一块带底色的控制台，左侧「金额数字输入 + 滑块 + 合法区间 `min–max`」，
+  右侧一排**快捷额度**（用户要求「最右侧的按钮多几个」）：
+  `1/2 POT 半池` / `2/3 POT 2/3 池` / `POT 满池` / `OVERBET 超池`，按钮上同时给出**实际数值**。
+- 快捷额度的语义：`bet` / `raise` 的 `amount` 是**目标总额**，所以按「跟注后的底池」折算
+  （`跟注额 + (底池 + 跟注额) × 倍率`）；理想值越界时**禁用而不是悄悄夹到边界**，
+  禁用原因写在 `title` 上（挂在未被禁用的外层 `.quick-slot` 上，原生禁用按钮收不到 hover）。
+- 换算与夹取只有一套实现：`clampAmount()` / `quickSizes()`（`action-bar-sizing.ts`，有单测）。
+- 触控与可达性：快捷按钮 ≥40×48px、相邻间距 ≥8px（UX 规范）、`:focus-visible` 焦点环不被裁、
+  `prefers-reduced-motion` 关闭动效、All-in 有二次确认弹窗。
+- 矮屏（≤430px 高）：整行压到 44px（含滑块与分组标题让位），保持上方牌桌高度；
+  竖屏（≤560px 宽）：额度台分两行（金额 + 区间 / 四个档位等宽），区间文案不换行。
+
+### 6.5 设计变量（`styles/theme.css`，规格书 §3.1）
+
+`--bg #10151B`｜`--felt #164B40`｜`--gold #D4B16A`｜`--text #F2F1EA`｜`--muted #AAB6BE`｜
+`--action #3084DA`｜`--positive #176C53`｜`--danger #C54A50`；间距基线 8px，圆角 8/12/20。
+
+---
+
+## 7. 本轮 4 项需求的状态（用户第 4 轮指令）
+
+| # | 需求 | 状态 | 落地位置 / 证据 |
+|---|---|---|---|
+| 1 | 扑克牌面中间的花色不展示 | ✅ 完成 | `PlayingCard.vue` 删除 `.pip`；e2e 断言 `.pip` 计数为 0；截图 `24/25/26/27-card-face-*.png` |
+| 2 | 玩家信息卡片左侧不放头像框，只放大小盲等牌局信息，没有就不展示 | ✅ 完成 | `PlayerSeat.vue` 删除 `.avatar` / `.seat-aura`，左侧改为 `.roles` 角色槽位（无角色整块不渲染）；e2e 断言头像计数 0 + 3 人桌角色集合 = `BB / D / SB`；截图 `28-seat-role-slots.png`、`32-seat-role-slots-heads-up.png`（单挑 `D+SB`） |
+| 3 | 底部底牌区显示当前最大牌型，公共牌翻出时实时更新 | ✅ 完成 | `TableView.vue` 的 `currentHandName` + 引擎 `describeHand()`；文案 `当前牌型 …` 紧挨筹码；e2e 翻牌前 / 河牌各断言一次，单测覆盖 2/5/6/7 张全链路；截图 `29-hero-hand-name-preflop.png`、`30-hero-hand-name-river.png` |
+| 4 | 操作区用官方英文（中文小字）+ 金额栏整体重构，最右侧多几个按钮（半池/超池等） | ✅ 完成 | `ActionBar.vue` 双行文案 + 重构的 `.sizing` 额度台；快捷档位 `1/2 POT / 2/3 POT / POT / OVERBET`；单测覆盖换算与越界禁用，e2e 断言档位文案、触控尺寸、8px 间距、数值落在服务端合法区间；截图 `31-action-bar-quick-sizes.png` |
+
+**其它顺带修的**：e2e 里「平分底池时 `.best-five` 是 10 张」的写死断言（改为每组 5 张校验）、
+退出房间前未关结算叠层导致点击被模态遮罩拦住。
+
+---
+
+## 8. 关键设计决策与**已踩过的坑**（改代码前必读）
+
+### 8.1 服务端 / 协议
+
+1. **聊天必须是「轻量事件」**：`chat.message` 不带 `state` / `self`，且**不在** `SERVER_EVENT_TYPES` 里。
+   曾经做成状态事件，结果它抢在结算/亮牌事件之前把完整牌面（含 `revealedCards`）发出去，
+   导致逐张亮牌序列变成 `0→5→3→4`，并破坏「摊牌前不泄露对手底牌」的时序。**改回去就会重犯。**
+2. **版本号必须在写快照之前推进**（`bumpVersion` → `scheduleTurn` → 事务写库 → `publish`），
+   否则落库版本比广播版本慢一步，重启恢复后客户端看到版本倒退。
+3. **座位占用看 `HoldemTable.isSeatAvailable()`**，不要直接判断 `seatAt()` 是否存在：
+   手牌进行中离座的玩家以 `pendingLeave` 保留到本手结束，那个座位对新玩家是空的。
+4. **离座 = 保留座位（away），退出 = 释放座位（removePlayer）**：`away` 的座位不参与下一手
+   （`inHand=false`、跳过庄位/盲位），但 `isSeatAvailable` 为 false；只有本人 `sit` 才清除 `away`。
+   离座/退出的弃牌必须走 `foldOut()`（等价 fold 动作），只在自己是行动者时推进会让本手卡在 preflop。
+5. **任何命令都可能结束本手，结算必须统一补发**：`seat.leave` / `room.leave` 会自动弃牌，
+   只剩一人时本手立刻结算。结算检测写在 switch **之后**（`handWasRunning && !isHandRunning()`），
+   不要只放在 `game.action` 分支里。
+6. **被踢/退出的人要等 `finishHand()` 才真正释放座位**（`pendingRemoval` / `pendingKickRemoval` /
+   `dropPendingKicks()`）。**`member.seat` 不能提前清**：公共状态是按 `room.members` 渲染座位的，
+   提前清掉会让「筹码还在池里」的座位在桌面上凭空消失，别人点下去还会收到 `seat_taken`。
+7. **「致命错误」与「普通提示」分开**：`unauthorized` / `room_closed` / `room_not_found` 在
+   `net/session.ts` 的 `handleFatalRoomError()` 收敛（先 `closing = true`，再清定时器/会话，最后回调跳错误页）。
+   其余错误码进 `useSessionStore().lastError`。**改这里要克制：正常断线重连路径不能受影响。**
+8. **引擎快照校验按 `phase` 区分**：`waiting` 阶段牌堆本来就是空的，不能要求「牌数 = 52」。
+9. **聊天不落库**（刻意的隐私选择）：重启后聊天清空、手牌历史保留。
+
+### 8.2 客户端 / UI
+
+10. **`watch` 的 getter 必须返回原始值，不能返回数组**：返回数组时每次求值都是新数组，
+    `Object.is` 永不相等，于是**任何**状态广播（别人加入、断线、重连）都会重跑回调——
+    实测「一个人刷新页面，全桌所有人再弹一次结算叠层」。
+11. **`chat.message` 之外，任何广播都可能重放副作用**：新增 watch/副作用时先问「它会不会被无关事件触发」。
+12. **座位面板高度就是小屏的硬通货**：面板每高 10px，公共牌就少 10px 净空；
+    改 `PlayerSeat` 的结构（例如往面板里加一行）前先跑 `npm run probe:table`。
+13. **环上座位面板的坐标走 CSS 变量**（`--seat-anchor-x/y`、`--seat-w`）；
+    `seatStyle()` 的上限必须是 `calc(100% - (半宽 + 4px))`——少一层括号会退化成 `100% - 半宽 + 4px`。
+14. **`.center` 的宽度必须等于「内容里较宽的那一行」**：它曾经是 flex 换行 + `flex-basis: 100%`，
+    容器的 max-content 把两行宽度相加（403px），于是块比内容宽 87px、公共牌左对齐、还压住侧边座位面板。
+    现在是 `flex-direction: column` 两行结构。**改中央区之前先看 `npm run probe:table` 打印的中心块 x 范围。**
+15. **边池明细行会让中央块变宽**（277px）：矮屏与竖屏直接隐藏 `.pots`（总额仍在底池胶囊里，
+    明细由 `sr-only` 文本与结算叠层承载）。
+16. **小屏的下注额写在座位面板角标上**（`.panel-bet`），不要试图挪桌面中央的浮动筹码——
+    竖屏里公共牌与贴边座位面板之间只有约 2px 净空。
+17. **不要为了一个确认框引入全局服务**：`main.ts` 没注册 `ConfirmationService`，
+    直接 `useConfirm()` 会让牌桌页整页渲染不出来（e2e 症状是等 `.table` 超时、控制台无明显报错）。
+    第二次确认就地画在弹窗里。
+18. **顶栏「更多」菜单是 ≤1100px 才出现的**：给主持人等角色加入口时必须同时在宽屏顶栏露出来
+    （`.bar-secondary` 类），否则宽屏下「功能没有入口」。
+19. **动作按钮 = 英文主 + 中文辅**，`aria-label` 必须两种语言都有（e2e 与读屏都依赖它）。
+20. **快捷额度不能悄悄夹到边界**：越界就禁用 + `title` 说明原因，否则按钮写「超池」却下了「满池」。
+21. **额度台里滑块与输入框要对齐**：旧版滑块单独一行、纵向对不齐；现在两者同处 `.controls` 行，
+    `align-items: center`，滑块靠 `min-width: 96px` 保底（改布局时容易把它压成一条线）。
+22. **矮屏额度台每多一行 = 牌桌少一行**：≤430px 高时整行压到 44px（隐藏滑块与分组标题）；
+    740×360 时牌桌只有 118px 高，任何"顺手加的一行"都会把它压没。
+
+### 8.3 测试与工具
+
+23. **`npx playwright test` 不会重新构建**，测的是 `dist/client` 旧产物——必须用 **`npm run e2e`**。
+24. **e2e 前必须重置 `data/e2e.sqlite`**（`npm run e2e` 内置 `e2e:reset`）：e2e 建的房间不会关闭，
+    每轮都会攒下来，几轮后撞上 `MAX_ROOMS=20`，大厅提示「已满」，之后所有用例卡在建房（表现为 `waitForURL` 超时）。
+25. **e2e 服务端共用一个进程（3300）**：整套用例的房间都建在这一个服务端上，所以 `MAX_ROOMS` 放宽到 20；
+    「最多 3 桌」的产品上限由 `tests/features.test.ts` 单独覆盖。
+26. **模态叠层会拦住点击**：结算叠层（`.p-dialog-mask`）出现时，顶栏「退出房间」等按钮点不到。
+    e2e 里先 `dismissResult(page)` 再做别的操作（本轮就踩到：退出房间一直重试到 90s 超时）。
+27. **平分底池时赢家行是多组**：`.best-five` 每个赢家一组、各 5 张，断言不要写死总数。
+28. **断言要按语义而不是写死数字**：例如快捷额度断言「按钮上的值一定落在服务端 `min–max` 内」，
+    而不是断言某个具体数值（底池会随牌局变化）。
+29. **模拟场景只在开发模式可用**（`import.meta.env.DEV`）：要看 9 人桌 / 断线 / 摊牌等状态，
+    必须 `npm run dev` 后开 **http://localhost:5173**（`/table/dev?mock=<场景名>`，场景名见 `MOCK_SCENARIO_NAMES`）；
+    生产构建里没有 mock，开发时打开 3000 看到的是 `dist/client` 旧构建。
+30. **Playwright 的 Chrome profile 放系统临时目录的固定路径**、Chrome 要按**进程组**回收，
+    否则 macOS Dock 会不停冒新图标、renderer 变孤儿；受限环境需 `--no-sandbox`。
+31. **改小屏几何必须量数字**：跑 `npm run probe:table`（需先 `npm run dev`），它会报重叠像素与页面溢出。
+
+---
+
+## 9. 验证记录（每次代码变更后更新）
+
+### 最近一次（本轮 4 项界面改造 + 额度台重构）
+
+```
+npm run lint       → 0 error（eslint .）
+npm run typecheck  → 通过（vue-tsc + tsc --noEmit，无输出）
+npm test           → ℹ tests 48  ℹ pass 48  ℹ fail 0
+npm run e2e        → 13 passed (1.3m)
+```
+
+e2e 明细（13 项全绿，真实 Chrome）：
+
+```
+✓ 聊天：房主发言对手能看到，刷新后仍能看到历史，未读数在按钮上可读
+✓ 聊天分组：同一个人连续发言只显示一次昵称，@ 提醒另起一组
+✓ 观战：座位满仍可进入观战，看不到底牌也没有操作区，空位后可入座
+✓ 中等宽度顶栏收纳：只留「更多」与「退出」，菜单里仍能找到聊天/历史/规则/提示音
+✓ 移除玩家：房主把客人移出房间，客人跳到错误页，释放的座位别人能坐
+✓ 移除玩家：窄屏顶栏收进「更多」菜单时，主持人仍能从菜单里打开移除名单
+✓ 观战选座：9 人桌空位在窄屏仍是一排，点空位买入即可落座
+✓ 界面改造：牌面无中央花色、座位角色槽位、底部当前牌型、操作区快捷额度   ← 本轮
+✓ 部署验收：一个端口同时提供网页、HTTP API 与 WebSocket
+✓ 两个独立会话打完一手：摊牌前不泄露对手底牌，结算后可开下一手
+✓ 手机横屏无溢出：844×390 与 740×360 不出现横向滚动
+✓ 牌桌小屏几何：740×360 / 844×390 / 390×844 无横向溢出且座位不压中央区
+✓ 结算叠层：一人刷新不会让全桌重弹，本人已确认过的那一手刷新后也不再弹
+```
+
+48 项单测里与本轮直接相关的：**「当前牌型」文案 7 项**（2 / 5 / 6 / 7 张、与 `evaluateHand().name` 同源、
+翻牌前一对/高牌、四条街逐段升级到同花顺）与**快捷额度 5 项**（换算、英文/中文文案、越界禁用、夹取唯一实现）。
+
+排版另用 `node` + Playwright 对开发模式 mock 场景实测（临时脚本，跑完已删）：
+1440×900 / 844×390 / 740×360 / 390×844 四档下额度台均单行、无横向溢出（`scrollX = 0`），
+快捷按钮 42–46px 高、间距 8px；740×360 的额度台整行压到 44px 后页面纵向溢出从 75px 降到 0。
+
+### 上一轮（历史，供对照）
+
+```
+npm run e2e → 12 passed（当时「界面改造」用例尚未修好两处断言：平分底池的 .best-five 组数、
+              退出房间前未关结算叠层）
+```
+
+### 手工截图产物（`artifacts/e2e/`）
+
+| 文件 | 说明 |
+|---|---|
+| `24-card-face-no-center-pip.png` | 桌面全景：牌面无中央花色 |
+| `25/26/27-card-face-*.png` | 本人底牌 58px / 结算最佳五张 26px / 公共牌 42px 特写 |
+| `28-seat-role-slots.png`、`32-seat-role-slots-heads-up.png` | 座位角色槽位（3 人桌、单挑 `D+SB`） |
+| `29/30-hero-hand-name-*.png` | 底部「当前牌型」翻牌前 / 河牌 |
+| `31-action-bar-quick-sizes.png` | 操作区：英文主 + 中文辅 + 四个快捷额度 |
+
+---
+
+## 10. 已知问题与待办（按优先级）
+
+### 未解决
+
+1. **极矮机型（≤360×740 / ≤320×568）**：竖屏下顶栏 + 横屏引导 + 底部操作区本身就要 500px 上下，
+   牌桌按 `dvh` 收缩到下限 196px 后仍可能整页纵向滚动（360×740 约 1px，320×568 约 160px），
+   并且 9 人桌在 196px 高的桌上会互相压住。规格书要求的竖屏档位是 390×844（已零重叠）。
+2. **390×844 竖屏仍有约 75px 纵向滚动**（模拟场景下测得）：牌桌自适应后底部操作区超出视口，
+   不影响操作（内容可滚），但不是「一屏放下」。若要治，方向是竖屏进一步压缩底牌区或提示区高度。
+3. **9 人桌的取舍**：为消掉左列座位面板互相压住，9 人桌不画座位里的底牌背面；
+   本人座位的 `YOUR TURN` + 进度条在桌面端也不画（底部操作区有同一套）。
+   信息由面板淡化、状态文本、桌面下注筹码与 `aria-label` 承载。
+4. **多人机扩容未做**：内存 + 单文件 SQLite；确需扩容时按规格书**另立架构设计**，不得擅自引入 Redis。
+5. **发牌动效只有淡入**：按规格书「CSS/SVG 无法满足才引入 PixiJS」判断，CSS 足够，未引入 PixiJS。
+6. **`npm run e2e` 依赖系统 Chrome**；目标机无 Chrome 时用 `npm run check:deploy` 代替线上自检。
+7. **`src/client/views/RoomView.vue` 是死文件**（等待页遗留），可删；未擅自删除。
+
+### 可选优化（尚未做，等用户决定）
+
+- 竖屏把「当前牌型」并入底牌行的顶部而不是右侧，减少一行高度。
+- 快捷额度加键盘快捷键（如 `H` 半池 / `P` 满池），需先确认不会与输入冲突。
+
+---
+
+## 11. 变更日志（最新在前）
+
+```
+（本轮，未提交）4 项界面改造：
+  1) 牌面删除中央大花色（PlayingCard.vue），角标放大补偿辨识度
+  2) 座位面板删除头像框，左侧改为 D/SB/BB 角色槽位，无角色不占位（PlayerSeat.vue）
+     + PokerTable.vue 贴边座位内边距微调
+  3) 底部「你的底牌」区新增实时「当前牌型」（TableView.vue + engine/evaluate.ts 的 describeHand）
+  4) 操作区动作按钮改「英文主 + 中文辅」，金额栏重构为额度台并新增
+     1/2 POT / 2/3 POT / POT / OVERBET 四个快捷额度（ActionBar.vue + action-bar-sizing.ts）
+  测试：新增 tests/table-ui.test.ts（含「四条街实时更新」单测）；更新 tests/e2e/features.spec.ts
+        「界面改造」用例（修好平分底池的 .best-five 组数断言、退出前先关结算叠层）与 room-helpers
+  验收：lint 0 error、typecheck 通过、48 项单测全绿、13 项 e2e 全绿
+  文档：新建 docs/CONTEXT.md 覆盖旧 docs/HANDOFF.md（已删除），README 指向更新
+（历史）主持人移除玩家（room.kick）+ 致命错误路由到错误页
+（历史）离座状态在桌面可见 + 规则抽屉补买入范围
+（历史）删除等候页 / 落座买入 / 离座保留座位 / 退出释放座位（服务端 + 客户端 + 文档与测试）
+（历史）庄家/盲位角标进面板 + 本人座位固定底部中央
+（历史）牌面重新设计 + 修复「一人刷新全桌重弹结算」
+（历史）小屏几何收尾、观战选座、顶栏收纳、聊天分组、9 人桌紧凑环形布局
+（历史）聊天 / 手牌历史 / 提示音 / 全下逐张亮牌 / 多桌上限与观战
+（历史）第 0–5 阶段：工程骨架、规则引擎、联机闭环、SQLite 重启恢复、发布候选
+```
+
+---
+
+## 12. 协作约定
+
+- **先读 `AGENTS.md`**；禁止真钱赌博、充值、提现、可兑换筹码。
+- 界面设计用 `ui-ux-pro-max` + `frontend-design`，界面检查用 `web-design-guidelines`
+  （技能已装在 `.dsh/skills/` 与 `.agents/skills/`，`ui-ux-pro-max` 需要 Python 3 才能跑检索脚本）。
+- 每个阶段开始前：检查项目现状 → 列出**实际发现**的 Skill（没发现就说没发现）→ 给短计划。
+- 每阶段结束用简体中文汇报：①目标 ②已加载 Skills ③方案 ④修改文件 ⑤命令与**真实**结果 ⑥验收清单
+  ⑦已知风险 ⑧下一步；**不得虚报测试通过**，跑不了就说明原因。
+- **每次代码修改后同步更新本文档**（第 9 节验证记录 + 第 11 节变更日志，必要时更新第 6 / 7 / 10 节）。
+- 只改本项目必要文件；未经批准不安装依赖、不执行破坏性命令、不访问密钥。
+
+---
+
+## 13. 快速排错
+
+| 现象 | 先看这里 |
+|---|---|
+| `npm ci` 报 `EPERM` / 缓存写不进去 | §1.1：用 `--cache ./.npm-cache` 或删掉 `.npmrc` |
+| 生产界面右下角 “Invalid PrimeVue License” | PrimeVue 被升到了 5.x，按 §1.1 退回 MIT 版本 |
+| 改了代码但页面没变 | `npm run e2e` 会先 build；手工 `npx playwright test` 不会。开发看 5173（§8.29） |
+| e2e 大面积失败，卡在创建房间 | `data/e2e.sqlite` 攒满了房间（`MAX_ROOMS`），§8.24；`npm run e2e:reset` |
+| 提示「当前开放 3/3 桌」 | 产品上限（§4），不是 bug；e2e 环境用 `MAX_ROOMS=20` |
+| e2e 点不动顶栏按钮、一直重试 | 屏幕上有模态叠层（结算/买入弹窗），先 `dismissResult`（§8.26） |
+| 亮牌顺序错乱 / 底牌提前出现 | `chat.message` 是否又被塞进状态事件（§8.1） |
+| 座位「空着却坐不进去」 | 用 `isSeatAvailable()`；离座/被踢的人要等本手结算（§8.3、§8.6） |
+| 一个人刷新，全桌重弹结算 | watch getter 是否返回了数组（§8.10） |
+| 小屏公共牌/底池被座位压住 | `npm run probe:table` 拿重叠像素，再改紧凑布局参数（§8.12–8.16、§8.22） |
+| 牌桌整页空白 / e2e 等 `.table` 超时 | 组件里用了没注册的 PrimeVue 服务（如 `useConfirm`，§8.17）；先看页面 `pageerror` |
+| 被移除后页面一直重连 | `handleFatalRoomError()` 是否先置 `closing = true`（§8.7） |
+| 重启后房间全被关掉 | 看启动日志 `restored` / `discarded`；快照损坏会被安全关闭（§8.8） |
+| 想加/改牌桌上的一行内容 | 先跑 `npm run probe:table`——座位面板与操作区每多一行，牌桌就少一行（§8.12、§8.22） |

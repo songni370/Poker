@@ -11,6 +11,7 @@ import type { MenuItem } from 'primevue/menuitem'
 import Select from 'primevue/select'
 import type { ActionType, Card } from '../../shared/poker.ts'
 import { STREET_NAMES, TABLE_RULES, formatCard } from '../../shared/poker.ts'
+import { describeHand } from '../../engine/evaluate.ts'
 import type { ChatMessage, RoomMemberPublic } from '../../shared/protocol.ts'
 import { CHAT_MAX_LENGTH } from '../../shared/protocol.ts'
 import { NICKNAME_MAX } from '../../shared/poker.ts'
@@ -218,6 +219,22 @@ const remainingRatio = computed(() => Math.min(1, remainingMs.value / (turnSecon
 /** 本人底牌、座位、筹码；全部来自服务端快照，不做本地推算。 */
 const myCards = computed<readonly Card[]>(() => game.myHoleCards)
 const myStack = computed(() => game.mySeat?.stack ?? 0)
+
+/**
+ * 当前最大牌型文案（「你的底牌」区，紧挨筹码）。
+ *
+ * 判定完全走引擎的纯函数 `describeHand`（`src/engine/evaluate.ts`，只依赖 `src/shared/poker.ts`，
+ * 没有任何 node 内置模块，所以客户端可以直接 import，不需要把规则复制一份到 shared）。
+ * 同一份判定也用在结算叠层里（`HandResultPublic.handName` 来自 `evaluateHand().name`），
+ * 因此两处对同一种牌型的叫法必然一致。
+ *
+ * 只有「本人手上确实有 2 张底牌」时才给结论：本手结束后引擎会把底牌清空，
+ * 那时公共牌仍是 5 张，若继续算下去会把「公共牌的最大牌型」当成「你的牌型」显示。
+ * 公共牌 0 → 3 → 4 → 5 张时分别算 2 / 5 / 6 / 7 张，翻牌前也给结论。
+ */
+const currentHandName = computed(() =>
+  myCards.value.length === 2 ? describeHand([...myCards.value, ...game.board]) : '',
+)
 
 const winnerPlayerIds = computed(() => game.state?.lastResult?.winners.map((winner) => winner.playerId) ?? [])
 const highlightCards = computed<readonly Card[]>(() => {
@@ -1121,9 +1138,17 @@ onBeforeUnmount(() => onFatalRoomError(null))
           <PlayingCard v-for="card in myCards" :key="card" size="lg" upright :card="card" />
           <span v-if="myCards.length === 0" class="muted hint">本手没有底牌</span>
         </div>
-        <span class="hero-stack">
-          <span class="muted">筹码</span>
-          <b class="num">{{ myStack }}</b>
+        <!-- 当前牌型与筹码紧挨着放在右下角：牌型由引擎纯函数实时算出（见 currentHandName），
+             公共牌每翻出一段就跟着变；翻牌前只有两张底牌时也给「一对 Q / 高牌 A」这样的结论。 -->
+        <span class="hero-meta">
+          <span v-if="currentHandName" class="hero-hand">
+            <span class="muted">当前牌型</span>
+            <b class="hand-name" :title="currentHandName">{{ currentHandName }}</b>
+          </span>
+          <span class="hero-stack">
+            <span class="muted">筹码</span>
+            <b class="num">{{ myStack }}</b>
+          </span>
         </span>
         <span class="hero-seat-actions">
           <Button size="small" text :title="'离座（座位与筹码为你保留）'" @click="requestLeaveSeat">
@@ -1696,11 +1721,40 @@ onBeforeUnmount(() => onFatalRoomError(null))
   gap: 6px;
 }
 
+/* 「当前牌型 + 筹码」：一组，整体靠右（原来 auto 边距挂在筹码上，
+   牌型要跟筹码挨着，所以边距上移到这一层）。 */
+.hero-meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  /* 允许被压窄：窄屏一行放不下时优先省略号码，而不是换行把操作区顶高。 */
+  min-width: 0;
+  margin-left: auto;
+}
+
+.hero-hand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 0.86rem;
+}
+
+.hand-name {
+  color: var(--text);
+  font-size: 0.92rem;
+  /* 引擎给出的牌型名可能带一串踢脚牌（如「高牌（A K 9 7 3）」）：
+     宁可省略号截断也不换行——底部操作区每多一行，矮屏上的牌桌就被挤掉一行。 */
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .hero-stack {
   display: inline-flex;
   align-items: baseline;
   gap: 6px;
-  margin-left: auto;
   font-size: 0.86rem;
 }
 
@@ -2132,7 +2186,8 @@ onBeforeUnmount(() => onFatalRoomError(null))
     gap: 0;
   }
 
-  .hero-stack {
+  .hero-stack,
+  .hero-hand {
     font-size: 0.76rem;
   }
 
@@ -2148,8 +2203,10 @@ onBeforeUnmount(() => onFatalRoomError(null))
     --cw: 36px;
   }
 
-  .hero-stack {
+  /* 竖排（column）里 auto 外边距会把整组推到右边，与靠左的底牌错位，这里取消。 */
+  .hero-meta {
     margin-left: 0;
+    gap: var(--space-1);
   }
 
   .hero-actions {

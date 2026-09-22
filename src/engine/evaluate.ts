@@ -140,3 +140,26 @@ export function evaluateHand(cards: readonly Card[]): HandValue {
   const chosen = best!
   return { category: chosen.category, tiebreak: chosen.tiebreak, bestFive, name: describe(chosen) }
 }
+
+/**
+ * 任意张数的「当前牌型」中文文案（客户端底部「你的底牌」区实时显示用）。
+ *
+ * 为什么放在引擎里而不是客户端：客户端与结算叠层必须共用**同一份**判定与同一套说法，
+ * 否则同一种牌型会在两处出现两种叫法。本模块只依赖 `src/shared/poker.ts`（无 node 内置模块），
+ * 浏览器端可以直接 import，不需要复制规则。
+ *
+ * 覆盖范围：
+ *   - 5–7 张（翻牌 3 张公共牌起）→ 直接走 evaluateHand，与结算叠层完全同源；
+ *   - 2 张（翻牌前）→ 引擎里没有对应的判定（evaluateHand 要求 ≥5 张），
+ *     这里只补「对子 / 高牌」两种结论，牌型名与 describe() 保持同一套词
+ *     （`一对 Q` 与结算里的 `一对 Q` 一致；高牌取较大的那张作关键牌）；
+ *   - 其余张数（0/1/3/4，例如本人已不在本手）凑不出牌型，返回空串，由调用方决定占位文案。
+ */
+export function describeHand(cards: readonly Card[]): string {
+  if (cards.length >= 5 && cards.length <= 7) return evaluateHand(cards).name
+  if (cards.length !== 2) return ''
+  const first = rankValue(cards[0]![0] as Rank)
+  const second = rankValue(cards[1]![0] as Rank)
+  const label = RANK_LABEL[RANKS[Math.max(first, second) - 2]!]
+  return first === second ? `一对 ${label}` : `高牌 ${label}`
+}
