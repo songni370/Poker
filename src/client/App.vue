@@ -25,22 +25,6 @@ import { RouterView } from 'vue-router'
  * 由 flex 重新分配空间：桌面按需让位，操作区在自身内部滚动，页面不再出现纵向滚动条。
  * 只对牌桌页生效（:has 为原生 CSS，无 JS 测量）。
  */
-@media (max-height: 430px) {
-  .app-shell:has(.table-view) {
-    height: 100dvh;
-    overflow: hidden;
-  }
-
-  .app-shell:has(.table-view) .stage {
-    overflow: hidden;
-  }
-
-  .app-shell:has(.table-view) .hero {
-    min-height: 0;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-  }
-}
 
 /* 键盘用户第一个 Tab 即可跳过装饰内容。 */
 .skip-link {

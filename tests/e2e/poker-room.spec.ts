@@ -122,10 +122,10 @@ test('两个独立会话打完一手：摊牌前不泄露对手底牌，结算�
     .poll(async () => /第\s*2\s*手/.test(await host.locator('body').innerText()), { timeout: 10_000 })
     .toBe(true)
 
-  // 横屏手机尺寸截图（响应式证据）
-  await guest.setViewportSize({ width: 844, height: 390 })
+  // 手机竖屏尺寸截图（响应式证据；手机版只支持竖屏，见下面的横屏用例）
+  await guest.setViewportSize({ width: 390, height: 844 })
   await guest.waitForTimeout(300)
-  await guest.screenshot({ path: 'artifacts/e2e/04-table-844x390.png' })
+  await guest.screenshot({ path: 'artifacts/e2e/04-table-390x844.png' })
 
   expect(hostErrors).toEqual([])
   expect(guestErrors).toEqual([])
@@ -133,17 +133,17 @@ test('两个独立会话打完一手：摊牌前不泄露对手底牌，结算�
   await guestContext.close()
 })
 
-test('手机横屏无溢出：844×390 与 740×360 不出现横向滚动', async ({ browser }) => {
+test('手机只支持竖屏：竖屏两档不横向溢出，横屏给出竖屏提示', async ({ browser }) => {
   const context = await browser.newContext()
   const page = await context.newPage()
   const errors = watchErrors(page)
 
+  // ① 竖屏两个规格档：大厅与牌桌都不横向溢出
   for (const [width, height] of [
-    [844, 390],
-    [740, 360],
+    [390, 844],
+    [360, 740],
   ] as const) {
     await page.setViewportSize({ width, height })
-    // 大厅 + 牌桌（旁观态）都渲染一遍，确保两种布局都受检
     await page.goto('/')
     const lobbyOverflow = await page.evaluate(
       () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
@@ -159,6 +159,36 @@ test('手机横屏无溢出：844×390 与 740×360 不出现横向滚动', asyn
     expect(roomId).toBeTruthy()
   }
 
+  /*
+   * ② 手机横屏（第 1 项需求：不再支持横屏）：
+   * 不渲染牌桌与底部操作区，只显示「请竖屏使用」；横竖切换回来必须能继续玩。
+   */
+  await page.setViewportSize({ width: 844, height: 390 })
+  await page.waitForTimeout(200)
+  const landscape = await page.evaluate(() => {
+    const overlay = document.querySelector('.portrait-only')
+    return {
+      overlayShown: Boolean(overlay) && getComputedStyle(overlay!).display !== 'none',
+      overlayText: overlay?.textContent?.replace(/\s+/g, ' ').trim() ?? '',
+      tableShown: Boolean(document.querySelector('.table')),
+      stageShown: getComputedStyle(document.querySelector('.stage')!).display !== 'none',
+      heroShown: getComputedStyle(document.querySelector('.hero')!).display !== 'none',
+      overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    }
+  })
+  expect(landscape.overlayShown, '手机横屏应显示「请竖屏使用」').toBe(true)
+  expect(landscape.overlayText).toContain('请竖屏使用')
+  expect(landscape.stageShown, '手机横屏不渲染牌桌').toBe(false)
+  expect(landscape.heroShown, '手机横屏不渲染底部操作区').toBe(false)
+  expect(landscape.overflowX).toBe(0)
+  await page.screenshot({ path: 'artifacts/e2e/35-mobile-landscape-hint.png' })
+
+  // ③ 转回竖屏：遮罩消失、牌桌恢复（进度不丢）
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.waitForTimeout(200)
+  await expect(page.locator('.table')).toBeVisible()
+  await expect(page.locator('.portrait-only')).toBeHidden()
+
   expect(errors).toEqual([])
   await context.close()
 })
@@ -166,11 +196,10 @@ test('手机横屏无溢出：844×390 与 740×360 不出现横向滚动', asyn
 /**
  * 牌桌几何回归（规格书 §3.4「小屏不遮挡手牌、玩家下注、底池和操作」）。
  *
- * 这一条专门守住「矮屏紧凑环形布局」：740×360 时桌面只有 ~118px 高，
- * 修复前本人座位面板会压住底池、公共牌区与座位面板只差几像素。
- * 用 9 人桌上限的房间开局，座位锚点与 9 人满桌一致（座位数决定环形角度）。
+ * 手机只支持竖屏（第 1 项需求），所以这里只跑竖屏两档：
+ * 桌面按 `clamp(220px, 0.32×dvh, 320px)` 缩放，9 人桌的座位面板不允许压住中央区。
  */
-test('牌桌小屏几何：740×360 / 844×390 / 390×844 无横向溢出且座位不压中央区', async ({ browser }) => {
+test('牌桌竖屏几何：390×844 与 360×740 无横向溢出且座位不压中央区', async ({ browser }) => {
   const hostContext = await browser.newContext({ viewport: { width: 1280, height: 720 } })
   const guestContext = await browser.newContext({ viewport: { width: 1280, height: 720 } })
   const host = await hostContext.newPage()
@@ -225,9 +254,8 @@ test('牌桌小屏几何：740×360 / 844×390 / 390×844 无横向溢出且座�
   }
 
   for (const [width, height] of [
-    [740, 360],
-    [844, 390],
     [390, 844],
+    [360, 740],
   ] as const) {
     await host.setViewportSize({ width, height })
     await host.waitForTimeout(250)

@@ -492,6 +492,23 @@ test('落座买入：买入额按房主上限/下限/步进收敛，离座保留
   await takeSeat(b, 1, 500)
   assert.equal(b.lastState()!.seats[1]!.stack, 1000, '坐回保留座位时筹码照旧')
 
+  /*
+   * 第 4 项需求：离座玩家可以改坐**任意空位**，筹码跟人走（不用再买入）。
+   * 原座位同时腾空，但筹码仍然属于玩家本人。
+   */
+  b.send({ type: 'seat.leave', requestId: rid() })
+  await b.waitFor((message) => message.type !== 'room.error' && 'state' in message && message.state.seats[1]?.away === true)
+  const stackBefore = b.lastState()!.seats[1]!.stack
+  // 换到 5 号座位：不传 buyIn 也应当带上自己的筹码
+  b.send({ type: 'seat.take', requestId: rid(), seat: 5 })
+  await b.waitFor(
+    (message) => message.type !== 'room.error' && 'state' in message && message.state.seats[5]?.playerId === guest.playerId,
+  )
+  const movedState = b.lastState()!
+  assert.equal(movedState.seats[5]!.stack, stackBefore, '换座位后筹码原样带走')
+  assert.equal(movedState.seats[5]!.away, false, '换座位后不再处于离座状态')
+  assert.equal(movedState.seats[1], null, '原座位腾空释放')
+
   // 退出房间：真正释放座位，别人可以落座
   b.send({ type: 'room.leave', requestId: rid() })
   await delay(150)

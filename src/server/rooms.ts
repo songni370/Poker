@@ -690,14 +690,7 @@ export class RoomManager {
       switch (command.type) {
         case 'seat.take': {
           const seated = room.table.seatOf(playerId)
-          if (seated) {
-            // 坐回自己保留的座位：筹码照旧（只有 0 筹码时才用新的买入额补充）。
-            if (seated.seat !== command.seat) {
-              throw new CommandError('bad_request', '你已经有一个保留的座位，先退出房间才能换座')
-            }
-          } else if (!room.table.isSeatAvailable(command.seat)) {
-            throw new CommandError('seat_taken', '这个座位已经有人了')
-          }
+          const wasAway = seated?.away ?? false
           // 买入区间 = 房主设定的「初始筹码 ~ 买入上限」，缺省买入额取上限（一次带够）。
           const buyIn = normalizeBuyIn(
             command.buyIn ?? room.buyInMax,
@@ -705,13 +698,29 @@ export class RoomManager {
             room.buyInMax,
             room.smallBlind,
           )
-          room.table.sit(playerId, member.nickname, command.seat, seated && seated.stack > 0 ? seated.stack : buyIn)
-          const wasAway = seated !== undefined
+          if (wasAway) {
+            /*
+             * 离座玩家换座位（第 4 项需求）：任意空位都能坐，筹码跟人走、不用再买入——
+             * 原座位腾空，原筹码原样带到新座位（只有原筹码为 0 时才用本次买入额补充）。
+             */
+            const previousStack = room.table.reSit(playerId, member.nickname, command.seat, buyIn)
+            if (previousStack <= 0) {
+              // 输光了重新买入：仍受房主设定的买入区间约束。
+              room.table.seatOf(playerId)!.stack = buyIn
+            }
+          } else if (seated) {
+            // 已经在座（重复点座）：不改动任何状态，只有本人坐回自己座位这一条路已经处理。
+            throw new CommandError('bad_request', '你已经入座了')
+          } else if (!room.table.isSeatAvailable(command.seat)) {
+            throw new CommandError('seat_taken', '这个座位已经有人了')
+          } else {
+            room.table.sit(playerId, member.nickname, command.seat, buyIn)
+          }
           member.seat = command.seat
           member.ready = true
           this.clearAwayTimer(room, playerId)
           notice = wasAway
-            ? `${member.nickname} 回到了 ${command.seat + 1} 号位`
+            ? `${member.nickname} 回到 ${command.seat + 1} 号位（筹码 ${String(room.table.seatOf(playerId)?.stack ?? 0)} 原样带走）`
             : `${member.nickname} 买入 ${buyIn} 入座 ${command.seat + 1} 号位`
           eventType = 'room.player_joined'
           break

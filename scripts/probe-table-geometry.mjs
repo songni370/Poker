@@ -25,10 +25,9 @@ const MOCKS = process.argv.slice(2).length > 0 ? process.argv.slice(2) : ['fullR
 const VIEWPORTS = [
   { w: 1440, h: 900, inScope: true },
   { w: 1280, h: 720, inScope: true },
-  { w: 844, h: 390, inScope: true },
-  { w: 740, h: 360, inScope: true },
   { w: 390, h: 844, inScope: true },
   { w: 360, h: 740, inScope: true },
+  // 手机横屏不再支持（第 1 项需求）：这一档只作参考，横屏会显示「请竖屏使用」。
   { w: 320, h: 568, inScope: false },
 ]
 
@@ -191,6 +190,6 @@ await browser.close()
 console.log(
   failures > 0
     ? `\n验收档共 ${String(failures)} 处重叠问题（参考档不计入）。`
-    : '\n验收档（1440×900 / 1280×720 / 844×390 / 740×360 / 390×844 / 360×740）全部通过。',
+    : '\n验收档（1440×900 / 1280×720 / 390×844 / 360×740）全部通过。',
 )
 process.exit(failures > 0 ? 1 : 0)

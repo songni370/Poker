@@ -205,9 +205,11 @@ test('观战：座位满仍可进入观战，看不到底牌也没有操作区�
   expect(layout.stripBottom, '通知条应在牌桌之上').toBeLessThanOrEqual(layout.tableTop)
   await watcher.screenshot({ path: 'artifacts/e2e/34-notice-strip.png' })
 
-  // 观战者：能看到牌桌与观战面板，但没有操作区、没有底牌
+  // 观战者：能看到牌桌与观战面板，但没有可执行的动作、没有底牌。
+  // 底部操作栏本身会渲染（第 3 项需求把「退出房间」搬了进去），但一个动作按钮都不该有。
   await expect(watcher.getByText('观战中')).toBeVisible()
-  await expect(watcher.locator('.action-bar')).toHaveCount(0)
+  await expect(watcher.locator('.action-bar .buttons .p-button')).toHaveCount(0)
+  await expect(watcher.getByRole('button', { name: '开始牌局' })).toHaveCount(0)
   await expect(watcher.locator('.hero-cards [role="img"]')).toHaveCount(0)
   // 对局进行中，观战者 DOM 里不应出现任何正面牌（背面牌不计）
   const faceUp = await watcher.locator('[role="img"]:not([aria-label="盖住的牌"])').count()
@@ -219,9 +221,9 @@ test('观战：座位满仍可进入观战，看不到底牌也没有操作区�
   await expect(guest.locator('.spectator-state')).toContainText('已离座')
   await expect(guest.getByRole('button', { name: /坐回 \d+ 号位/ })).toBeVisible()
   await guest.screenshot({ path: 'artifacts/e2e/10-seat-reserved-after-leave.png' })
-  // 别人也要能看出来这个座位「人走了、座位还在」：桌面上显示「已离座」且虚线描边
-  await expect(host.locator('.seat.is-away')).toHaveCount(1)
-  await expect(host.locator('.seat.is-away')).toContainText('已离座')
+  // 别人也要能看出来这个座位「人走了、座位还在」：座位上显示「已离座」（第 4 项需求改成了小胶囊）
+  await expect(host.locator('.away-pill')).toHaveCount(1)
+  await expect(host.locator('.away-pill')).toContainText('已离座')
   // 座位仍占着：那个座位不会被当成空位（9 人桌剩下的空位照常可点）
   await expect(watcher.locator('.seat-empty')).toHaveCount(7)
 
@@ -465,7 +467,8 @@ test('桌面空位落座：窄屏点桌面空位买入即可落座，底部不�
     expect(box.label, `第 ${String(index + 1)} 个空位应显示座位号`).toMatch(/\d+入座/)
     expect(box.aria, `第 ${String(index + 1)} 个空位应有可访问名称`).toMatch(/坐到 \d+ 号座位/)
     expect(box.width).toBeGreaterThanOrEqual(40)
-    expect(box.height).toBeGreaterThanOrEqual(32)
+    // 空位卡是一行小卡（第 2 项需求特意缩小）；30px 是它的实际高度，仍高于 24px 的可点下限。
+    expect(box.height).toBeGreaterThanOrEqual(28)
   })
   const overflowX = await watcher.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,

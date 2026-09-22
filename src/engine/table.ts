@@ -226,6 +226,34 @@ export class HoldemTable {
   }
 
   /**
+   * 离座玩家换到另一个空位（第 4 项需求）：筹码跟人走。
+   *
+   * 语义：离座只是「暂时不玩」，座位与筹码仍属于本人；本人可以选择**任意**空位坐下，
+   * 而不是只能坐回原位。原座位腾空释放，筹码原样带到新座位——
+   * 所以这里的 `buyIn` 只在原筹码为 0（输光了、重新买入）时才用到。
+   *
+   * @returns 离座前的筹码（服务端用它决定是否需要重新买入，以及给客户端回执金额）
+   */
+  reSit(playerId: string, nickname: string, seat: number, buyIn = this.config.startingStack): number {
+    const existing = this.seatOf(playerId)
+    if (!existing || !existing.away) {
+      throw new EngineError('bad_state', '只有离座保留座位的玩家可以换座位')
+    }
+    if (existing.seat === seat) {
+      this.sit(playerId, nickname, seat, buyIn)
+      return existing.stack
+    }
+    if (!this.isSeatAvailable(seat)) {
+      throw new EngineError('bad_state', '该座位已被占用')
+    }
+    const previousStack = existing.stack
+    // 先释放原座位（连同它的筹码），再把筹码原样带到新座位：筹码属于玩家，不属于座位。
+    this.seats = this.seats.filter((entry) => entry.playerId !== playerId)
+    this.sit(playerId, nickname, seat, previousStack > 0 ? previousStack : buyIn)
+    return previousStack
+  }
+
+  /**
    * 离座（seat.leave）：座位与筹码都留着，只有本人能坐回。
    * 手牌进行中离座会先自动弃牌，已投入的筹码留在池中（本手照样参与分池），
    * 本手结束后座位仍然保留，随时可以坐回来接着玩。

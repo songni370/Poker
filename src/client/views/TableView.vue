@@ -750,13 +750,39 @@ const myReservedSeat = computed(() => (mySeatAway.value ? (game.self?.seat ?? nu
 /** 能不能在桌面上挑座位：未入座（旁观）或已离座但保留座位。 */
 const canPickSeat = computed(() => Boolean(game.self) && (!game.isSeated || mySeatAway.value))
 
-/** 点桌面空位：自己保留的座位直接坐回（筹码还在就没必要再买入），其他空位走买入确认。 */
+/**
+ * 点桌面空位：
+ *   - 还没入座（旁观者）→ 弹买入确认（房主设定的买入区间）；
+ *   - 已离座、要换座位（第 4 项需求）→ **不弹窗、直接坐下**：筹码跟人走，不用再买入；
+ *     只有原筹码为 0（输光了）时才走买入弹窗重新买入。
+ *   - 点自己保留的那个位子 → 直接坐回（等价于上面第二条）。
+ */
 function onPickSeat(seat: number): void {
-  if (myReservedSeat.value === seat) {
-    resit()
+  const away = mySeatAway.value
+  if (away && myReservedStack.value > 0) {
+    takeSeatWithoutBuyIn(seat)
     return
   }
   openBuyIn(seat)
+}
+
+/**
+ * 离座玩家换到任意空位：直接发 seat.take。
+ * 服务端会把自己的筹码原样转到新座位（筹码属于玩家，不属于座位）。
+ */
+function takeSeatWithoutBuyIn(seat: number): void {
+  if (
+    !sendCommand({
+      type: 'seat.take',
+      requestId: nextRequestId(),
+      seat,
+      buyIn: myReservedStack.value,
+    })
+  ) {
+    announcement.value = '尚未连接到服务器，换座请求未发送。'
+    return
+  }
+  announcement.value = `正在坐到 ${String(seat + 1)} 号座位，筹码原样带回。`
 }
 
 /* ── 坐回保留座位 / 离座 / 退出房间（第 6 项） ── */
@@ -768,14 +794,10 @@ function resit(): void {
   const seat = game.self?.seat
   if (seat === null || seat === undefined) return
   if (myReservedStack.value > 0) {
-    if (!sendCommand({ type: 'seat.take', requestId: nextRequestId(), seat })) {
-      announcement.value = '尚未连接到服务器，坐回请求未发送。'
-      return
-    }
-    announcement.value = `正在坐回 ${String(seat + 1)} 号座位。`
+    takeSeatWithoutBuyIn(seat)
     return
   }
-  // 筹码为 0：走买入弹窗，重新买入后再入座。
+  // 筹码为 0（输光了）：走买入弹窗，重新买入后再入座。
   openBuyIn(seat)
 }
 
@@ -915,6 +937,17 @@ onBeforeUnmount(() => onFatalRoomError(null))
   <div class="table-view">
     <!-- 邀请链接落地页：还没加入这个房间，先填昵称进桌（进去后是旁观者，自己选座买入）。
          开发模式的模拟场景用 game.state 判定，不会被这块面板挡住。 -->
+    <!-- 手机横屏遮罩：只在 (orientation: landscape) 且高度 ≤560px 时显示。 -->
+    <section class="portrait-only" aria-label="请竖屏使用">
+      <div>
+        <p class="portrait-only-mark" aria-hidden="true">📱</p>
+        <h1 class="portrait-only-title">请竖屏使用</h1>
+        <p class="portrait-only-text">
+          手机版只支持竖屏：把手机转回竖直方向即可继续这桌牌局，进度不会丢。
+        </p>
+      </div>
+    </section>
+
     <main v-if="!room.hasCredentials && !game.state" id="main" class="join-gate">
       <section class="panel join-card" aria-labelledby="join-gate-title">
         <p class="mark">私人牌局 · 邀请制</p>
@@ -1044,41 +1077,41 @@ onBeforeUnmount(() => onFatalRoomError(null))
         <span>移除玩家</span>
       </Button>
 
-      <Button
-        v-if="canStartNextHand"
-        size="small"
-        :title="hasPlayedHand ? '开始下一手牌' : '开始第一手牌'"
-        @click="startNextHand"
-      >
-        <i class="pi pi-play" aria-hidden="true" />
-        <span>{{ hasPlayedHand ? '开始下一手' : '开始牌局' }}</span>
-      </Button>
-      <Button size="small" outlined aria-label="退出房间" :title="'退出房间（释放座位）'" @click="exitRoomOpen = true">
-        <i class="pi pi-sign-out" aria-hidden="true" />
-        <span>退出</span>
-      </Button>
+      <!--
+        「开始下一手」与「退出房间」已按第 3 项需求搬到底部操作栏（见下方 ActionBar 的 secondary 行）：
+        顶栏只留信息与二级入口，操作统一在触手可及的底部。
+      -->
     </header>
 
     <!-- 屏幕阅读器公告区：超时、断线、轮到自己。 -->
     <p class="sr-only" aria-live="polite" aria-atomic="true">{{ announcement }}</p>
 
-    <!-- 横屏引导：竖屏窄屏时提示，同时保留桌面基本信息与操作。
-         竖屏只留一行文案（390×844 实测：两行会把底部操作区顶出屏幕）。 -->
+    <!--
+      竖屏提示（第 1 项需求后手机版只支持竖屏）：手机竖屏与桌面窄窗显示，
+      手机横屏时整块被上面的「请竖屏使用」遮罩挡住。
+    -->
     <p class="rotate-hint">
       <i class="pi pi-mobile" aria-hidden="true" />
-      <span>把手机横过来视野更完整，竖屏也能正常操作。</span>
+      <span>竖屏操作最顺手；手机版只支持竖屏。</span>
     </p>
 
     <!--
+      notice-slot：给通知条预留固定高度（单行 32px）。
+      通知条本身按内容增高（0～2 行），若不预留，它一出现就把牌桌往下推、
+      竖屏立刻开始整页滚动（实测 360×740 溢出 43px）。预留成本只有 32px，
+      换来「有没有通知，牌桌位置都不变」。
+
       顶栏与牌桌之间的细通知条：别人重新连接、断线、超时、每手结算等事件在这里播报，
-      单行 24px、最多两条，8 秒自动消失，没有通知时整块不渲染（见 NoticeStrip.vue）。
+      最多两条、8 秒自动消失、没有通知时整块不渲染（见 NoticeStrip.vue）。
       version 用于区分「快照里的历史 notice」与「进桌后真实发生的事件」。
     -->
-    <NoticeStrip
-      :notice="noticeText"
-      :version="game.state?.version ?? 0"
-      :my-nickname="game.mySeat?.nickname ?? ''"
-    />
+    <div class="notice-slot">
+      <NoticeStrip
+        :notice="noticeText"
+        :version="game.state?.version ?? 0"
+        :my-nickname="game.mySeat?.nickname ?? ''"
+      />
+    </div>
 
     <main id="main" class="stage">
       <PokerTable
@@ -1194,19 +1227,29 @@ onBeforeUnmount(() => onFatalRoomError(null))
 
       <p v-else class="hint">正在载入你的座位信息…</p>
 
+      <!--
+        底部操作栏：动作按钮 + 下注额度 + 局级操作（开始下一手 / 离座 / 退出房间）。
+        观战者与离座者也渲染它——否则「开始牌局」（主持人）与「退出房间」就没有入口了。
+      -->
       <ActionBar
-        v-if="game.isSeated && !mySeatAway"
+        v-if="game.self"
         class="hero-actions"
-        :legal-actions="game.myLegalActions"
+        :legal-actions="game.isSeated && !mySeatAway ? game.myLegalActions : []"
         :pot-total="potTotal"
         :current-bet="game.state?.currentBet ?? 0"
         :my-stack="myStack"
-        :is-my-turn="game.isMyTurn"
+        :is-my-turn="game.isSeated && !mySeatAway && game.isMyTurn"
         :remaining-seconds="remainingSeconds"
         :turn-seconds="turnSeconds"
         :blocked-reason="blockedReason"
         :enabled="connection.isOnline"
+        :can-start-hand="canStartNextHand"
+        :has-played-hand="hasPlayedHand"
+        :seated="game.isSeated && !mySeatAway"
         @action="submitAction"
+        @start="startNextHand"
+        @leave="requestLeaveSeat"
+        @exit="exitRoomOpen = true"
       />
     </footer>
 
@@ -1645,6 +1688,15 @@ onBeforeUnmount(() => onFatalRoomError(null))
   color: var(--muted);
 }
 
+/*
+ * 通知条槽位：固定一行高（32px）。通知条最多两条时会向上溢出一点，
+ * 但槽位不参与高度累积——牌桌位置因此始终不变。
+ */
+.notice-slot {
+  height: 32px;
+  overflow: visible;
+}
+
 .rotate-hint {
   display: none;
   margin: var(--space-1) var(--space-2) 0;
@@ -2058,15 +2110,67 @@ onBeforeUnmount(() => onFatalRoomError(null))
   font-size: 0.78rem;
 }
 
-/* 竖屏窄屏：给出横屏引导；牌桌与操作区保持可用。 */
+/*
+ * 手机横屏（第 1 项需求：手机版不支持横屏）：
+ * 不渲染牌桌与底部操作区，只留一条「请竖屏使用」的提示。
+ * 判定用 `orientation: landscape` + `max-height: 560px`：手机横屏最高约 430px，平板约 768px 不受影响。
+ */
+.portrait-only {
+  display: none;
+}
+
+@media (orientation: landscape) and (max-height: 560px) {
+  .table-view > .bar,
+  .table-view > .rotate-hint,
+  .table-view > .notice-strip,
+  .table-view > .stage,
+  .table-view > .hero,
+  .table-view > :deep(.p-drawer) {
+    display: none;
+  }
+
+  .portrait-only {
+    display: grid;
+    place-items: center;
+    min-height: 100dvh;
+    padding: var(--space-3);
+    text-align: center;
+  }
+}
+
+.portrait-only-mark {
+  margin: 0 0 var(--space-1);
+  color: var(--gold);
+  font-size: 2rem;
+}
+
+.portrait-only-title {
+  margin: 0 0 6px;
+  font-size: 1.05rem;
+}
+
+.portrait-only-text {
+  margin: 0;
+  max-width: 34ch;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.6;
+}
+
+/* 竖屏窄屏：牌桌与操作区保持可用（提示条只是说明，不影响操作）。 */
 @media (orientation: portrait) and (max-width: 560px) {
-  /* 横屏引导在竖屏才显示；高度按 390×844 的实测预算压到 32px（原来 48px）。 */
+  /* 提示条高度按竖屏预算压到 22px（原来 48px）。 */
   .rotate-hint {
     display: flex;
     gap: 4px;
     margin: 2px var(--space-1) 0;
     padding: 2px 8px;
     font-size: 0.72rem;
+  }
+
+  /* 竖屏高度按 8px 一档抠：通知槽位 32 → 26px，仍放得下一条 24–26px 的通知。 */
+  .notice-slot {
+    height: 26px;
   }
 
   .hero-cards {
@@ -2147,8 +2251,8 @@ onBeforeUnmount(() => onFatalRoomError(null))
   }
 
   .hero {
-    gap: 6px;
-    /* 竖屏底部区最下面 16px 的内边距在 844 高度里是纯浪费，收到 8px。 */
+    /* 竖屏按 2px 一档抠：行间距 6 → 4px、底部内边距 16 → 8px。 */
+    gap: 4px;
     padding-bottom: var(--space-1);
   }
 
@@ -2160,125 +2264,6 @@ onBeforeUnmount(() => onFatalRoomError(null))
 }
 
 /* 横屏手机：压缩顶栏与底部区域，把高度让给牌桌。 */
-@media (max-height: 430px) {
-  .stage {
-    padding-top: var(--space-1);
-  }
-
-  .bar {
-    padding: 2px var(--space-1);
-    gap: 6px;
-    flex-wrap: nowrap;
-  }
-
-  .hero {
-    gap: 2px;
-    padding: 2px var(--space-2);
-  }
-
-  /* 本人底牌靠左竖排，右侧让给倒计时、动作按钮与下注金额。 */
-  .hero-cards {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 0;
-  }
-
-  .hero-stack,
-  .hero-hand {
-    font-size: 0.76rem;
-  }
-
-  .hero-label {
-    display: none;
-  }
-
-  .cards {
-    flex-direction: row;
-  }
-
-  .cards :deep(.card) {
-    --cw: 36px;
-  }
-
-  /* 竖排（column）里 auto 外边距会把整组推到右边，与靠左的底牌错位，这里取消。 */
-  .hero-meta {
-    margin-left: 0;
-    gap: var(--space-1);
-  }
-
-  .hero-actions {
-    max-width: none;
-  }
-
-  .rotate-hint {
-    margin-top: 2px;
-  }
-
-  /* 观战面板在矮屏排成一行，把高度让给牌桌。 */
-  .spectator {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px;
-    padding: 6px var(--space-1);
-  }
-
-  .spectator-state {
-    font-size: 0.82rem;
-  }
-
-  /* 说明性提示让位；「座位已满」这类状态提示仍然保留。 */
-  .spectator-tip {
-    display: none;
-  }
-
-  .spectator-actions :deep(.p-button) {
-    padding-block: 8px;
-  }
-
-  .chat-list {
-    max-height: none;
-    min-height: 84px;
-  }
-}
-
-@media (max-height: 430px) and (max-width: 1100px) {
-  /* 空间紧张：顶栏带文字的按钮收成纯图标（title 与 aria-label 仍在）。 */
-  .bar-title {
-    font-size: 0.9rem;
-    max-width: 30vw;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .stat--stage,
-  .link-state {
-    display: none;
-  }
-
-  .bar :deep(.p-button) {
-    min-width: 40px;
-    padding-inline: 10px;
-  }
-
-  .bar :deep(.p-button-label) {
-    display: none;
-  }
-
-  .bar :deep(.p-button > span:not([class])) {
-    display: none;
-  }
-
-  .scenario {
-    min-width: 104px;
-  }
-
-  /* 手数角标在矮屏省略（按钮 aria-label 仍带手数）。 */
-  .count-chip--history {
-    display: none;
-  }
-}
 
 @media (max-height: 380px) {
   .stat--hand {

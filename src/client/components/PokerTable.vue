@@ -134,6 +134,14 @@ function isCenterTop(index: number): boolean {
  */
 const isFullRing = computed(() => props.maxSeats >= 9)
 
+/**
+ * 某个座位是不是「本人离座后保留的座位」。
+ * 第 4 项需求：别人看到的是「已离座」卡片，本人看到的是可点的「坐回」空位。
+ */
+function isReservedSeat(index: number): boolean {
+  return props.reservedSeat === index
+}
+
 /** 桌面中央的一句话状态，用 aria-live 播报给屏幕阅读器。 */
 const tableStatus = computed(() => {
   const street = props.street ? STREET_NAMES[props.street] : '等待发牌'
@@ -173,7 +181,7 @@ const tableStatus = computed(() => {
       <!-- 座位：按 maxSeats 分布，2–9 人都能正常排布。 -->
       <template v-for="(seat, index) in seats" :key="index">
         <div
-          v-if="seat"
+          v-if="seat && !seat.away"
           class="seat-slot"
           :class="{
             'is-hero-slot': index === heroSeat,
@@ -193,7 +201,49 @@ const tableStatus = computed(() => {
           />
         </div>
 
-        <!-- 空位：旁观者/离座者可以点它落座（买入确认在牌桌页面弹窗里做）。 -->
+        <!--
+          本人离座保留的座位（第 4 项需求）：显示成一个可点的「坐回」空位。
+          它同时满足「有人的座位」与「本人可点的入口」，所以排在离座卡片之前单独处理；
+          点它就坐回来，筹码跟人走、不用再买入（也可以改点别的空位，见下面那一支）。
+        -->
+        <div
+          v-else-if="seat && seat.away && isReservedSeat(index) && canPickSeat"
+          class="seat-slot"
+          :class="{ 'is-side-seat': isSideSeat(index), 'is-center-top': isCenterTop(index) }"
+          :style="seatStyle(index)"
+        >
+          <button
+            type="button"
+            class="seat-empty is-reserved"
+            :aria-label="`坐回 ${String(index + 1)} 号座位（座位为你保留，筹码原样带回）`"
+            title="这个座位为你保留，点击直接坐回；也可以点别的空位"
+            @click="emit('pickSeat', index)"
+          >
+            <span class="num seat-empty-no">{{ index + 1 }}</span>
+            <span class="seat-empty-label">坐回</span>
+          </button>
+        </div>
+
+        <!-- 别人离座保留的座位：卡片直接写「已离座」，一眼看出这个位子暂时不能坐。 -->
+        <div
+          v-else-if="seat && seat.away"
+          class="seat-slot"
+          :class="{ 'is-side-seat': isSideSeat(index) }"
+          :style="seatStyle(index)"
+        >
+          <p
+            class="away-pill"
+            :aria-label="`${String(index + 1)} 号座位，${seat.nickname} 已离座（座位保留，本人可坐回）`"
+          >
+            <span class="num away-no">{{ index + 1 }}</span>
+            <span class="away-text">已离座</span>
+          </p>
+        </div>
+
+        <!--
+          空位：旁观者 / 离座者可以点它落座（买入确认在牌桌页面弹窗里做）。
+          第 2 项需求：座位号与「入座」并排一行——原来是「+ / 号码 / 入座」三行，卡片偏高。
+        -->
         <div
           v-else-if="canPickSeat"
           class="seat-slot"
@@ -203,18 +253,12 @@ const tableStatus = computed(() => {
           <button
             type="button"
             class="seat-empty"
-            :class="{ 'is-reserved': reservedSeat === index }"
-            :aria-label="
-              reservedSeat === index
-                ? `坐回 ${String(index + 1)} 号座位（座位为你保留）`
-                : `坐到 ${String(index + 1)} 号座位`
-            "
-            :title="reservedSeat === index ? '这个座位为你保留，点击坐回' : '点击选择这个座位并买入'"
+            :aria-label="`坐到 ${String(index + 1)} 号座位`"
+            title="点击选择这个座位并买入"
             @click="emit('pickSeat', index)"
           >
-            <i :class="reservedSeat === index ? 'pi pi-user' : 'pi pi-plus'" aria-hidden="true" />
-            <span class="num">{{ index + 1 }}</span>
-            <span class="seat-empty-label">{{ reservedSeat === index ? '坐回' : '入座' }}</span>
+            <span class="num seat-empty-no">{{ index + 1 }}</span>
+            <span class="seat-empty-label">入座</span>
           </button>
         </div>
 
@@ -354,21 +398,64 @@ const tableStatus = computed(() => {
   transform: translate(-50%, -50%);
 }
 
-/* 空位：可点的座位槽。描边虚线 + 「入座」文字，键盘可达（是真正的 button）。 */
+/*
+ * 空位：可点的座位槽。描边虚线 + 「座位号 入座」，键盘可达（是真正的 button）。
+ * 第 2 项需求：座位号与「入座」并排一行（原来是「+ / 号码 / 入座」三行），
+ * 卡片整体也收小一圈——空位只是入口，不需要占一张玩家卡的体量。
+ */
 .seat-empty {
-  display: grid;
-  justify-items: center;
-  gap: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
   width: var(--seat-w, 144px);
-  padding: 6px 8px;
+  /* 5px 内边距 + 0.82rem 字号 ≈ 32px：一小再小也守住 e2e 里 32px 的触控下限。 */
+  padding: 5px 8px;
   border: 1px dashed rgba(212, 177, 106, 0.45);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   background: rgba(0, 0, 0, 0.24);
   color: var(--muted);
   font: inherit;
-  font-size: 0.8rem;
+  font-size: 0.76rem;
+  line-height: 1.5;
   cursor: pointer;
   transition: border-color 0.15s ease-out, color 0.15s ease-out, background 0.15s ease-out;
+}
+
+/* 座位号：比自己那一枚「座位徽标」稍大一点，因为这里是唯一的操作对象。 */
+.seat-empty-no {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--gold);
+}
+
+/*
+ * 别人离座保留的座位：一行小胶囊「N 已离座」。
+ * 比完整玩家卡矮一半以上，同时明确「这个位子有人、只是暂时不在」。
+ */
+.away-pill {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: var(--seat-w, 144px);
+  margin: 0;
+  padding: 3px 8px;
+  border: 1px dashed var(--gold-soft);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.away-no {
+  color: var(--gold);
+  font-weight: 700;
+}
+
+.away-text {
+  white-space: nowrap;
 }
 
 .seat-empty:hover,
@@ -389,18 +476,7 @@ const tableStatus = computed(() => {
   font-size: 0.68rem;
 }
 
-/* 紧凑布局下的空位按钮：只留「+ 座位号」，高度与座位面板对齐，避免相邻空位互相压住。 */
-@media (max-height: 430px) {
-  .seat-empty {
-    gap: 0;
-    padding: 2px 6px;
-    font-size: 0.74rem;
-  }
 
-  .seat-empty-label {
-    display: none;
-  }
-}
 
 @media (max-width: 560px) and (orientation: portrait) {
   .seat-empty {
@@ -485,19 +561,26 @@ const tableStatus = computed(() => {
 @media (max-width: 560px) and (orientation: portrait) {
   .table {
     /*
-     * 桌面高度跟着视口走：竖屏下顶栏 + 横屏引导 + 底部操作区要占掉 500px 上下
-     * （动作区有下注滑块时最高），桌面吃掉剩下的高度，否则矮一点的手机（360×740）
-     * 会被底部操作区顶出屏幕、整页纵向滚动。
+     * 竖屏桌面高度 = **flex 布局算出来的剩余空间**，不再猜数值。
      *
-     * 重标定（本轮把底部操作区在竖屏压扁之后重新实测）：
-     *   除桌面以外的固定占用在 390×844 / 360×740 下都是 486px 左右（顶栏 105 + 引导 38 +
-     *   底部区约 330 + 舞台内边距 16），而可用高度是 100dvh（`#app` 已是 min-height: 100dvh）。
-     *   所以桌面最多能拿 0.268 × dvh：844 → 226px（实测页面高度 844，零纵向滚动），
-     *   740 → 198px，568 → 152px。系数取 0.268 而不是「1.1dvh - 618px」的旧写法，
-     *   是因为旧写法把 390×844 顶到上限 310px，整页溢出 75px，而矮屏又掉到下限 196px。
-     *   用 dvh 而不是 vh：地址栏伸缩时 vh 会算错。
+     * 竖屏固定占用是「顶栏 53 + 提示条 22 + 通知槽 26 + 舞台内边距 8 + 底部区」，
+     * 底部区随状态变化（等待时 ~180px，「轮到自己 + 额度台」时 ~296px）。
+     * 早先按 dvh 推公式（`min(0.275×dvh, dvh - 536px)`）仍会溢出 9px——dvh 与 innerHeight
+     * 在某些环境下并不相等。现在改成：`.stage`（flex: 1）拿到剩余高度，`.table` 用
+     * `height: 100%` 精确填满它。390×844 得到 232px、360×740 得到 204px，
+     * 任何牌局状态下都不会把页面顶出纵向滚动（e2e 有「竖屏一屏放下」的守卫断言）。
+     * max-height 给桌面档（≥561px 宽，走固定 --table-h）之外的情况兜底。
      */
-    --table-h: calc(100dvh * 0.268);
+    /*
+     * 用公式定高，**不要**用 `height: 100% / auto`：
+     *   竖屏下 `.table` 的子元素全是绝对定位，`height: auto` 会让桌面高度直接归零
+     *   （实测踩到：桌面 0px、公共牌跑到桌面外）；`height: 100%` 又会被基础规则里的
+     *   `height: var(--table-h)` 覆盖。
+     * 公式本身：0.275×dvh 是「桌面该占多少」，dvh-536px 是「除桌面外还剩多少」，
+     * 取小的那个。548 = 顶栏 53 + 提示 22 + 通知槽 26 + 舞台内边距 8 + 最高一档底部区 422 + 余量 17。
+     * 390×844 → 232px，360×740 → 204px。下限 190px 兜底更小的机器（那些本来就会滚动）。
+     */
+    --table-h: clamp(190px, min(calc(100dvh * 0.275), calc(100dvh - 548px)), 320px);
     /*
      * 纵向半径 44% → 48%：桌面高度按 dvh 重标定后（390×844 时 226px、360×740 时 198px），
      * 9 人桌顶部那一排（±50° 位，面板高约 47px）会与中央块/公共牌重叠。
@@ -589,76 +672,4 @@ const tableStatus = computed(() => {
 }
 
 /* 横屏手机：压低桌面高度，给底部操作区留出空间。 */
-@media (max-height: 430px) {
-  /*
-   * 矮屏下座位面板与底池/公共牌在同一条垂直线上。`.center` 因为 transform 自成一个层叠上下文，
-   * 光给 `.pot` 加 z-index 是逃不出去的，必须把整个中心区抬到座位之上：
-   * 座位 z-index 2/3、下注筹码 4，这里给 5，保证「底池与公共牌」永远可读。
-   */
-  .center {
-    z-index: 5;
-  }
-
-  .pot {
-    background: color-mix(in srgb, var(--felt-deep) 88%, black);
-    padding: 1px 10px;
-  }
-
-  .table {
-    --table-h: min(35vh, 118px);
-    /* 座位锚点外移：面板已收窄（见 PlayerSeat 矮屏规则），外移后正好贴住桌沿。
-       60% 时上下两排座位与中央块只剩 3px 净空，64% 能拉到 7–12px
-       （本人座位面板略高于顶栏中线，但顶栏中段是空的，不会挡住任何顶栏文字）。 */
-    --seat-anchor-y: 64%;
-    /* 横屏手机同样收窄座位面板，给公共牌与操作区留出宽度。 */
-    --seat-w: 116px;
-  }
-
-  /*
-   * 极矮横屏（740×360 只有 ~118px 桌面高度）的紧凑环形布局：
-   * 中央信息压成「[底池/边池] 一行 + [轮次][公共牌] 一行」。
-   * 纵向每省一行都是公共牌与座位面板之间的净空：中心块从 114px 降到 83px，
-   * 座位面板收在上下两侧，公共牌区与底池都不再被压住。
-   * 轮次标签原本在公共牌上方独占一行，这里让 `.board` 横排（标签在左、牌在右）。
-   *
-   * 边池明细行（.pots）在这一档隐藏：它会把底池那一行撑到 ~277px，再加上公共牌就比
-   * 两侧座位之间的净宽还宽（实测 740×360 会压住座位面板整 17px）。底池总额仍在底池胶囊里，
-   * 明细由屏幕阅读器读同一处的 sr-only 文本，结算叠层与手牌历史里也照常列出。
-   */
-  .center {
-    top: 50%;
-    gap: 2px;
-  }
-
-  .center > :deep(.board) {
-    grid-auto-flow: column;
-    align-items: center;
-    column-gap: 6px;
-    row-gap: 0;
-  }
-
-  /* 公共牌小一档：中心块宽度直接决定它与两侧座位面板之间的净宽。
-     42px 时净宽只剩 1px（字体或文案一变就会压上），38px 能留出 6px。 */
-  .center :deep(.board .card--md) {
-    --cw: 38px;
-  }
-
-  .center :deep(.board .slot--empty) {
-    width: 38px;
-    height: 53px;
-  }
-
-  .pots {
-    display: none;
-  }
-
-  /* 下注筹码同样改用面板角标：118px 高的桌面上，浮动筹码会压到公共牌或自己的筹码数字。 */
-  .bet {
-    display: none;
-  }
-
-  .pot b {
-    font-size: 0.92rem;
-  }
-}
 </style>

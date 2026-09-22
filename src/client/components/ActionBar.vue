@@ -26,6 +26,12 @@ const props = withDefaults(
     blockedReason?: string
     /** 链路异常时禁止提交。 */
     enabled?: boolean
+    /** 主持人现在能不能开下一手（等待中或已结算）。 */
+    canStartHand?: boolean
+    /** 是否已经开过手：决定按钮写「开始牌局」还是「开始下一手」。 */
+    hasPlayedHand?: boolean
+    /** 本人是否在座（在座才显示「离座」）。 */
+    seated?: boolean
   }>(),
   {
     potTotal: 0,
@@ -36,12 +42,21 @@ const props = withDefaults(
     turnSeconds: 20,
     blockedReason: '',
     enabled: true,
+    canStartHand: false,
+    hasPlayedHand: false,
+    seated: false,
   },
 )
 
 const emit = defineEmits<{
   /** 提交一个动作；amount 语义与协议一致：call=补筹码，bet/raise=目标总额。 */
   (event: 'action', payload: { action: LegalAction['action']; amount?: number }): void
+  /** 主持人开始（下一）手。 */
+  (event: 'start'): void
+  /** 离座（座位与筹码保留，随时可坐回）。 */
+  (event: 'leave'): void
+  /** 退出房间（释放座位）。 */
+  (event: 'exit'): void
 }>()
 
 const byAction = computed(() => {
@@ -329,6 +344,48 @@ const liveText = computed(() => {
       </div>
     </fieldset>
 
+    <!--
+      局级操作（第 3 项需求：从顶栏搬到这里）：
+        · 开始/开始下一手：主持人专用，等待中或已结算时出现；
+        · 离座：座位与筹码保留，随时可以坐回（也可以坐到别的空位）；
+        · 退出房间：释放座位离开。
+      图标刻意区分：离座用 pi-user-minus（人从桌边撤下），
+      退出房间用 pi-power-off（关掉这个房间的连接）——原来两个都是 pi-sign-out。
+    -->
+    <div class="secondary">
+      <Button
+        v-if="canStartHand"
+        size="small"
+        :title="hasPlayedHand ? '开始下一手牌' : '开始第一手牌'"
+        @click="emit('start')"
+      >
+        <i class="pi pi-play" aria-hidden="true" />
+        <span class="label-long">{{ hasPlayedHand ? '开始下一手' : '开始牌局' }}</span>
+        <span class="label-short">{{ hasPlayedHand ? '下一手' : '开始' }}</span>
+      </Button>
+      <Button
+        v-if="seated"
+        size="small"
+        text
+        class="keep-icon"
+        :title="'离座（座位与筹码为你保留，可随时坐回）'"
+        @click="emit('leave')"
+      >
+        <i class="pi pi-user-minus" aria-hidden="true" />
+        <span>离座</span>
+      </Button>
+      <Button
+        size="small"
+        text
+        :title="'退出房间（释放座位）'"
+        @click="emit('exit')"
+      >
+        <i class="pi pi-power-off" aria-hidden="true" />
+        <span class="label-long">退出房间</span>
+        <span class="label-short">退出</span>
+      </Button>
+    </div>
+
     <!-- All-in 二次确认：误触防护，必须显式确认。 -->
     <Dialog
       v-model:visible="confirmAllIn"
@@ -427,6 +484,33 @@ const liveText = computed(() => {
   font-size: 0.62rem;
   font-weight: 400;
   opacity: 0.72;
+}
+
+/*
+ * 局级操作：靠右、低调（text 按钮），只占一行。
+ * 高度预算：桌面 34px、竖屏 30px —— 它下面是牌桌，每多 10px 就少 10px 桌面。
+ */
+.secondary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+  padding: 2px;
+}
+
+.secondary :deep(.p-button) {
+  padding-block: 4px;
+  font-size: 0.78rem;
+}
+
+/* 默认显示全称；窄屏（竖屏）显示缩写，保证三个按钮一行放得下（见文件末尾的媒体查询）。 */
+.label-short {
+  display: none;
+}
+
+/* 第一个按钮（开始下一手）推到自己那一组的右侧，和离座/退出区分开。 */
+.secondary :deep(.p-button:first-child:not(:last-child)) {
+  margin-right: auto;
 }
 
 .empty {
@@ -561,76 +645,6 @@ const liveText = computed(() => {
 }
 
 /* 横屏手机：隐藏滑块（数字输入与快捷额度仍可用），保证操作区不被挤出屏幕。 */
-@media (max-height: 430px) {
-  .slider {
-    display: none;
-  }
-
-  .field :deep(.p-inputnumber) {
-    width: 104px;
-  }
-
-  .action-bar {
-    padding: 0;
-    gap: 2px;
-  }
-
-  .buttons {
-    gap: 6px;
-  }
-
-  /* 双行文案在矮屏收一档：按钮高度 ≈ 8×2 内边距 + 两行文字 + 边框，
-     刚好守在 40px 触控目标之上，同时不比改版前（单行 44px）更高。 */
-  .act-en {
-    font-size: 0.86rem;
-  }
-
-  .act-zh {
-    font-size: 0.56rem;
-  }
-
-  .buttons :deep(.p-button) {
-    padding-block: 8px;
-  }
-
-  /* 极矮屏：倒计时收成紧凑一行（进度条交给座位上的进度条显示）。 */
-  .turn-bar {
-    display: none;
-  }
-
-  /* 额度台在 360–390px 高的横屏里压到最扁：整行 44px（内边距 2px + 按钮 40px），
-     底部操作区每收 10px，上方牌桌就多 10px（740×360 时牌桌只剩 118px 高）。
-     分组标题与滑块都在这一档省略：四个英文档位本身已经说明用途。 */
-  .sizing {
-    gap: var(--space-1);
-    padding: 2px 6px;
-    flex-wrap: nowrap;
-  }
-
-  .controls {
-    gap: var(--space-1);
-    flex: 0 1 auto;
-  }
-
-  .range {
-    display: none;
-  }
-
-  .quick {
-    flex-wrap: nowrap;
-    padding: 0;
-  }
-
-  .quick-btn {
-    min-height: 40px;
-    min-width: 48px;
-    padding: 2px 6px;
-  }
-
-  .quick-caption {
-    display: none;
-  }
-}
 
 @media (max-width: 560px) {
   /* 竖屏窄屏：滑块隐藏（数字输入与快捷额度仍可用），额度台分两行，
@@ -642,8 +656,8 @@ const liveText = computed(() => {
   /* 竖屏高度比宽度更值钱（390×844 实测）：额度台每少 10px，上方牌桌就多 10px。
      做法：内边距 6→4px、快捷按钮 46→42px、档位间距 8→6px（触控目标仍 ≥40px）。 */
   .sizing {
-    gap: 6px;
-    padding: 4px 8px;
+    gap: 5px;
+    padding: 3px 8px;
     align-items: center;
   }
 
@@ -702,9 +716,47 @@ const liveText = computed(() => {
     display: none;
   }
 
+  /*
+   * 局级操作在竖屏必须**一行放得下**：三个按钮（开始下一手 / 离座 / 退出房间）一旦换行
+   * 就是 48px 两行，360×740 的桌面高度会被吃掉（实测溢出 6px）。
+   * 做法：不换行 + 缩写文案（完整说法在 title 与 aria-label 里）+ 收紧内边距。
+   */
+  .secondary {
+    gap: 4px;
+    padding: 0;
+    flex-wrap: nowrap;
+  }
+
+  .secondary :deep(.p-button) {
+    padding-block: 3px;
+    padding-inline: 7px;
+    font-size: 0.72rem;
+  }
+
+  /*
+   * 竖屏三个按钮（开始 / 离座 / 退出）在 360px 宽下只有 328px 可用，
+   * 图标再占 20px 就要换行；只给「离座」留图标（它最需要视觉区分），另外两个纯文字。
+   */
+  .secondary :deep(.p-button:not(.keep-icon) .p-button-icon) {
+    display: none;
+  }
+
+  .secondary :deep(.p-button-icon) {
+    font-size: 0.78rem;
+    margin-inline-end: 3px;
+  }
+
+  .label-long {
+    display: none;
+  }
+
+  .label-short {
+    display: inline;
+  }
+
   /* 竖屏动作按钮收一档内边距与字号：仍 ≥40px 触控高度，但更矮更窄。 */
   .buttons :deep(.p-button) {
-    padding-block: 6px;
+    padding-block: 5px;
     padding-inline: 8px;
     font-size: 0.8rem;
   }

@@ -309,8 +309,9 @@ onBeforeUnmount(() => {
 
   .strip-row {
     max-width: 96vw;
-    padding-inline: 8px 2px;
+    padding: 0 2px 0 8px;
     font-size: 0.72rem;
+    line-height: 1.35;
   }
 
   .strip-close {

@@ -93,15 +93,4 @@ function retry(): void {
  * 极矮横屏（740×360 这类）：横幅改成覆盖式状态条，
  * 不占布局高度，避免把牌桌与操作区挤出视口（原来会多出 33px 纵向滚动）。
  */
-@media (max-height: 430px) {
-  .banner {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    z-index: 20;
-    padding: 3px var(--space-1);
-    font-size: 0.74rem;
-  }
-}
 </style>
