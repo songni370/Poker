@@ -183,6 +183,28 @@ test('观战：座位满仍可进入观战，看不到底牌也没有操作区�
   await joinRoomByLink(watcher, roomId, `观战${Date.now() % 1000}`)
   await startHand(host)
 
+  /*
+   * 顶部细通知条（本轮新增）：主持人开局后，观众应看到一行「第 1 手牌开始」；
+   * 高度必须很克制（单行 ~26px、两条 ~64px），绝不能把牌桌顶下去。
+   * 注意用开局事件而不是「加入了房间」：那条广播发生在观众进桌之前，他收不到（历史快照也不回放）。
+   */
+  const strip = watcher.locator('.notice-strip')
+  await expect(strip).toBeVisible({ timeout: 10_000 })
+  await expect(strip).toContainText('第 1 手牌开始')
+  const stripBox = await strip.boundingBox()
+  expect(stripBox, '通知条应可测量').not.toBeNull()
+  expect(stripBox!.height, '通知条高度必须很小（不占位置）').toBeLessThanOrEqual(70)
+  // 通知条必须落在顶栏与牌桌之间：不能压住顶栏，也不能压住牌桌
+  const layout = await watcher.evaluate(() => ({
+    barBottom: Math.round(document.querySelector('.bar')?.getBoundingClientRect().bottom ?? 0),
+    stripTop: Math.round(document.querySelector('.notice-strip')?.getBoundingClientRect().top ?? 0),
+    stripBottom: Math.round(document.querySelector('.notice-strip')?.getBoundingClientRect().bottom ?? 0),
+    tableTop: Math.round(document.querySelector('.table')?.getBoundingClientRect().top ?? 0),
+  }))
+  expect(layout.stripTop, '通知条应在顶栏之下').toBeGreaterThanOrEqual(layout.barBottom)
+  expect(layout.stripBottom, '通知条应在牌桌之上').toBeLessThanOrEqual(layout.tableTop)
+  await watcher.screenshot({ path: 'artifacts/e2e/34-notice-strip.png' })
+
   // 观战者：能看到牌桌与观战面板，但没有操作区、没有底牌
   await expect(watcher.getByText('观战中')).toBeVisible()
   await expect(watcher.locator('.action-bar')).toHaveCount(0)

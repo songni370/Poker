@@ -32,7 +32,6 @@ const props = withDefaults(
     /** 公共牌轮次文案。 */
     street?: 'preflop' | 'flop' | 'turn' | 'river' | null
     /** 系统提示（如「XX 超时自动弃牌」）。 */
-    notice?: string
     /** 本人是否可以挑座位（旁观中、或离座保留座位时）：空位会渲染成可点按钮。 */
     canPickSeat?: boolean
     /** 本人保留的座位号（离座后仍属于本人）：点它表示坐回。 */
@@ -52,7 +51,6 @@ const props = withDefaults(
     winnerPlayerIds: () => [],
     highlightCards: () => [],
     street: null,
-    notice: '',
     canPickSeat: false,
     reservedSeat: null,
   },
@@ -234,8 +232,6 @@ const tableStatus = computed(() => {
 
     </div>
 
-    <!-- 系统提示（超时弃牌、断线等）不遮挡牌面。 -->
-    <p v-if="notice" class="notice" role="status">{{ notice }}</p>
     <p class="sr-only" aria-live="polite">{{ tableStatus }}</p>
   </div>
 </template>
@@ -459,16 +455,6 @@ const tableStatus = computed(() => {
   border-radius: 50%;
   background: var(--gold);
   box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.35);
-}
-
-.notice {
-  margin: 0;
-  padding: 3px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-  border: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 0.78rem;
 }
 
 @media (max-width: 1100px) {

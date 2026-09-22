@@ -31,6 +31,7 @@ import {
 import ActionBar from '../components/ActionBar.vue'
 import ConnectionBanner from '../components/ConnectionBanner.vue'
 import HandResultOverlay from '../components/HandResultOverlay.vue'
+import NoticeStrip from '../components/NoticeStrip.vue'
 import PlayingCard from '../components/PlayingCard.vue'
 import PokerTable from '../components/PokerTable.vue'
 import { playPing, soundEnabled, unlockAudio } from '../sound.ts'
@@ -1068,6 +1069,17 @@ onBeforeUnmount(() => onFatalRoomError(null))
       <span>把手机横过来视野更完整，竖屏也能正常操作。</span>
     </p>
 
+    <!--
+      顶栏与牌桌之间的细通知条：别人重新连接、断线、超时、每手结算等事件在这里播报，
+      单行 24px、最多两条，8 秒自动消失，没有通知时整块不渲染（见 NoticeStrip.vue）。
+      version 用于区分「快照里的历史 notice」与「进桌后真实发生的事件」。
+    -->
+    <NoticeStrip
+      :notice="noticeText"
+      :version="game.state?.version ?? 0"
+      :my-nickname="game.mySeat?.nickname ?? ''"
+    />
+
     <main id="main" class="stage">
       <PokerTable
         v-if="game.state && !unavailable"
@@ -1086,7 +1098,6 @@ onBeforeUnmount(() => onFatalRoomError(null))
         :winner-player-ids="winnerPlayerIds"
         :highlight-cards="highlightCards"
         :street="game.state.street"
-        :notice="noticeText"
         :can-pick-seat="canPickSeat"
         :reserved-seat="myReservedSeat"
         @pick-seat="onPickSeat"
