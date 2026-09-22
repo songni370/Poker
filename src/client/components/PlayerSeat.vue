@@ -38,6 +38,9 @@ const props = withDefaults(
 const cardCount = computed(() => (props.isHero ? 0 : props.seat.holeCardCount))
 
 const statusText = computed(() => {
+  // 「已离座」优先于弃牌/全下：座位还占着、筹码还留着，但人已经离开牌桌
+  //（第 6 项需求）。别人必须能一眼看出这个座位只是被保留。
+  if (props.seat.away) return '已离座'
   if (!props.seat.connected) return '已断线'
   if (props.seat.folded) return '已弃牌'
   if (props.seat.allIn) return '全下'
@@ -93,6 +96,7 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
       'is-allin': seat.allIn,
       'is-winner': isWinner,
       'is-hero': isHero,
+      'is-away': seat.away,
     }"
     :aria-label="spoken"
   >
@@ -204,6 +208,13 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
 .is-out .panel {
   border-style: dashed;
   border-color: var(--danger);
+}
+
+/* 离座保留的座位：虚线描边 + 状态文案「已离座」，与「断线」区分开颜色。 */
+.is-away .panel {
+  border-style: dashed;
+  border-color: var(--gold-soft);
+  background: color-mix(in srgb, var(--bg-elevated) 70%, transparent);
 }
 
 .is-winner .panel {

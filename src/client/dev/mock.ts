@@ -794,18 +794,24 @@ function scenarioSpectating(): MockSnapshot {
   return { state, self: { playerId: 'spectator', seat: null, holeCards: [], legalActions: [] } }
 }
 
-/** 已离座但保留座位：self.seat 仍是本人的座位，座位面板显示「已离座」，可以坐回。 */
+/**
+ * 已离座但保留座位：self.seat 仍是本人的座位（可以坐回），
+ * 另外把一位对手也标成离座，用来核对桌面上「已离座」的显示。
+ */
 function scenarioAway(): MockSnapshot {
   const base = scenarioFlop()
   const heroSeat = base.self.seat
   if (heroSeat === null) return base
-  const seat = base.state.seats[heroSeat]
-  if (seat) {
+  const markAway = (index: number): void => {
+    const seat = base.state.seats[index]
+    if (!seat) return
     seat.away = true
     seat.folded = true
     seat.lastAction = 'fold'
-    base.state.seats[heroSeat] = seat
+    base.state.seats[index] = seat
   }
+  markAway(heroSeat)
+  markAway(heroSeat === 3 ? 4 : 3)
   base.self = { ...base.self, holeCards: [], legalActions: [] }
   return base
 }

@@ -1182,8 +1182,16 @@ function startNextHand(): void {
           <dl>
             <div><dt>游戏</dt><dd>无限注德州扑克，52 张牌</dd></div>
             <div><dt>盲注</dt><dd class="num">{{ TABLE_RULES.smallBlind }}/{{ TABLE_RULES.bigBlind }}</dd></div>
-            <div><dt>起始筹码</dt><dd class="num">{{ TABLE_RULES.startingStack }}</dd></div>
+            <div>
+              <dt>买入范围</dt>
+              <dd class="num">
+                {{ game.state?.buyInMin ?? TABLE_RULES.startingStack }}–{{
+                  game.state?.buyInMax ?? TABLE_RULES.startingStack
+                }}（步进 {{ game.state?.buyInStep ?? TABLE_RULES.smallBlind }}，上限由主持人设定）
+              </dd>
+            </div>
             <div><dt>行动时间</dt><dd>{{ turnSeconds }} 秒，超时自动过牌或弃牌</dd></div>
+            <div><dt>离座</dt><dd>离座保留座位与筹码，随时可以坐回；退出房间才释放座位</dd></div>
             <div><dt>牌型大小</dt><dd>同花顺 &gt; 四条 &gt; 葫芦 &gt; 同花 &gt; 顺子 &gt; 三条 &gt; 两对 &gt; 一对 &gt; 高牌</dd></div>
             <div><dt>边池</dt><dd>每个边池只由该池合格玩家争夺</dd></div>
             <div><dt>筹码性质</dt><dd>虚拟分数，不可充值、不可兑换、不可转让</dd></div>

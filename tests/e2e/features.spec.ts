@@ -195,6 +195,9 @@ test('观战：座位满仍可进入观战，看不到底牌也没有操作区�
   await expect(guest.locator('.spectator-state')).toContainText('已离座')
   await expect(guest.getByRole('button', { name: /坐回 \d+ 号位/ })).toBeVisible()
   await guest.screenshot({ path: 'artifacts/e2e/10-seat-reserved-after-leave.png' })
+  // 别人也要能看出来这个座位「人走了、座位还在」：桌面上显示「已离座」且虚线描边
+  await expect(host.locator('.seat.is-away')).toHaveCount(1)
+  await expect(host.locator('.seat.is-away')).toContainText('已离座')
   // 座位仍占着：观战者没有空位可选
   await expect(watcher.locator('.seat-empty')).toHaveCount(0)
 
