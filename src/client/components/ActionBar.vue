@@ -639,14 +639,40 @@ const liveText = computed(() => {
     display: none;
   }
 
+  /* 竖屏高度比宽度更值钱（390×844 实测）：额度台每少 10px，上方牌桌就多 10px。
+     做法：内边距 6→4px、快捷按钮 46→42px、档位间距 8→6px（触控目标仍 ≥40px）。 */
   .sizing {
-    gap: var(--space-1);
-    padding: 6px 8px;
+    gap: 6px;
+    padding: 4px 8px;
+    align-items: center;
+  }
+
+  /* 「YOUR TURN 倒计时」在竖屏收掉：把这一行的高度让给牌桌。
+     本人座位的倒计时进度条、底部按钮状态与 `.sr-only[aria-live]` 播报都还在，
+     信息不丢（动作按钮只在轮到自己时可用，本身就是状态提示）。 */
+  .turn-strip {
+    display: none;
+  }
+
+  .quick {
+    flex: 1 1 100%;
+    gap: 6px;
   }
 
   .controls {
     flex: 1 1 100%;
     justify-content: space-between;
+  }
+
+  /* 额度台内部已经靠 gap 分行，动作按钮不能再带 auto 外边距（会多占一行）。 */
+  .buttons {
+    margin: 0;
+  }
+
+  .quick-btn {
+    min-height: 42px;
+    flex: 1 1 0;
+    min-width: 0;
   }
 
   /* 区间文案不许换行：金额 201px + 区间约 66px 刚好放进 340px 的行宽，
@@ -655,27 +681,38 @@ const liveText = computed(() => {
     white-space: nowrap;
   }
 
-  .quick {
-    flex: 1 1 100%;
-    justify-content: space-between;
-    flex-wrap: nowrap;
-  }
-
   .quick-caption {
     display: none;
   }
 
-  .quick-btn {
-    flex: 1 1 0;
-    min-width: 0;
+  .act-text {
+    align-items: center;
   }
 
   .act-en {
-    font-size: 0.86rem;
+    font-size: 0.8rem;
+    letter-spacing: 0;
   }
 
+  /* 竖屏把动作按钮里的中文小字从**视觉**上收掉：宽度让给按钮本体
+     （四个按钮合计省约 39px，390px 宽时 FOLD / CALL / RAISE 能排进同一行）。
+     中文仍是按钮的 title 提示，也仍在这个按钮的可访问名称里（aria-label 中英双全），
+     读屏与悬停拿到的信息不变；大屏（≥561px）依旧显示中文小字。 */
+  .act-zh {
+    display: none;
+  }
+
+  /* 竖屏动作按钮收一档内边距与字号：仍 ≥40px 触控高度，但更矮更窄。 */
   .buttons :deep(.p-button) {
-    font-size: 0.86rem;
+    padding-block: 6px;
+    padding-inline: 8px;
+    font-size: 0.8rem;
+  }
+
+  .buttons :deep(.p-button-icon) {
+    width: 1rem;
+    font-size: 0.9rem;
+    margin-inline-end: 4px;
   }
 }
 </style>

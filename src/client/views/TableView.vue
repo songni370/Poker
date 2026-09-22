@@ -1090,10 +1090,11 @@ onBeforeUnmount(() => onFatalRoomError(null))
     <!-- 屏幕阅读器公告区：超时、断线、轮到自己。 -->
     <p class="sr-only" aria-live="polite" aria-atomic="true">{{ announcement }}</p>
 
-    <!-- 横屏引导：竖屏窄屏时提示，同时保留桌面基本信息与操作。 -->
+    <!-- 横屏引导：竖屏窄屏时提示，同时保留桌面基本信息与操作。
+         竖屏只留一行文案（390×844 实测：两行会把底部操作区顶出屏幕）。 -->
     <p class="rotate-hint">
       <i class="pi pi-mobile" aria-hidden="true" />
-      <span>把手机横过来视野更完整；竖屏下牌桌信息仍然可读、操作按钮仍然可用。</span>
+      <span>把手机横过来视野更完整，竖屏也能正常操作。</span>
     </p>
 
     <main id="main" class="stage">
@@ -2099,12 +2100,45 @@ onBeforeUnmount(() => onFatalRoomError(null))
 
 /* 竖屏窄屏：给出横屏引导；牌桌与操作区保持可用。 */
 @media (orientation: portrait) and (max-width: 560px) {
+  /* 横屏引导在竖屏才显示；高度按 390×844 的实测预算压到 32px（原来 48px）。 */
   .rotate-hint {
     display: flex;
+    gap: 4px;
+    margin: 2px var(--space-1) 0;
+    padding: 2px 8px;
+    font-size: 0.72rem;
   }
 
   .hero-cards {
-    gap: var(--space-1);
+    gap: 6px;
+  }
+
+  /*
+   * 竖屏高度预算（390×844 实测，改版前底部区要 432px、整页溢出 75px）：
+   *   顶栏 105 + 引导 32 + 桌面阶段 326 + 底部约 350 = 813，余 31px → 不再纵向滚动。
+   * 竖屏压缩四处（组件内部样式各自归组件管）：
+   *   1) 本人底牌 58 → 42px（每张牌高 1.4 倍牌宽，是底部区最占高度的一块）；
+   *   2) 「离座 / 退出房间」收成纯图标：这两个入口顶栏也有，竖屏让出 44px 一行；
+   *   3) 动作按钮内边距与快捷额度高度在 ActionBar.vue 的竖屏规则里收一档；
+   *   4) 底部区内边距 16 → 8px。触控目标仍全部 ≥40px。
+   */
+  .hero-cards :deep(.card--lg) {
+    --cw: 42px;
+  }
+
+  .hero-cards .hero-seat-actions {
+    gap: 0;
+  }
+
+  .hero-cards .hero-seat-actions :deep(.p-button) {
+    min-width: 40px;
+    padding-inline: 8px;
+  }
+
+  /* 按钮文字（含 PrimeVue 的 label span）在竖屏隐藏：title 与 aria-label 仍完整。 */
+  .hero-cards .hero-seat-actions :deep(.p-button-label),
+  .hero-cards .hero-seat-actions :deep(.p-button > span:not([class])) {
+    display: none;
   }
 
   /* 顶栏收成图标按钮，避免换行占掉牌桌高度。 */
@@ -2154,10 +2188,13 @@ onBeforeUnmount(() => onFatalRoomError(null))
 
   .hero {
     gap: 6px;
-    padding-bottom: var(--space-2);
+    /* 竖屏底部区最下面 16px 的内边距在 844 高度里是纯浪费，收到 8px。 */
+    padding-bottom: var(--space-1);
   }
 
+  /* 动作按钮在竖屏收一档内边距：四个按钮合计省 32px（10 → 6px/边）。 */
   .hero-actions :deep(.p-button) {
+    padding-block: 6px;
     font-size: 0.86rem;
   }
 }

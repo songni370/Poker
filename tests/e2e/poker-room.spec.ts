@@ -249,6 +249,40 @@ test('牌桌小屏几何：740×360 / 844×390 / 390×844 无横向溢出且座�
     await host.screenshot({ path: `artifacts/e2e/13-table-geometry-${width}x${height}.png` })
   }
 
+  /*
+   * 竖屏高度收口（本轮优化）：390×844 与 360×740 这两个规格档必须「一屏放下」——
+   * 顶栏 + 横屏引导 + 牌桌 + 底部「底牌/牌型/动作按钮/额度台」全部可见，页面不允许纵向滚动。
+   * 改版前底部区在竖屏要 432px，390×844 溢出 75px；靠「底牌 58→42px、离座/退出收成图标、
+   * 动作按钮中文小字不显示（仍在 aria-label 里）、额度台压扁、桌面高度按 0.268×dvh」收口。
+   * 谁再把底部区或顶栏加高，这条会立刻失败。
+   */
+  for (const [width, height] of [
+    [390, 844],
+    [360, 740],
+  ] as const) {
+    await host.setViewportSize({ width, height })
+    await host.waitForTimeout(250)
+    const fit = await host.evaluate(() => {
+      const rect = (sel: string) => {
+        const el = document.querySelector(sel)
+        return el ? el.getBoundingClientRect() : null
+      }
+      const hero = rect('.hero')
+      const actionBar = rect('.hero-actions')
+      return {
+        overflowY: document.documentElement.scrollHeight - document.documentElement.clientHeight,
+        heroBottom: Math.round(hero?.bottom ?? 0),
+        actionBottom: Math.round(actionBar?.bottom ?? 0),
+        viewportH: window.innerHeight,
+      }
+    })
+    expect(fit.overflowY, `${width}×${height} 竖屏应一屏放下（不再纵向滚动）`).toBe(0)
+    // 底部操作区（含最后一个动作按钮与额度台）必须完整落在视口内，不能被屏幕切掉。
+    expect(fit.heroBottom, `${width}×${height} 底部区应完整可见`).toBeLessThanOrEqual(fit.viewportH)
+    expect(fit.actionBottom, `${width}×${height} 操作区应完整可见`).toBeLessThanOrEqual(fit.viewportH)
+    await host.screenshot({ path: `artifacts/e2e/33-portrait-fit-${width}x${height}.png` })
+  }
+
   expect(errors).toEqual([])
   await hostContext.close()
   await guestContext.close()
