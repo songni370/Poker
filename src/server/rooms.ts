@@ -22,6 +22,7 @@ import {
   type ServerEventType,
 } from '../shared/protocol.ts'
 import { hashToken, newPlayerId, newRoomId, newReconnectToken, tokenMatches, type Repo } from './repo.ts'
+import { silentLogger, type Logger } from './logger.ts'
 
 /** 命令校验失败：只回给发起者，不改变牌局状态。 */
 export class CommandError extends Error {
@@ -307,16 +308,25 @@ export class RoomManager {
   private readonly maxRooms: number
   /** 掉线宽限期（毫秒）：超时释放座位。做成实例参数，测试里可以用很短的值。 */
   private readonly seatReleaseMs: number
+  /** 精简日志（见 logger.ts）：只记建房/开局结算/房间回收/错误；测试里传静默实现。 */
+  private readonly logger: Logger
+  /**
+   * 已经打过结算日志的手牌 id（按房间）。
+   * 结算事件可能走三条路径（主流程 / 全下逐张亮牌的收尾 / 开下一手时补发），
+   * 没有这个去重就会出现同一手牌写两行日志的情况。
+   */
+  private readonly loggedSettlement = new Map<string, string>()
 
   constructor(
     repo: Repo,
-    options: { maxRooms?: number; seatReleaseMs?: number } = {},
+    options: { maxRooms?: number; seatReleaseMs?: number; logger?: Logger } = {},
   ) {
     const maxRooms = options.maxRooms ?? Number(process.env.MAX_ROOMS ?? DEFAULT_MAX_ROOMS)
     this.repo = repo
     this.maxRooms = Number.isInteger(maxRooms) && maxRooms > 0 ? maxRooms : DEFAULT_MAX_ROOMS
     const release = options.seatReleaseMs ?? SEAT_RELEASE_MS
     this.seatReleaseMs = Number.isFinite(release) && release > 0 ? release : SEAT_RELEASE_MS
+    this.logger = options.logger ?? silentLogger
     this.repo.pruneReceipts()
   }
 
@@ -354,7 +364,10 @@ export class RoomManager {
         this.scheduleTurn(room, true)
       } catch (error) {
         discarded += 1
-        console.error(`[room] 房间 ${row.room_id} 的快照不可用，已关闭：`, error instanceof Error ? error.message : error)
+        this.logger.warn(`房间 ${row.room_id} 的快照已损坏，已安全关闭该房间`, {
+          roomId: row.room_id,
+          detail: error instanceof Error ? error.message : error,
+        })
         this.repo.setRoomStatus(row.room_id, 'closed')
         this.repo.deleteSnapshot(row.room_id)
       }
@@ -528,13 +541,15 @@ export class RoomManager {
       room.clearRevealTimers()
       for (const member of room.members.values()) member.socket?.close(1001, 'server shutting down')
     }
+    // 关服时给一行总结：这次运行一共开着几桌。
+    if (this.rooms.size > 0) this.logger.info(`关闭 ${String(this.rooms.size)} 个仍在内存中的房间`)
   }
 
   /** 定期回收长期无人在线的房间：内存房间不能无限增长。 */
   startSweeper(intervalMs = 10 * 60 * 1000, idleMs = 30 * 60 * 1000): void {
     const timer = setInterval(() => {
       const closed = this.sweepIdleRooms(idleMs)
-      if (closed > 0) console.info(`[room] 已回收 ${closed} 个长时间无人在线的房间`)
+      if (closed > 0) this.logger.info(`已回收 ${String(closed)} 个无人在线的房间（超过 ${String(Math.round(idleMs / 60000))} 分钟没人连）`)
     }, intervalMs)
     timer.unref()
   }
@@ -800,6 +815,11 @@ export class RoomManager {
       // 结算之后才真正移除被踢的成员（在此之前那个座位还挂在公共状态里）。
       this.dropPendingKicks(room)
 
+      // 精简日志里最有价值的一条：这一手谁赢了、赢多少。
+      // 放在这里而不是 publish 处：结算是引擎状态的事实，与「逐张亮牌是否还在跑」无关，
+      // 断线/开下一手都不会漏记；按 handId 去重，也不会因为补发结算而重复写。
+      if (result) this.logSettlement(room, result)
+
       // 房间事件（入座/离座/开局/结算…）同时进聊天流，聊天面板因此也是房间日志。
       // 全下逐张亮牌时结算消息延后到亮牌结束，避免「已结算」与还在亮牌同时出现。
       const deferNoticeToChat = Boolean(result) && revealSteps.length > 0
@@ -827,7 +847,12 @@ export class RoomManager {
       const code = error instanceof CommandError ? error.code : error instanceof EngineError ? this.mapEngineError(error) : 'internal'
       if (code === 'internal') {
         // 记录真实原因，但对外只给通用错误，避免泄露内部细节。
-        console.error('[room] 命令处理失败', { roomId: room.id, playerId, type: command.type, error })
+        this.logger.error('处理玩家动作失败', {
+          roomId: room.id,
+          playerId,
+          command: command.type,
+          detail: error,
+        })
       }
       this.sendError(room, playerId, code, error instanceof Error ? error.message : undefined)
     }
@@ -841,6 +866,24 @@ export class RoomManager {
       return `${winnerMember?.nickname ?? winner.playerId} +${winner.amount}${hand}`
     })
     return `第 ${settled.handNo} 手结算：${winners.join('、')}`
+  }
+
+  /**
+   * 一手牌结束时写一行日志：`房间名 第 3 手结算：阿水 +120（两对（A 与 K）），底池 240`。
+   * 同一手牌只写一次（handId 去重）：结算事件可能走主流程、逐张亮牌收尾、开下一手补发三条路径。
+   */
+  private logSettlement(room: RoomRuntime, settled: HandResultPublic): void {
+    if (this.loggedSettlement.get(room.id) === settled.handId) return
+    this.loggedSettlement.set(room.id, settled.handId)
+    const winners = settled.winners.map((winner) => {
+      const nickname = room.members.get(winner.playerId)?.nickname ?? winner.playerId
+      const hand = winner.handName ? `（${winner.handName}）` : ''
+      return `${nickname} +${String(winner.amount)}${hand}`
+    })
+    this.logger.info(
+      `${room.name} 第 ${String(settled.handNo)} 手结算：${winners.join('、')}，底池 ${String(settled.potTotal)}`,
+      { roomId: room.id, handNo: settled.handNo, potTotal: settled.potTotal },
+    )
   }
 
   /**

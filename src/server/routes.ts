@@ -8,6 +8,7 @@ import {
   type RoomInfoResponse,
 } from '../shared/protocol.ts'
 import { CommandError, type RoomManager } from './rooms.ts'
+import type { Logger } from './logger.ts'
 
 const STATUS_BY_CODE: Partial<Record<ErrorCode, number>> = {
   bad_request: 400,
@@ -26,7 +27,11 @@ function errorBody(code: ErrorCode, message: string): ErrorResponse {
   return { error: code, message, serverTime: Date.now() }
 }
 
-export async function registerHttpRoutes(app: FastifyInstance, manager: RoomManager): Promise<void> {
+export async function registerHttpRoutes(
+  app: FastifyInstance,
+  manager: RoomManager,
+  logger: Logger,
+): Promise<void> {
   const creations = new Map<string, { count: number; windowStart: number }>()
 
   const overCreateLimit = (ip: string): boolean => {
@@ -44,7 +49,8 @@ export async function registerHttpRoutes(app: FastifyInstance, manager: RoomMana
     if (error instanceof CommandError) {
       return reply.code(STATUS_BY_CODE[error.code] ?? 400).send(errorBody(error.code, error.message))
     }
-    app.log.error({ err: error }, 'HTTP 请求处理失败')
+    // 只有真正的意外才进 error 级日志，并且带上「哪个请求」——否则排查时不知道是谁触发的。
+    logger.error('HTTP 请求处理失败', { method: reply.request.method, url: reply.request.url, detail: error })
     return reply.code(500).send(errorBody('internal', '服务器内部错误'))
   }
 
@@ -57,7 +63,13 @@ export async function registerHttpRoutes(app: FastifyInstance, manager: RoomMana
       return reply.code(400).send(errorBody('bad_request', parsed.error.issues[0]?.message ?? '请求格式不正确'))
     }
     try {
-      return reply.code(201).send(manager.createRoom(parsed.data))
+      const credentials = manager.createRoom(parsed.data)
+      // 「谁开了哪一桌」是最有用的一条业务日志：房间号就是邀请链接里的那串。
+      logger.info(
+        `建房「${parsed.data.roomName?.trim() || '未命名牌局'}」房主 ${parsed.data.nickname}，${String(parsed.data.maxSeats)} 人桌，房间号 ${credentials.roomId}`,
+        { roomId: credentials.roomId, maxSeats: parsed.data.maxSeats },
+      )
+      return reply.code(201).send(credentials)
     } catch (error) {
       return fail(reply, error)
     }

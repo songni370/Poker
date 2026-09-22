@@ -13,7 +13,7 @@
 - **Web 联机德州扑克**（虚拟、不可兑换筹码），朋友之间开私人房；**不含**充值/提现/真钱/可兑换代币。
 - 规格书 §13 的第 0–5 阶段**全部完成**，之后又补做了聊天/房间日志、手牌历史、提示音、全下逐张亮牌、
   多桌上限、观战、顶栏收纳、小屏紧凑牌桌、删除等候页（落座即买入）、离座保留座位、主持人移除玩家、
-  以及本轮的 4 项界面改造（见 §7）。
+  以及本轮的 4 项界面改造（见 §8）。
 - 硬约束（不可违反）：**一个仓库 / 一个 `package.json` / 一个 Node 进程 / 一个 HTTP 端口 / 一次部署**；
   SQLite 单文件；**禁止** Redis / MySQL / 独立前端部署 / 微服务 / 生产双进程。
 - 当前分支工作区状态：**有一批未提交的界面改造改动**（见第 11 节变更日志），提交由用户决定。
@@ -79,8 +79,9 @@ npm start            # 生产单进程（默认 127.0.0.1:3000；生产用 HOST=
 ```
 src/shared/      (2)   poker.ts（牌 / 牌型名 / 桌规常量）   protocol.ts（zod 命令 + 事件类型 + 错误码）
 src/engine/      (5)   deck.ts  evaluate.ts（含 describeHand）  pots.ts  table.ts（状态机 + 快照）  index.ts
-src/server/      (7)   index.ts（唯一生产入口）  app.ts  routes.ts（HTTP）  ws.ts
+src/server/     (10)   index.ts（唯一生产入口）  app.ts  routes.ts（HTTP）  ws.ts
                        rooms.ts（RoomManager / RoomRuntime，最核心）  repo.ts（SQLite 仓储）  db/index.ts（迁移）
+                       logger.ts（精简日志）  log-controller.ts（关请求级日志）
 src/client/     (23)   main.ts  router.ts  sound.ts
                        stores/{room,game,connection,chat}.ts
                        net/session.ts（HTTP + WebSocket 单例、重连、时钟同步、致命错误收敛）
@@ -136,7 +137,7 @@ scripts/         (5)   dev.mjs  deploy-check.mjs  backup-drill.mjs  reset-e2e-db
 - **数据库**：首次启动自动建 `data/poker.sqlite` + 执行 `migrations/`（当前 2 个版本）+ `WAL` + 外键；
   启动时恢复未关闭房间（日志 `restored` / `discarded`）。`data/`、`.env` 已在 `.gitignore`，
   **部署升级严禁删除数据目录**。
-- 环境变量：`HOST` / `PORT` / `DATABASE_PATH` / `MAX_ROOMS` / `SEAT_RELEASE_MS`；示例见 `.env.example`。
+- 环境变量：`HOST` / `PORT` / `DATABASE_PATH` / `MAX_ROOMS` / `SEAT_RELEASE_MS` / `LOG_LEVEL`（默认 info，可 warn/error/silent；细节见 §7）；示例见 `.env.example`。
 - 发布自检：`npm run check:deploy`（对着已启动的服务跑 8 项检查，零依赖，可在生产机执行）。
 
 ---
@@ -219,14 +220,57 @@ scripts/         (5)   dev.mjs  deploy-check.mjs  backup-drill.mjs  reset-e2e-db
   与 `aria-label` 里，读屏与悬停信息不丢；大屏依旧显示中英双行。
 - 触控目标不允许小于 40px：竖屏所有按钮最终仍 ≥40px。
 - **产品尺寸范围**：桌面 1440×900 / 1280×720，横屏 844×390 / 740×360，竖屏 390×844 / 360×740
-  （普通手机大小）。**更小的机型不在范围内**（§10）。
+  （普通手机大小）。**更小的机型不在范围内**（§11）。
 - 低于 360×740 的机型无法一屏放下（320×568 溢出约 90px），已在探针里标为「参考档」不计入失败。
 - **座位面板内边距在竖屏收窄**（6 → 4px，≤780px 高的机型再收到 3px）：这不是审美选择，
   而是靠它把 9 人桌相邻面板的互压从 5–25px 降到 0（`npm run probe:table` 实测）。
 
 ---
 
-## 7. 本轮 4 项需求的状态（用户第 4 轮指令）
+## 7. 服务端日志契约（`src/server/logger.ts` + `log-controller.ts`）
+
+用户要求「精简、通俗」。当前规则：
+
+- **请求级日志全部关闭**：Fastify 默认给每个请求打两行（incoming request / request completed），
+  实测光是跑完一轮 e2e（13 个用例、约 90 次请求）就会刷出上百行，把有用信息淹没。
+  关闭方式是 `log-controller.ts` 的 `QuietRequestLogger`（`disableRequestLogging: true`），
+  刻意不用已 deprecated 的顶层 `disableRequestLogging`（会打印 FSTDEP023 警告）。
+- **只记这几件事**（INFO 级，全部是人话，一行一件事）：
+  1. 启动：`数据库已升级到版本 2（本次执行：001_init.sql、002_room_buy_in.sql）`（仅新增迁移时出现）
+     + `牌桌服务已就绪：http://host:port（网页 / API / WebSocket 同一端口）｜数据库 …｜Node …`；
+  2. 建房：`建房「周五夜局」房主 小满，6 人桌，房间号 T8xdZZmlo78`（房间号＝邀请链接里的那串）；
+  3. 每手结算：`周五夜局 第 3 手结算：阿水 +120（两对（A 与 K）），底池 240`（按 handId 去重，
+     结算走主流程/逐张亮牌收尾/开下一手补发三条路径也只写一行）；
+  4. 房间回收：`已回收 1 个无人在线的房间（超过 30 分钟没人连）`；关服：`收到 SIGINT，正在关闭服务`；
+  5. 重启恢复：`已从数据库恢复 1 个未结束的房间`。
+- **WARN / ERROR 只在真出问题时出现**：数据库快照损坏被关闭、前端未构建、HTTP/WS 命令处理异常、
+  端口监听失败、数据库初始化失败。错误上下文里带 `roomId / playerId / command / method / url / detail`，
+  方便定位是哪个房间、哪个请求。
+- **格式**：pino 单行 JSON，`base: undefined`（去掉 pid/hostname），ISO 时间戳；
+  message 是中文人话，结构化字段另放（grep 用）。`LOG_LEVEL=debug|warn|silent` 可调，
+  默认 info；**测试里默认 `silent`**（`NODE_ENV=test` 或 `buildApp({ logLevel: 'silent' })`），
+  保证 `node --test` 输出干净。
+- **已知的小瑕疵**：Fastify 自己会在监听成功时打一行 `Server listening at …`，与「已就绪」重复。
+  Fastify 5 的 `listen()` 不支持按调用传 logger，为一行提示去劫持框架日志不值得，保留。
+
+日志长这样（真实输出，一次建房）：
+
+```
+{"level":30,"time":"2026-09-22T05:48:30.644Z","msg":"数据库已升级到版本 2（本次执行：001_init.sql、002_room_buy_in.sql）"}
+{"level":30,"time":"2026-09-22T05:48:30.646Z","msg":"Server listening at http://127.0.0.1:3399"}
+{"level":30,"time":"2026-09-22T05:48:30.647Z","msg":"牌桌服务已就绪：http://127.0.0.1:3399（网页 / API / WebSocket 同一端口）｜数据库 /tmp/logtest.sqlite（版本 2）｜Node v24.18.0"}
+{"level":30,"time":"2026-09-22T05:48:33.564Z","roomId":"fdj-HpIvZbM","maxSeats":2,"msg":"建房「周末局」房主 阿水，2 人桌，房间号 fdj-HpIvZbM"}
+```
+
+改日志时要守的两条：**不记底牌/凭证**（`password`/`reconnectToken` 之类永不入日志）、
+**不把请求级日志加回来**（要排查就用 `LOG_LEVEL=debug` 或看业务事件）。
+`tests/logger.test.ts` 把「silent 不输出、一行一条消息、Error 压成文本、级别过滤」钉住了。
+
+---
+
+---
+
+## 8. 本轮 4 项需求的状态（用户第 4 轮指令）
 
 | # | 需求 | 状态 | 落地位置 / 证据 |
 |---|---|---|---|
@@ -240,7 +284,7 @@ scripts/         (5)   dev.mjs  deploy-check.mjs  backup-drill.mjs  reset-e2e-db
 
 ---
 
-## 8. 关键设计决策与**已踩过的坑**（改代码前必读）
+## 9. 关键设计决策与**已踩过的坑**（改代码前必读）
 
 ### 8.1 服务端 / 协议
 
@@ -319,15 +363,15 @@ scripts/         (5)   dev.mjs  deploy-check.mjs  backup-drill.mjs  reset-e2e-db
 
 ---
 
-## 9. 验证记录（每次代码变更后更新）
+## 10. 验证记录（每次代码变更后更新）
 
 ### 最近一次（本轮 4 项界面改造 + 额度台重构）
 
 ```
 npm run lint       → 0 error（eslint .）
 npm run typecheck  → 通过（vue-tsc + tsc --noEmit，无输出）
-npm test           → ℹ tests 48  ℹ pass 48  ℹ fail 0
-npm run e2e        → 13 passed (1.3m)
+npm test           → ℹ tests 52  ℹ pass 52  ℹ fail 0
+npm run e2e        → 13 passed (1.2m)
 ```
 
 e2e 明细（13 项全绿，真实 Chrome）：
@@ -370,6 +414,22 @@ e2e 明细（13 项全绿，真实 Chrome）：
 验收：lint 0 error、typecheck 通过、npm test 48/48、npm run e2e 13/13（顺序执行）
 ```
 
+### 本轮：服务端日志精简（用户要求「不用过多元素，能让人通俗看懂」）
+
+```
+改动前：每个 HTTP 请求两行 info（incoming request / request completed），
+        跑完一轮 e2e（13 用例、约 90 次请求）会刷出上百行 JSON，业务信息被淹没。
+改动后：同一轮 e2e 的服务端日志共 20 行，其中请求级噪声 0 行，全是人话：
+        3 行启动（迁移 / Server listening / 已就绪）+ 10 行建房 + 3 行结算
+        + 若干恢复/回收行，例如
+        「建房「界面回归」房主 界面54，6 人桌，房间号 u5qxkpV4do0」
+        「界面回归 第 1 手结算：界面54 +60（顺子（Q 高）），底池 60」
+实测：PORT=3399 启动 + 建房 + 3 次 HTTP 请求 → 日志 4 行、无弃用告警、无请求噪声。
+新增 tests/logger.test.ts（4 项）：silent 不输出、一行一条消息 + ISO 时间戳且无 pid/hostname、
+        Error 压成一行文本（否则 pino 会输出 {} 把原因丢掉）、warn 级别过滤掉 info。
+验收：lint 0 error、typecheck 通过、npm test 52/52、npm run e2e 13/13
+```
+
 ### 上一轮（历史，供对照）
 
 ```
@@ -389,7 +449,7 @@ npm run e2e → 12 passed（当时「界面改造」用例尚未修好两处断�
 
 ---
 
-## 10. 已知问题与待办（按优先级）
+## 11. 已知问题与待办（按优先级）
 
 ### 未解决
 
@@ -412,7 +472,7 @@ npm run e2e → 12 passed（当时「界面改造」用例尚未修好两处断�
 
 ---
 
-## 11. 变更日志（最新在前）
+## 12. 变更日志（最新在前）
 
 ```
 （本轮，未提交）死文件清理 + 竖屏「一屏放下」：
@@ -425,6 +485,10 @@ npm run e2e → 12 passed（当时「界面改造」用例尚未修好两处断�
      - 横屏引导压成一行 38px
   3) 新增 e2e 守卫：竖屏两个规格档断言「无纵向滚动 + 底部区完整可见」
   验收：lint 0 error、typecheck 通过、npm test 48/48、npm run e2e 13/13
+（本轮，未提交）服务端日志精简：关闭请求级日志（QuietRequestLogger）、
+         只留启动/数据库升级/建房/每手结算/房间回收/关服 + 错误，
+         ISO 时间戳、去掉 pid/hostname、LOG_LEVEL 可调、测试默认 silent，
+         新增 src/server/logger.ts、src/server/log-controller.ts、tests/logger.test.ts
 （f278252）界面改造 4 项：牌面无中央花色 / 座位角色槽位 / 底部当前牌型 /
          操作区英文主中文辅 + 额度台重构（含 docs/CONTEXT.md 建立）
 （历史）主持人移除玩家（room.kick）+ 致命错误路由到错误页
@@ -439,7 +503,7 @@ npm run e2e → 12 passed（当时「界面改造」用例尚未修好两处断�
 
 ---
 
-## 12. 协作约定
+## 13. 协作约定
 
 - **先读 `AGENTS.md`**；禁止真钱赌博、充值、提现、可兑换筹码。
 - 界面设计用 `ui-ux-pro-max` + `frontend-design`，界面检查用 `web-design-guidelines`
@@ -452,7 +516,7 @@ npm run e2e → 12 passed（当时「界面改造」用例尚未修好两处断�
 
 ---
 
-## 13. 快速排错
+## 14. 快速排错
 
 | 现象 | 先看这里 |
 |---|---|
@@ -469,4 +533,6 @@ npm run e2e → 12 passed（当时「界面改造」用例尚未修好两处断�
 | 牌桌整页空白 / e2e 等 `.table` 超时 | 组件里用了没注册的 PrimeVue 服务（如 `useConfirm`，§8.17）；先看页面 `pageerror` |
 | 被移除后页面一直重连 | `handleFatalRoomError()` 是否先置 `closing = true`（§8.7） |
 | 重启后房间全被关掉 | 看启动日志 `restored` / `discarded`；快照损坏会被安全关闭（§8.8） |
+| 日志太吵 / 想看细节 | 请求级日志已刻意关闭（§7）；要更细用 `LOG_LEVEL=debug`，要更静用 `LOG_LEVEL=warn` |
+| 日志里出现 `detail: {}` | 又把 Error 对象直接丢进上下文了：走 `logger.ts` 的封装会压成一行文本（§7、tests/logger.test.ts） |
 | 想加/改牌桌上的一行内容 | 先跑 `npm run probe:table`——座位面板与操作区每多一行，牌桌就少一行（§8.12、§8.22） |

@@ -11,6 +11,8 @@ export interface DbHandle {
   path: string
   /** 已应用的最高迁移版本号，用于启动日志与 /api/health。 */
   migration: number
+  /** 本次启动真正执行的迁移文件名；空数组表示数据库已是最新（正常重启）。 */
+  appliedMigrations: string[]
   close(): void
 }
 
@@ -32,11 +34,17 @@ export function openDatabase(dbPath = process.env.DATABASE_PATH ?? './data/poker
   db.exec('PRAGMA busy_timeout = 5000')
   db.exec('PRAGMA synchronous = NORMAL')
 
-  const migration = migrate(db)
-  return { db, path: absolute, migration, close: () => db.close() }
+  const result = migrate(db)
+  return {
+    db,
+    path: absolute,
+    migration: result.migration,
+    appliedMigrations: result.applied,
+    close: () => db.close(),
+  }
 }
 
-function migrate(db: DatabaseSync): number {
+function migrate(db: DatabaseSync): { migration: number; applied: string[] } {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version    INTEGER PRIMARY KEY,
     name       TEXT    NOT NULL,
@@ -54,6 +62,7 @@ function migrate(db: DatabaseSync): number {
     .sort()
 
   let highest = applied.size > 0 ? Math.max(...applied) : 0
+  const executed: string[] = []
 
   for (const file of files) {
     const version = Number(file.split('_')[0])
@@ -79,8 +88,9 @@ function migrate(db: DatabaseSync): number {
       db.exec('ROLLBACK')
       throw new Error(`迁移失败 ${file}`, { cause: error })
     }
+    executed.push(file)
     highest = Math.max(highest, version)
   }
 
-  return highest
+  return { migration: highest, applied: executed }
 }
