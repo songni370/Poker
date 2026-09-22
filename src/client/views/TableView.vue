@@ -11,16 +11,18 @@ import type { MenuItem } from 'primevue/menuitem'
 import Select from 'primevue/select'
 import type { ActionType, Card } from '../../shared/poker.ts'
 import { STREET_NAMES, TABLE_RULES, formatCard } from '../../shared/poker.ts'
-import type { ChatMessage } from '../../shared/protocol.ts'
+import type { ChatMessage, RoomMemberPublic } from '../../shared/protocol.ts'
 import { CHAT_MAX_LENGTH } from '../../shared/protocol.ts'
 import { NICKNAME_MAX } from '../../shared/poker.ts'
 import {
   SessionError,
   connectRoom,
   fetchRoomInfo,
+  forgetCredentials,
   joinRoom as apiJoinRoom,
   loadCredentials,
   nextRequestId,
+  onFatalRoomError,
   sendChat,
   sendCommand,
   useSessionStore,
@@ -344,6 +346,10 @@ const moreItems = computed<MenuItem[]>(() => [
     icon: soundEnabled.value ? 'pi pi-volume-up' : 'pi pi-volume-off',
     command: () => toggleSound(),
   },
+  // 只有主持人能移除玩家：这一项本身就不该出现在其他人的菜单里。
+  ...(room.isHost
+    ? [{ label: '移除玩家…', icon: 'pi pi-user-minus', command: () => openKick() }]
+    : []),
 ])
 
 /** 「更多」按钮的无障碍名称要带上未读与手数，折叠后信息不能丢。 */
@@ -847,6 +853,72 @@ function startNextHand(): void {
   }
 }
 
+/* ───────────── 主持人移除玩家（room.kick） ─────────────
+ * 名单里有旁观者，而公共状态只描述座位，所以打开弹窗时按需向服务端查询一次；
+ * 房间成员变化（有人加入/离开）时如果弹窗正开着就自动刷新。 */
+
+const kickOpen = ref(false)
+/** 正在二次确认的那一行：确认框就地画在名单里，不引入全局 ConfirmService。 */
+const kickTarget = ref<RoomMemberPublic | null>(null)
+
+function seatText(seat: number | null): string {
+  return seat === null ? '旁观' : `座位 ${String(seat + 1)}`
+}
+
+function requestMembers(): void {
+  sendCommand({ type: 'room.members', requestId: nextRequestId() })
+}
+
+function openKick(): void {
+  kickTarget.value = null
+  kickOpen.value = true
+}
+
+// 打开弹窗时拉一次名单；开着的时候跟着房间版本号走。
+// 版本号在 room.player_left 等广播里都会推进，所以不需要乐观更新本地名单。
+watch(
+  () => (kickOpen.value ? (game.state?.version ?? 0) : 0),
+  () => {
+    if (kickOpen.value) requestMembers()
+  },
+)
+
+function closeKick(): void {
+  kickTarget.value = null
+  kickOpen.value = false
+}
+
+/** 真正发送移除命令（由行内的二次确认触发）。 */
+function confirmKick(): void {
+  const target = kickTarget.value
+  kickTarget.value = null
+  if (!target) return
+  if (!sendCommand({ type: 'room.kick', requestId: nextRequestId(), playerId: target.playerId })) {
+    announcement.value = '尚未连接到服务器，移除请求未发送。'
+    return
+  }
+  announcement.value = `已请求移除 ${target.nickname}。`
+  // 名单只认服务端：room.player_left 广播后客户端会重新拉一次，
+  // 这里不做乐观更新，免得被拒绝时名单已经少了一行。
+  requestMembers()
+}
+
+/**
+ * 致命错误（被移除 / 房间关闭 / 房间不存在）统一收敛到 session.ts：
+ * 它已经停掉了重连与本地会话，这里只负责清凭证并离开牌桌页，
+ * 否则牌桌会停在「正在载入牌局」并不断重连。
+ */
+onFatalRoomError((error) => {
+  kickOpen.value = false
+  room.clear()
+  // 连本地保存的凭证一起清掉：留着他下次打开这个链接还会拿旧身份去连，再被拒一次。
+  forgetCredentials(props.roomId)
+  void router.push({
+    name: 'error',
+    query: { kind: 'room', code: error.code, detail: error.message },
+  })
+})
+onBeforeUnmount(() => onFatalRoomError(null))
 
 </script>
 
@@ -958,7 +1030,7 @@ function startNextHand(): void {
         text
         class="bar-more"
         :aria-label="moreAria"
-        :title="'更多操作（规则 / 历史 / 聊天 / 提示音）'"
+        :title="room.isHost ? '更多操作（规则 / 历史 / 聊天 / 提示音 / 移除玩家）' : '更多操作（规则 / 历史 / 聊天 / 提示音）'"
         aria-haspopup="true"
         aria-controls="bar-more-menu"
         @click="toggleMore"
@@ -968,6 +1040,20 @@ function startNextHand(): void {
         <span v-if="chat.unread > 0" class="count-chip count-chip--unread num" aria-hidden="true">{{ unreadText }}</span>
       </Button>
       <Menu id="bar-more-menu" ref="moreMenu" :model="moreItems" :popup="true" />
+
+      <!-- 宽屏下「更多」菜单是收起的，所以主持人另给一个直达入口；
+           ≤1100px 时它跟其它二级操作一起收进「更多」菜单，不会把顶栏挤成两行。 -->
+      <Button
+        v-if="room.isHost"
+        size="small"
+        text
+        class="bar-secondary"
+        :title="'移除玩家（主持人）'"
+        @click="openKick"
+      >
+        <i class="pi pi-user-minus" aria-hidden="true" />
+        <span>移除玩家</span>
+      </Button>
 
       <Button
         v-if="canStartNextHand"
@@ -1470,6 +1556,60 @@ function startNextHand(): void {
           <i class="pi pi-times" aria-hidden="true" />
           <span>退出房间</span>
         </Button>
+      </template>
+    </Dialog>
+
+    <!-- 主持人移除玩家：列出房间里所有人（含旁观者），自己不可移除。
+         点「移除」先在这一行就地二次确认：这是不可撤销的操作，点错就得重发邀请。 -->
+    <Dialog
+      v-model:visible="kickOpen"
+      modal
+      header="移除玩家"
+      :style="{ width: 'min(92vw, 420px)' }"
+      @hide="kickTarget = null"
+    >
+      <p class="hint">
+        被移除的人会立刻离开房间、座位释放；如果还在手牌中，会先弃牌等本手结算。
+        想让他回来，需要重新把邀请链接发给他。
+      </p>
+      <ul v-if="room.members.length > 0" class="kick-list">
+        <li v-for="entry in room.members" :key="entry.playerId" class="kick-row">
+          <template v-if="kickTarget?.playerId === entry.playerId">
+            <span class="kick-confirm">确定把「{{ entry.nickname }}」移出房间吗？</span>
+            <span class="kick-actions">
+              <Button size="small" text :title="'取消'" @click="kickTarget = null"><span>取消</span></Button>
+              <Button size="small" severity="danger" :title="`确认移除 ${entry.nickname}`" @click="confirmKick">
+                <i class="pi pi-check" aria-hidden="true" />
+                <span>确认移除</span>
+              </Button>
+            </span>
+          </template>
+          <template v-else>
+            <span class="kick-who">
+              <b>{{ entry.nickname }}</b>
+              <span class="muted">
+                {{ seatText(entry.seat) }}<template v-if="entry.isHost"> · 主持人</template>
+                <template v-if="!entry.connected"> · 已断线</template>
+              </span>
+            </span>
+            <span v-if="entry.playerId === game.self?.playerId" class="muted kick-self">这是你</span>
+            <Button
+              v-else
+              size="small"
+              severity="danger"
+              outlined
+              :title="`把 ${entry.nickname} 移出房间`"
+              @click="kickTarget = entry"
+            >
+              <i class="pi pi-user-minus" aria-hidden="true" />
+              <span>移除</span>
+            </Button>
+          </template>
+        </li>
+      </ul>
+      <p v-else class="hint">正在读取房间成员…</p>
+      <template #footer>
+        <Button text :title="'关闭'" @click="closeKick"><span>关闭</span></Button>
       </template>
     </Dialog>
     </template>
@@ -2166,6 +2306,59 @@ function startNextHand(): void {
   flex: 0 0 auto;
   min-width: 40px;
   padding-inline: 8px;
+}
+
+/* 移除玩家：一行一人，昵称与座位号在左、按钮在右；长昵称换行而不是把按钮挤出弹窗。 */
+.kick-list {
+  list-style: none;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  max-height: min(50vh, 320px);
+  overflow-y: auto;
+}
+
+.kick-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1);
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 45%, transparent);
+}
+
+.kick-who {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.kick-who b {
+  overflow-wrap: anywhere;
+}
+
+.kick-who .muted,
+.kick-self {
+  font-size: 0.78rem;
+}
+
+.kick-row :deep(.p-button) {
+  flex: none;
+}
+
+/* 就地二次确认：文案换行、按钮不换行，行高不跳变。 */
+.kick-confirm {
+  min-width: 0;
+  font-size: 0.86rem;
+  color: var(--danger);
+}
+
+.kick-actions {
+  display: flex;
+  flex: none;
+  gap: 4px;
 }
 
 /* 聊天分组：日期 / 时间间隔 / 未读分隔线。 */

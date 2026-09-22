@@ -266,6 +266,129 @@ test('中等宽度顶栏收纳：只留「更多」与「退出」，菜单里�
 })
 
 /**
+ * 主持人移除玩家（room.kick）的浏览器验收：
+ *   房主在「更多」菜单里打开「移除玩家…」→ 二次确认 → 客人被请出房间，
+ *   客人页面跳到错误页（文案里要出现「移出」），房主页面上那个座位空出来。
+ * 手牌进行中的释放时机（结算后才真正空出）由 tests/features.test.ts 在协议层断言，
+ * 那里能精确控制牌局状态，比浏览器里等超时稳定。
+ */
+test('移除玩家：房主把客人移出房间，客人跳到错误页，释放的座位别人能坐', async ({ browser }) => {
+  const hostContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const guestContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const watcherContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const host = await hostContext.newPage()
+  const guest = await guestContext.newPage()
+  const watcher = await watcherContext.newPage()
+  const errors = [...watchErrors(host), ...watchErrors(guest), ...watchErrors(watcher)]
+
+  const roomId = await createRoom(host, `房主${Date.now() % 1000}`, undefined, { maxSeats: 3 })
+  const guestName = `客人${Date.now() % 1000}`
+  await joinRoomByLink(guest, roomId, guestName)
+  await takeSeat(host, 1)
+  await takeSeat(guest, 2)
+  // 第三个人是旁观者：由他来证明「座位真的空出来了」（席位空位按钮只对旁观者渲染）
+  await joinRoomByLink(watcher, roomId, `观战${Date.now() % 1000}`)
+  await expect(watcher.locator('.seat-empty')).toHaveCount(1)
+
+  // 客人看不到「移除玩家」入口：这一项只属于主持人。
+  // 窄屏下「更多」按钮本身会被收进媒体查询里，所以两种情况分别断言。
+  const guestMore = guest.getByRole('button', { name: '更多操作' })
+  if (await guestMore.isVisible()) {
+    await guestMore.click()
+    await expect(guest.locator('.p-menu').getByText('移除玩家…')).toHaveCount(0)
+    await guest.keyboard.press('Escape')
+  } else {
+    await expect(guestMore).toBeHidden()
+  }
+
+  // 房主打开移除名单：自己、客人、旁观者都在列表里，自己那一行只提示「这是你」
+  await host.getByRole('button', { name: '移除玩家' }).click()
+  const kickDialog = host.locator('.p-dialog').filter({ hasText: '被移除的人会立刻离开房间' })
+  await expect(kickDialog).toBeVisible()
+  await expect(kickDialog.locator('.kick-row')).toHaveCount(3)
+  await expect(kickDialog.getByText(guestName)).toBeVisible()
+  await expect(kickDialog.getByText('旁观')).toBeVisible()
+  await expect(kickDialog.getByText('这是你')).toBeVisible()
+  // 自己不能被移除：只有另外两行有按钮
+  await expect(kickDialog.getByRole('button', { name: '移除' })).toHaveCount(2)
+  await host.screenshot({ path: 'artifacts/e2e/21-kick-player-dialog.png' })
+
+  // 点「移除」先就地二次确认：这时候还没真的移除
+  const guestRow = kickDialog.locator('.kick-row').filter({ hasText: guestName })
+  await guestRow.getByRole('button', { name: '移除' }).click()
+  await expect(kickDialog).toContainText(`确定把「${guestName}」移出房间吗？`)
+  await host.screenshot({ path: 'artifacts/e2e/22-kick-player-confirm.png' })
+  // 取消不会移除任何人
+  await kickDialog.getByRole('button', { name: '取消' }).click()
+  await expect(guestRow.getByRole('button', { name: '移除' })).toBeVisible()
+  await expect(guest).toHaveURL(/\/table\//)
+
+  await guestRow.getByRole('button', { name: '移除' }).click()
+  await kickDialog.getByRole('button', { name: '确认移除' }).click()
+  await expect(kickDialog.locator('.kick-row')).toHaveCount(2)
+
+  // 客人：跳到错误页，页面文案说明是被移出（不是普通断线）
+  await expect(guest).toHaveURL(/\/error/)
+  await expect(guest.getByRole('heading', { name: '你已被移出房间' })).toBeVisible()
+  await expect(guest.locator('.panel')).toContainText('移出')
+  await guest.screenshot({ path: 'artifacts/e2e/23-kicked-error-page.png' })
+  // 而且不能一直往牌桌重连（凭证已作废并清掉）
+  await guest.waitForTimeout(800)
+  await expect(guest).toHaveURL(/\/error/)
+
+  // 释放的座位可以真的坐进去：旁观者点空位 → 确认买入 → 落座
+  await kickDialog.getByRole('button', { name: '关闭' }).click()
+  await takeSeat(watcher, 2)
+  await expect(watcher.locator('.hero-cards')).toBeVisible()
+  // 房主那边这个座位也重新有人了（不再是空缺）
+  await expect(host.locator('.seat').filter({ hasText: '观战' })).toHaveCount(1)
+
+  // 房间日志里有这条事件
+  await openDrawerSection(host, '聊天')
+  await expect(host.locator('.chat-system').filter({ hasText: `${guestName} 已被主持人移出房间` })).toBeVisible()
+
+  expect(errors).toEqual([])
+  await hostContext.close()
+  await guestContext.close()
+  await watcherContext.close()
+})
+
+/** 窄屏（≤1100px）顶栏只留「更多」：移除入口必须仍能从菜单里找到，且菜单里只有主持人看得到。 */
+test('移除玩家：窄屏顶栏收进「更多」菜单时，主持人仍能从菜单里打开移除名单', async ({ browser }) => {
+  const hostContext = await browser.newContext({ viewport: { width: 900, height: 700 } })
+  const guestContext = await browser.newContext({ viewport: { width: 900, height: 700 } })
+  const host = await hostContext.newPage()
+  const guest = await guestContext.newPage()
+  const errors = [...watchErrors(host), ...watchErrors(guest)]
+
+  const roomId = await createRoom(host, `窄屏${Date.now() % 1000}`, undefined, { maxSeats: 3 })
+  const guestName = `陪练${Date.now() % 1000}`
+  await joinRoomByLink(guest, roomId, guestName)
+  await takeSeat(host, 1)
+  await takeSeat(guest, 2)
+
+  // 窄屏：顶栏的「移除玩家」收起来了，只能从「更多」菜单进
+  await expect(host.getByRole('button', { name: '移除玩家' })).toBeHidden()
+  await host.getByRole('button', { name: '更多操作' }).click()
+  const menu = host.locator('.p-menu')
+  await expect(menu.getByText('移除玩家…')).toBeVisible()
+  await menu.getByText('移除玩家…').click()
+  const kickDialog = host.locator('.p-dialog').filter({ hasText: '被移除的人会立刻离开房间' })
+  await expect(kickDialog).toBeVisible()
+  await expect(kickDialog.locator('.kick-row')).toHaveCount(2)
+  await expect(kickDialog.getByText(guestName)).toBeVisible()
+
+  // 关掉弹窗后牌桌仍然可用（顶栏没有因为多了一项而折行）
+  await kickDialog.getByRole('button', { name: '关闭' }).click()
+  const barBox = await host.locator('.bar').boundingBox()
+  expect(barBox?.height ?? 0).toBeLessThan(80)
+
+  expect(errors).toEqual([])
+  await hostContext.close()
+  await guestContext.close()
+})
+
+/**
  * 观战选座在窄屏必须保持「一排」：9 人桌最多 8 个空位，换行会把底部区域撑成两行，
  * 牌桌被挤掉一截。这里验证 390×844 竖屏下 7 个空位按钮同排（可横向滚动）、
  * 不产生横向页面溢出，并且点空位 → 确认买入 → 真正落座。

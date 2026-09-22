@@ -15,6 +15,7 @@ import {
   type LegalAction,
   type PrivateSelfState,
   type RoomCredentials,
+  type RoomMemberPublic,
   type RoomStatus,
   type SeatPublic,
   type ServerEvent,
@@ -42,6 +43,12 @@ export interface RoomMember {
   reconnectHash: string
   socket: ClientSocket | null
   disconnectedAt: number | null
+  /**
+   * 已被主持人移除、但本手还没结算（筹码还在池里）。
+   * 这类成员必须留到结算之后才能真正删除：公共状态的座位是按 room.members 渲染的，
+   * 提前删掉会让那个座位在桌面上凭空消失。
+   */
+  pendingKickRemoval?: boolean
 }
 
 /** 只依赖 WebSocket 的最小结构，避免为一个类型引入额外依赖。 */
@@ -614,6 +621,8 @@ export class RoomManager {
     const boardBeforeCommand = room.table.publicState().board.length
     let notice: string | undefined
     let result: HandResultPublic | undefined
+    /** 被主持人移除者的连接：等错误与广播都发完再关闭。 */
+    let kickedSocket: ClientSocket | null | undefined
     /** 全下摊牌时需要补发的中间公共牌张数（例如 0 → 3 → 4 → 5）。 */
     let revealSteps: number[] = []
 
@@ -674,6 +683,49 @@ export class RoomManager {
           }
           notice = `${member.nickname} 退出了房间`
           eventType = 'room.player_left'
+          break
+        }
+        case 'room.members': {
+          // 成员名单里有旁观者，不是牌局公共状态：只回给主持人，其他人按权限拒绝。
+          if (playerId !== room.hostPlayerId) throw new CommandError('not_host')
+          // 只读命令：不推进版本号，所以也没有可写的回执（否则重放时会漏发名单）。
+          this.sendMembers(room, member)
+          return
+        }
+        case 'room.kick': {
+          if (playerId !== room.hostPlayerId) throw new CommandError('not_host')
+          if (command.playerId === playerId) {
+            throw new CommandError('bad_request', '不能移除自己，想离开请用「退出房间」')
+          }
+          const target = room.members.get(command.playerId)
+          if (!target) throw new CommandError('bad_request', '这名玩家已经不在房间里了')
+
+          // 先留一份引用：成员记录下面就会被标记/删除，之后拿不到他的 socket。
+          const targetSocket = target.socket
+          targetSocket?.send(
+            JSON.stringify({
+              ...this.envelope(room, 'room.error', {
+                error: { code: 'unauthorized', message: '你已被主持人移出房间' },
+              }),
+              self: this.privateState(room, target.playerId),
+            }),
+          )
+
+          // 与「退出房间」同一套语义：手牌中先弃牌并挂 pendingRemoval，等本手结算再让出座位。
+          if (target.seat !== null) room.table.removePlayer(command.playerId)
+          // 手牌进行中时成员记录要留到结算之后：公共状态的座位是按 room.members 渲染的，
+          // 提前删掉会让那个座位在桌面上凭空消失——筹码还在池里却看不见，别人还会以为能坐。
+          // 注意别动 member.seat：它是座位的渲染依据，释放与否由引擎的 pendingRemoval 决定。
+          if (room.table.seatOf(command.playerId)?.pendingRemoval) {
+            target.pendingKickRemoval = true
+          } else {
+            room.members.delete(command.playerId)
+          }
+          this.clearAwayTimer(room, command.playerId)
+
+          notice = `${target.nickname} 已被主持人移出房间`
+          eventType = 'room.player_left'
+          kickedSocket = targetSocket
           break
         }
         case 'room.ready': {
@@ -745,6 +797,9 @@ export class RoomManager {
         }
       }
 
+      // 结算之后才真正移除被踢的成员（在此之前那个座位还挂在公共状态里）。
+      this.dropPendingKicks(room)
+
       // 房间事件（入座/离座/开局/结算…）同时进聊天流，聊天面板因此也是房间日志。
       // 全下逐张亮牌时结算消息延后到亮牌结束，避免「已结算」与还在亮牌同时出现。
       const deferNoticeToChat = Boolean(result) && revealSteps.length > 0
@@ -765,6 +820,9 @@ export class RoomManager {
       } else {
         this.publish(room, eventType, { notice, result })
       }
+      // 被移除者的 socket 放到最后关闭：先让他收到 unauthorized 与最后一次状态，
+      // 否则客户端只看到「连接断开」，会一直重连到失败为止。
+      kickedSocket?.close(4003, 'removed by host')
     } catch (error) {
       const code = error instanceof CommandError ? error.code : error instanceof EngineError ? this.mapEngineError(error) : 'internal'
       if (code === 'internal') {
@@ -1146,6 +1204,39 @@ export class RoomManager {
       ...this.envelope(room, type, { chatHistory: [...room.chat], handHistory: [...room.history] }),
       self: this.privateState(room, playerId),
     })
+  }
+
+  /**
+   * 移除玩家名单：过滤掉已经被踢、只是还在等本手结算的成员——
+   * 他们此刻已经不在房间里了（凭证也失效了），再列出来只会让主持人重复操作。
+   */
+  private sendMembers(room: RoomRuntime, member: RoomMember): void {
+    const members: RoomMemberPublic[] = [...room.members.values()]
+      .filter((entry) => !entry.pendingKickRemoval)
+      .map((entry) => ({
+        playerId: entry.playerId,
+        nickname: entry.nickname,
+        seat: entry.seat,
+        isHost: entry.playerId === room.hostPlayerId,
+        connected: this.isConnected(entry),
+      }))
+    this.sendTo(member, {
+      ...this.envelope(room, 'room.members', { members }),
+      self: this.privateState(room, member.playerId),
+    })
+  }
+
+  /**
+   * 本手结算后真正删除「已被主持人移除」的成员。
+   * 必须在引擎 finishHand() 之后调用：那时 pendingRemoval 的座位才从引擎里消失，
+   * 公共状态与 socket 也随之清空。
+   */
+  private dropPendingKicks(room: RoomRuntime): void {
+    for (const [playerId, entry] of [...room.members]) {
+      if (!entry.pendingKickRemoval || room.table.seatOf(playerId)) continue
+      room.members.delete(playerId)
+      entry.socket?.close(4003, 'removed by host')
+    }
   }
 
   private sendError(room: RoomRuntime, playerId: string, code: ErrorCode, message?: string): void {

@@ -67,6 +67,48 @@ export function forgetCredentials(roomId: string): void {
   }
 }
 
+/* ───────────────────────────── 致命错误（身份失效 / 房间不可用） ───────────────────────────── */
+
+/**
+ * 这三种错误说明「当前身份在这个房间里已经没有任何意义」：
+ *   - unauthorized：被主持人移除，或凭证失效；
+ *   - room_closed：房间已关闭；
+ *   - room_not_found：房间已解散。
+ * 继续留在这个房间只会不停重连（每次都被同样拒绝），所以交给界面跳到错误页。
+ */
+const FATAL_ROOM_ERRORS: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
+  'unauthorized',
+  'room_closed',
+  'room_not_found',
+])
+
+type FatalRoomErrorHandler = (error: { code: ErrorCode; message: string }) => void
+
+let fatalRoomErrorHandler: FatalRoomErrorHandler | null = null
+
+/**
+ * 注册致命错误处理（由牌桌页在挂载时注册、卸载时注销）。
+ * 用回调而不是在这里直接跳路由：session.ts 不认识 vue-router，
+ * 只负责「识别致命错误 + 停止重连」这一件事。
+ */
+export function onFatalRoomError(handler: FatalRoomErrorHandler | null): void {
+  fatalRoomErrorHandler = handler
+}
+
+function handleFatalRoomError(error: { code: ErrorCode; message: string }): void {
+  // closing 必须在这里就置上：服务端随后会关掉连接，若还按普通断线处理就会立刻开始重连。
+  closing = true
+  clearTimers()
+  const current = socket
+  socket = null
+  activeCredentials = null
+  current?.close(1000, 'room unavailable')
+  useConnectionStore().setStatus('idle')
+  useGameStore().clear()
+  useChatStore().clear()
+  fatalRoomErrorHandler?.(error)
+}
+
 /* ───────────────────────────── HTTP ───────────────────────────── */
 
 async function readJson<T>(response: Response): Promise<T> {
@@ -295,11 +337,26 @@ function handleMessage(text: string): void {
   }
 
   if (message.type === 'room.error') {
-    session.setError(message.error?.code ?? 'internal', message.error?.message ?? ERROR_MESSAGES.internal)
+    const error = {
+      code: message.error?.code ?? ('internal' as ErrorCode),
+      message: message.error?.message ?? ERROR_MESSAGES.internal,
+    }
+    // 身份失效 / 房间不可用：先终止会话（不再重连），再让牌桌页跳到错误页。
+    if (FATAL_ROOM_ERRORS.has(error.code)) {
+      handleFatalRoomError(error)
+      return
+    }
+    session.setError(error.code, error.message)
     // 过期版本已经由服务端回发最新快照，这里只提示、不阻断。
     if ('state' in message && message.state && 'self' in message && message.self) {
       useGameStore().applySnapshot(message.state, message.self)
     }
+    return
+  }
+
+  // 成员名单是主持人按需查询的轻量结果，不携带牌局状态，也不参与状态替换。
+  if (message.type === 'room.members') {
+    if (message.members) useRoomStore().setMembers(message.members)
     return
   }
 

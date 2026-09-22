@@ -201,10 +201,28 @@ export const SERVER_EVENT_TYPES = [
   'turn.started',
   'hand.settled',
   'room.error',
+  /** 房间成员名单：只回给主持人（「移除玩家」弹窗的数据源），不是公共状态。 */
+  'room.members',
   'connection.recovered',
   'pong',
 ] as const
 export type ServerEventType = (typeof SERVER_EVENT_TYPES)[number]
+
+/**
+ * 房间成员（含旁观者）。
+ *
+ * 与 GameStatePublic.seats 的区别：seats 只描述牌桌上的座位，
+ * 旁观者根本没有条目；主持人要「移除某人」就必须能看到全部成员，
+ * 所以这份名单只在需要时单独回给主持人，不进公共状态快照。
+ */
+export interface RoomMemberPublic {
+  playerId: string
+  nickname: string
+  /** 座位号；旁观者为 null。 */
+  seat: number | null
+  isHost: boolean
+  connected: boolean
+}
 
 /**
  * 统一事件信封：每次推送都带完整公共状态与本人私有状态，
@@ -229,6 +247,8 @@ export interface ServerEvent {
   chatHistory?: ChatMessage[]
   /** 仅 room.snapshot / connection.recovered 携带：最近手牌历史。 */
   handHistory?: HandResultPublic[]
+  /** 仅 room.members 携带：房间成员名单（只发给主持人）。 */
+  members?: RoomMemberPublic[]
 }
 
 /* ────────────────────────────── 轻量消息（无房间状态） ────────────────────────────── */
@@ -291,6 +311,23 @@ export const LeaveRoomCommandSchema = z.object({
   requestId,
 })
 
+/**
+ * 主持人移除玩家：释放目标座位并把他请出房间。
+ * 与 room.leave 的区别只在「谁发起」：语义同样是退出房间，因此座位释放规则完全一致
+ * （手牌中先弃牌，等本手结算后再让出座位）。主持人不能移除自己。
+ */
+export const KickPlayerCommandSchema = z.object({
+  type: z.literal('room.kick'),
+  requestId,
+  playerId: z.string().min(1).max(64),
+})
+
+/** 取房间成员名单（含旁观者）；只有主持人会收到内容，其他成员收到 not_host。 */
+export const ListMembersCommandSchema = z.object({
+  type: z.literal('room.members'),
+  requestId,
+})
+
 /** 准备/取消准备：首版仅主持人可开局，准备状态用于提示。 */
 export const ReadyCommandSchema = z.object({
   type: z.literal('room.ready'),
@@ -329,6 +366,8 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
   TakeSeatCommandSchema,
   LeaveSeatCommandSchema,
   LeaveRoomCommandSchema,
+  KickPlayerCommandSchema,
+  ListMembersCommandSchema,
   ReadyCommandSchema,
   StartHandCommandSchema,
   ChatSendCommandSchema,

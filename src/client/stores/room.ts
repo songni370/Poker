@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { RoomCredentials } from '../../shared/protocol.ts'
+import type { RoomCredentials, RoomMemberPublic } from '../../shared/protocol.ts'
 
 /**
  * 房间与玩家身份。
@@ -14,6 +14,11 @@ export const useRoomStore = defineStore('room', () => {
   const credentials = ref<RoomCredentials | null>(null)
   /** 本地准备状态；第 3 阶段由服务端快照与 room.ready 命令接管。 */
   const ready = ref(false)
+  /**
+   * 房间成员名单（含旁观者）：只有主持人主动查询时服务端才下发，
+   * 平时为空数组，因此不构成第二份「牌局真相」。
+   */
+  const members = ref<RoomMemberPublic[]>([])
 
   function setCredentials(next: RoomCredentials): void {
     credentials.value = next
@@ -24,9 +29,15 @@ export const useRoomStore = defineStore('room', () => {
     ready.value = value
   }
 
+  /** 整体替换成员名单（服务端每次下发都是完整的一份）。 */
+  function setMembers(next: readonly RoomMemberPublic[]): void {
+    members.value = [...next]
+  }
+
   function clear(): void {
     credentials.value = null
     ready.value = false
+    members.value = []
   }
 
   const roomId = computed(() => credentials.value?.roomId ?? null)
@@ -43,8 +54,10 @@ export const useRoomStore = defineStore('room', () => {
   return {
     credentials,
     ready,
+    members,
     setCredentials,
     setReady,
+    setMembers,
     clear,
     roomId,
     nickname,

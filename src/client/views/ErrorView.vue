@@ -37,7 +37,7 @@ const COPY: Record<ErrorKind, ErrorCopy> = {
   kicked: {
     title: '你已被移出房间',
     what: '主持人把你请出了这张牌桌，当前身份无法再进入。',
-    how: '如果这是误会，请联系主持人重新邀请你。',
+    how: '如果这是误会，请联系主持人重新发一条邀请链接给你。',
   },
   version: {
     title: '版本不兼容',
@@ -84,14 +84,15 @@ const detail = computed(() => {
   return code && ERROR_MESSAGES[code] ? ERROR_MESSAGES[code] : ''
 })
 
-/** 仍持有该房间凭证时，允许原地重试一次。 */
+/**
+ * 仍持有该房间凭证时，允许原地重试一次。
+ * 「被移出」不在其中：那时凭证已经被服务端作废并就地清掉，
+ * 用旧身份再进去只会被再拒一次，不如直接请主持人重发邀请链接。
+ */
 const retryTarget = computed(() => {
   const id = room.roomId ?? (typeof route.query.roomId === 'string' ? route.query.roomId : null)
   if (!id) return null
-  if (kind.value === 'full' || kind.value === 'kicked') {
-    return { name: 'table', params: { roomId: id } }
-  }
-  return null
+  return kind.value === 'full' ? { name: 'table', params: { roomId: id } } : null
 })
 
 async function goLobby(): Promise<void> {

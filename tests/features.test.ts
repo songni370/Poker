@@ -574,3 +574,217 @@ test('掉线超过宽限期自动释放座位；宽限期内重连则保留', as
   assert.equal(again.lastState()?.seats[1]?.playerId, guest.playerId, '宽限期内重连应保留座位')
   a.close()
 })
+
+/* ───────────── 主持人移除玩家（room.kick） ───────────── */
+
+/**
+ * 让当前行动者按「能过牌就过牌、否则弃牌」把这一手推到结束。
+ * 用于「kick 掉一名玩家后牌局还得能正常打完」这类断言：
+ * 我们关心的是座位释放时机，不是具体牌型。
+ */
+async function playHandToSettle(clients: Map<string, TestClient>, observer: TestClient, timeoutMs = 6000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const state = observer.lastState()
+    if (!state || !state.handId || state.phase === 'settlement') return
+    const client = state.actingPlayerId ? clients.get(state.actingPlayerId) : undefined
+    const self = client?.lastSelf()
+    if (!client || !self || self.legalActions.length === 0) {
+      await delay(20)
+      continue
+    }
+    const chosen =
+      self.legalActions.find((action) => action.action === 'check') ?? self.legalActions.find((action) => action.action === 'fold')
+    if (!chosen) return
+    client.send({
+      type: 'game.action',
+      requestId: rid(),
+      handId: state.handId,
+      expectedVersion: state.version,
+      action: chosen.action,
+    })
+    await delay(40)
+  }
+}
+
+test('主持人移除玩家：非主持人被拒，被移除者收到 unauthorized，座位释放、其他人看到 player_left', async (t) => {
+  const server = await startTestServer()
+  t.after(server.stop)
+
+  const host = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '甲', maxSeats: 3 })).data
+  const guest = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '乙' })).data
+
+  const a = new TestClient(server.wsUrl)
+  const b = new TestClient(server.wsUrl)
+  t.after(() => {
+    a.close()
+    b.close()
+  })
+  await Promise.all([a.open(), b.open()])
+  a.send(joinCommand(host))
+  await a.waitFor((message) => message.type === 'room.snapshot')
+  b.send(joinCommand(guest))
+  await b.waitFor((message) => message.type === 'room.snapshot')
+  await takeSeat(a, 0)
+  await takeSeat(b, 1)
+
+  // 1) 非主持人：即便目标是真实存在的玩家也必须被拒
+  b.send({ type: 'room.kick', requestId: rid(), playerId: host.playerId })
+  const notHost = await b.waitFor((message) => message.type === 'room.error')
+  assert.ok(notHost.type === 'room.error')
+  assert.equal(notHost.error?.code, 'not_host', '只有主持人可以移除玩家')
+  assert.equal(a.lastState()!.seats[0]!.playerId, host.playerId, '被拒绝时不应改变任何状态')
+
+  // 2) 主持人移除自己：引导去用「退出房间」
+  a.send({ type: 'room.kick', requestId: rid(), playerId: host.playerId })
+  const selfKick = await a.waitFor((message) => message.type === 'room.error')
+  assert.ok(selfKick.type === 'room.error')
+  assert.equal(selfKick.error?.code, 'bad_request')
+  assert.match(selfKick.error?.message ?? '', /退出房间/, '提示里要指出正确的做法')
+
+  // 3) 目标不在房间里：同样是 bad_request，而不是静默成功
+  a.send({ type: 'room.kick', requestId: rid(), playerId: 'not-a-member' })
+  const ghost = await a.waitFor((message) => message.type === 'room.error' && message.error?.code === 'bad_request')
+  assert.ok(ghost.type === 'room.error')
+
+  // 4) 正常移除：被移除者定向收到 unauthorized，其他人收到 player_left，座位释放
+  const kickedFrom = b.messages.length
+  a.send({ type: 'room.kick', requestId: rid(), playerId: guest.playerId })
+
+  const kicked = await b.waitFor(
+    (message) => message.type === 'room.error' && message.error?.code === 'unauthorized',
+    5000,
+    kickedFrom,
+  )
+  assert.ok(kicked.type === 'room.error')
+  assert.match(kicked.error?.message ?? '', /移出房间/, '要说明这是被主持人移除，而不是凭证失效')
+
+  const left = await a.waitFor(
+    (message) =>
+      message.type === 'room.player_left' &&
+      message.state.seats[1] === null &&
+      (message.notice ?? '').includes('移出房间'),
+  )
+  assert.ok(left.type === 'room.player_left')
+  assert.match(left.notice ?? '', /乙 已被主持人移出房间/, '系统提示要写明是谁被移除')
+  assert.equal(a.lastState()!.seats[1], null, '座位应立刻释放（没有手牌在跑）')
+
+  // 系统日志同步进聊天流（房间日志可回溯）
+  const log = await a.waitFor(
+    (message) => message.type === 'chat.message' && message.message.kind === 'system' && /移出房间/.test(message.message.text),
+  )
+  assert.ok(log.type === 'chat.message')
+
+  // 5) 被移除者已经不在房间里：按原凭证重连只会被拒绝
+  const b2 = new TestClient(server.wsUrl)
+  t.after(() => b2.close())
+  await b2.open()
+  b2.send(joinCommand(guest))
+  const rejected = await b2.waitFor((message) => message.type === 'room.error')
+  assert.ok(rejected.type === 'room.error')
+  assert.equal(rejected.error?.code, 'unauthorized', '被移除后的凭证不能再进来')
+
+  // 6) 释放出来的座位别人可以坐
+  const late = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '丙' })).data
+  const c = new TestClient(server.wsUrl)
+  t.after(() => c.close())
+  await c.open()
+  c.send(joinCommand(late))
+  await c.waitFor((message) => message.type === 'room.snapshot')
+  await takeSeat(c, 1)
+  assert.equal(c.lastState()!.seats[1]!.playerId, late.playerId, '释放的座位应能被新玩家坐上')
+})
+
+test('主持人移除玩家：手牌进行中先弃牌，座位等本手结算后才真正空出', async (t) => {
+  const server = await startTestServer()
+  t.after(server.stop)
+
+  const host = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '甲', maxSeats: 3 })).data
+  const guest = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '乙' })).data
+  const third = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '丙' })).data
+
+  const a = new TestClient(server.wsUrl)
+  const b = new TestClient(server.wsUrl)
+  const c = new TestClient(server.wsUrl)
+  const d = new TestClient(server.wsUrl)
+  t.after(() => {
+    a.close()
+    b.close()
+    c.close()
+    d.close()
+  })
+  await Promise.all([a.open(), b.open(), c.open(), d.open()])
+  a.send(joinCommand(host))
+  await a.waitFor((message) => message.type === 'room.snapshot')
+  b.send(joinCommand(guest))
+  await b.waitFor((message) => message.type === 'room.snapshot')
+  c.send(joinCommand(third))
+  await c.waitFor((message) => message.type === 'room.snapshot')
+  await takeSeat(a, 0)
+  await takeSeat(b, 1)
+  await takeSeat(c, 2)
+
+  // 丁旁观：专门用来验证「座位什么时候才真的能坐」
+  const watcher = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '丁' })).data
+  d.send(joinCommand(watcher))
+  await d.waitFor((message) => message.type === 'room.snapshot')
+
+  a.send({ type: 'game.start', requestId: rid() })
+  await a.waitFor((message) => message.type === 'hand.started')
+  await b.waitFor((message) => message.type === 'hand.started')
+  await c.waitFor((message) => message.type === 'hand.started')
+
+  // 本手进行中移除乙：他自动弃牌，但三家还剩两家在打，本手不会立刻结束。
+  // 筹码还在池里，座位必须先挂起（等结算），否则筹码会凭空消失。
+  a.send({ type: 'room.kick', requestId: rid(), playerId: guest.playerId })
+  const held = await a.waitFor(
+    (message) =>
+      message.type !== 'room.error' &&
+      'state' in message &&
+      message.state.handId !== null &&
+      message.state.seats[1]?.playerId === guest.playerId &&
+      message.state.seats[1]?.away === true &&
+      message.state.seats[1]?.folded === true,
+  )
+  // 用常量把类型收敛成 ServerEvent：断言函数不会改变 TS 对联合类型的收窄。
+  assert.ok(held.type !== 'room.error' && held.type !== 'pong' && held.type !== 'chat.message')
+  const heldSeat = held.state.seats[1]
+  assert.equal(heldSeat?.playerId, guest.playerId, '本手没打完前座位还在他名下')
+  assert.equal(heldSeat?.away, true, '被移除后应立刻标为离座（并自动弃牌）')
+  assert.equal(held.state.phase, 'preflop', '三家还剩两家在打，本手不该被提前结束')
+
+  // 这时候座位对新玩家来说仍然不可用
+  d.send({ type: 'seat.take', requestId: rid(), seat: 1 })
+  const occupied = await d.waitFor((message) => message.type === 'room.error')
+  assert.ok(occupied.type === 'room.error')
+  assert.equal(occupied.error?.code, 'seat_taken', '本手结算前座位不能易主')
+  assert.equal(d.lastSelf()!.seat, null)
+
+  // 剩下两人把这一手打完：结算时才真正移除座位
+  const settleFrom = d.messages.length
+  await playHandToSettle(
+    new Map([
+      [host.playerId, a],
+      [third.playerId, c],
+    ]),
+    a,
+  )
+  const settled = await d.waitFor((message) => message.type === 'hand.settled', 6000, settleFrom)
+  assert.ok(settled.type === 'hand.settled')
+  assert.equal(settled.state.seats[1], null, '本手结算后座位才真正空出')
+
+  // 被移除者的那条系统日志没有丢（它在本手结算前就发出了，属于房间日志的一部分）
+  assert.ok(
+    d.messages.some(
+      (message) =>
+        message.type === 'chat.message' &&
+        message.message.kind === 'system' &&
+        /乙 已被主持人移出房间/.test(message.message.text),
+    ),
+    '被移除的日志应进入聊天流',
+  )
+
+  // 座位空出来了，观战者可以坐下（本手已结束，下一手才参与）
+  await takeSeat(d, 1)
+  assert.equal(d.lastState()!.seats[1]!.playerId, watcher.playerId, '结算后座位应被释放给新玩家')
+})
