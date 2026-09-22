@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { EngineError, HoldemTable, cryptoRng, type TableSnapshot } from '../engine/index.ts'
-import { TABLE_RULES, normalizeBuyIn, minBuyInFor } from '../shared/poker.ts'
+import { TABLE_RULES, normalizeBuyIn } from '../shared/poker.ts'
 import {
   CHAT_HISTORY_LIMIT,
   DEFAULT_MAX_ROOMS,
@@ -85,8 +85,10 @@ export interface RoomSnapshot {
   smallBlind: number
   bigBlind: number
   startingStack: number
-  /** 房主自定义的买入上限（老快照没有该字段时回落到 startingStack）。 */
+  /** 房主设定的买入上限（老快照没有该字段时回落到 startingStack）。 */
   buyInMax: number
+  /** 房主设定的初始筹码 = 上桌最低买入（老快照没有该字段时回落到 2000 与买入上限的较小值）。 */
+  minBuyIn: number
   turnSeconds: number
   status: RoomStatus
   version: number
@@ -114,6 +116,7 @@ interface RoomInit {
   startingStack: number
   turnSeconds: number
   buyInMax?: number
+  minBuyIn?: number
 }
 
 /** 单个房间的运行时：内存权威状态 + 每房串行命令队列 + 行动计时器。 */
@@ -126,6 +129,8 @@ export class RoomRuntime {
   readonly smallBlind: number
   readonly bigBlind: number
   readonly startingStack: number
+  /** 上桌最低买入（房主设定的初始筹码）。 */
+  readonly minBuyIn: number
   readonly turnSeconds: number
   /** 房主自定义的买入上限；买入下限 = 10 个大盲，步进 = 小盲。 */
   readonly buyInMax: number
@@ -164,6 +169,13 @@ export class RoomRuntime {
     this.startingStack = init.startingStack
     this.turnSeconds = init.turnSeconds
     this.buyInMax = init.buyInMax ?? init.startingStack
+    /*
+     * 初始筹码（上桌最低买入）：
+     *   - 显式传入就用传入值（创建房间时已经收敛过，不能再夹一次——否则「上限 1000、初始 200」
+     *     会被夹成 1000，玩家只剩一种买入额可选，实测踩过）；
+     *   - 缺失（老快照/老房间）才回落到「2000 与买入上限的较小值」。
+     */
+    this.minBuyIn = init.minBuyIn ?? Math.min(TABLE_RULES.startingStack, this.buyInMax)
     this.table = new HoldemTable({
       smallBlind: init.smallBlind,
       bigBlind: init.bigBlind,
@@ -184,6 +196,7 @@ export class RoomRuntime {
       bigBlind: this.bigBlind,
       startingStack: this.startingStack,
       buyInMax: this.buyInMax,
+      minBuyIn: this.minBuyIn,
       turnSeconds: this.turnSeconds,
       status: this.status,
       version: this.version,
@@ -217,6 +230,7 @@ export class RoomRuntime {
       bigBlind: snapshot.bigBlind,
       startingStack: snapshot.startingStack,
       buyInMax: snapshot.buyInMax ?? snapshot.startingStack,
+      minBuyIn: snapshot.minBuyIn ?? TABLE_RULES.startingStack,
       turnSeconds: snapshot.turnSeconds,
     })
     for (const entry of snapshot.members) {
@@ -383,7 +397,16 @@ export class RoomManager {
     return { restored, discarded }
   }
 
-  createRoom(input: { nickname: string; roomName?: string; maxSeats: number; buyInMax?: number }): RoomCredentials {
+  createRoom(input: {
+    nickname: string
+    roomName?: string
+    /** 已忽略：产品上固定 9 人桌（保留参数只为兼容旧客户端与测试）。 */
+    maxSeats?: number
+    /** 初始筹码 = 上桌最低买入（默认 2000）。 */
+    minBuyIn?: number
+    /** 买入上限（默认 5000）。 */
+    buyInMax?: number
+  }): RoomCredentials {
     if (this.rooms.size >= this.maxRooms) {
       throw new CommandError(
         'room_full',
@@ -393,18 +416,33 @@ export class RoomManager {
     const roomId = newRoomId()
     const playerId = newPlayerId()
     const token = newReconnectToken()
+    const normalizedMax = normalizeBuyIn(
+      input.buyInMax ?? TABLE_RULES.maxBuyInDefault,
+      TABLE_RULES.minBuyInFloor,
+      TABLE_RULES.maxBuyInLimit,
+      TABLE_RULES.smallBlind,
+    )
     const room = new RoomRuntime({
       id: roomId,
       name: input.roomName?.trim() || `${input.nickname} 的牌局`,
       hostPlayerId: playerId,
-      maxSeats: input.maxSeats,
+      // 固定 9 人桌：大厅不再让房主选座位数，服务端也只认这一个值。
+      maxSeats: TABLE_RULES.maxSeats,
       smallBlind: TABLE_RULES.smallBlind,
       bigBlind: TABLE_RULES.bigBlind,
       startingStack: TABLE_RULES.startingStack,
-      buyInMax: normalizeBuyIn(
-        input.buyInMax ?? TABLE_RULES.startingStack,
-        TABLE_RULES.bigBlind,
-        TABLE_RULES.maxBuyInLimit,
+      buyInMax: normalizedMax,
+      /*
+       * 初始筹码（上桌最低买入）：
+       *   - 房主没填 → 取「2000 与买入上限的较小值」：上限只有 1000 时最低买入就是 1000
+       *     （否则会出现买入下限 > 上限的矛盾区间）。
+       *   - 房主填了 → 收敛到 [允许下限, 买入上限] 内。
+       */
+      minBuyIn: normalizeBuyIn(
+        // 没填就取「2000 与买入上限的较小值」：上限本来就比 2000 低时，最低买入跟着上限走。
+        input.minBuyIn ?? Math.min(TABLE_RULES.startingStack, normalizedMax),
+        TABLE_RULES.minBuyInFloor,
+        normalizedMax,
         TABLE_RULES.smallBlind,
       ),
       turnSeconds: TABLE_RULES.turnSeconds,
@@ -433,6 +471,7 @@ export class RoomManager {
         bigBlind: room.bigBlind,
         startingStack: room.startingStack,
         buyInMax: room.buyInMax,
+        minBuyIn: room.minBuyIn,
         maxSeats: room.maxSeats,
         turnSeconds: room.turnSeconds,
       })
@@ -659,9 +698,10 @@ export class RoomManager {
           } else if (!room.table.isSeatAvailable(command.seat)) {
             throw new CommandError('seat_taken', '这个座位已经有人了')
           }
+          // 买入区间 = 房主设定的「初始筹码 ~ 买入上限」，缺省买入额取上限（一次带够）。
           const buyIn = normalizeBuyIn(
             command.buyIn ?? room.buyInMax,
-            room.bigBlind,
+            room.minBuyIn,
             room.buyInMax,
             room.smallBlind,
           )
@@ -1194,7 +1234,7 @@ export class RoomManager {
       smallBlind: room.smallBlind,
       bigBlind: room.bigBlind,
       startingStack: room.startingStack,
-      buyInMin: minBuyInFor(room.bigBlind),
+      buyInMin: room.minBuyIn,
       buyInMax: room.buyInMax,
       buyInStep: room.smallBlind,
       maxSeats: room.maxSeats,

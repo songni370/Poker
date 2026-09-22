@@ -8,6 +8,7 @@ import {
   openDrawerSection,
   playUntilSettled,
   startHand,
+  takeAnyFreeSeat,
   takeSeat,
   watchErrors,
 } from './room-helpers.ts'
@@ -29,7 +30,7 @@ test('聊天：房主发言对手能看到，刷新后仍能看到历史，未�
   const guest = await guestContext.newPage()
   const errors = [...watchErrors(host), ...watchErrors(guest)]
 
-  const roomId = await createRoom(host, `房主${Date.now() % 1000}`, undefined, { maxSeats: 2 })
+  const roomId = await createRoom(host, `房主${Date.now() % 1000}`)
   const guestName = `客人${Date.now() % 1000}`
   await joinRoomByLink(guest, roomId, guestName)
   await takeSeat(host, 1)
@@ -109,7 +110,7 @@ test('聊天分组：同一个人连续发言只显示一次昵称，@ 提醒另
 
   const hostName = `分组${String(Date.now() % 1000)}`
   const guestName = `听众${String(Date.now() % 1000)}`
-  const roomId = await createRoom(host, hostName, undefined, { maxSeats: 2 })
+  const roomId = await createRoom(host, hostName)
   await joinRoomByLink(guest, roomId, guestName)
   await takeSeat(host, 1)
   await takeSeat(guest, 2)
@@ -174,11 +175,11 @@ test('观战：座位满仍可进入观战，看不到底牌也没有操作区�
   const watcher = await watcherContext.newPage()
   const errors = [...watchErrors(host), ...watchErrors(guest), ...watchErrors(watcher)]
 
-  const roomId = await createRoom(host, `房主${Date.now() % 1000}`, undefined, { maxSeats: 2 })
+  // 固定 9 人桌（大厅不再选座位数）：这里只坐两人，第三人以观战身份进桌
+  const roomId = await createRoom(host, `房主${Date.now() % 1000}`)
   await joinRoomByLink(guest, roomId, `客人${Date.now() % 1000}`)
   await takeSeat(host, 1)
   await takeSeat(guest, 2)
-  // 第三个人：座位已满 → 以观战身份进桌，而不是报错
   await joinRoomByLink(watcher, roomId, `观战${Date.now() % 1000}`)
   await startHand(host)
 
@@ -199,8 +200,8 @@ test('观战：座位满仍可进入观战，看不到底牌也没有操作区�
   // 别人也要能看出来这个座位「人走了、座位还在」：桌面上显示「已离座」且虚线描边
   await expect(host.locator('.seat.is-away')).toHaveCount(1)
   await expect(host.locator('.seat.is-away')).toContainText('已离座')
-  // 座位仍占着：观战者没有空位可选
-  await expect(watcher.locator('.seat-empty')).toHaveCount(0)
+  // 座位仍占着：那个座位不会被当成空位（9 人桌剩下的空位照常可点）
+  await expect(watcher.locator('.seat-empty')).toHaveCount(7)
 
   // 客人「坐回」：筹码照旧，直接回到座位（离座弃牌后本手已结算，先关掉结算叠层）
   await dismissResult(guest)
@@ -209,17 +210,19 @@ test('观战：座位满仍可进入观战，看不到底牌也没有操作区�
 
   // 只有「退出房间」才真正释放座位 → 观战者这时才能落座
   await exitRoom(guest)
-  // 乙离座弃牌时本手已结算，观战者那边也会弹结算叠层：模态遮罩会挡住入座按钮
+  // 乙离座弃牌时本手已结算，观战者那边也会弹结算叠层：模态遮罩会挡住桌面上的空位
   await dismissResult(watcher)
-  await expect(watcher.getByRole('group', { name: '选择座位' })).toBeVisible({ timeout: 10_000 })
-  await watcher.screenshot({ path: 'artifacts/e2e/11-spectator-seat-picker.png' })
+  /*
+   * 第 3 项需求：底部不再有「选择座位」面板，落座入口只有桌面上的空位
+   *（.seat-empty 自带座位号与「入座」字样）。这里同时把「没有第二套选座 UI」钉住。
+   */
+  await expect(watcher.locator('.spectator-seat-picker')).toHaveCount(0)
+  await expect(watcher.locator('.seat-picker')).toHaveCount(0)
+  await expect(watcher.locator('.table .seat-empty')).toHaveCount(8, { timeout: 10_000 })
+  await watcher.screenshot({ path: 'artifacts/e2e/11-spectator-empty-seat.png' })
 
-  const seatButton = watcher.getByRole('button', { name: '入座' })
-  await expect(seatButton).toBeEnabled({ timeout: 10_000 })
-  await seatButton.click()
-  const buyIn = watcher.locator('.p-dialog')
-  await expect(buyIn).toBeVisible()
-  await buyIn.getByRole('button', { name: '确认买入' }).click()
+  // 点桌面空位（客人刚腾出来的 2 号位）→ 买入确认 → 落座
+  await takeSeat(watcher, 2)
   await expect(watcher.getByText('观战中')).toBeHidden({ timeout: 10_000 })
   await expect(watcher.locator('.hero-cards')).toBeVisible()
 
@@ -236,7 +239,7 @@ test('中等宽度顶栏收纳：只留「更多」与「退出」，菜单里�
   const guest = await guestContext.newPage()
   const errors = [...watchErrors(host), ...watchErrors(guest)]
 
-  const roomId = await createRoom(host, `收纳${String(Date.now() % 1000)}`, undefined, { maxSeats: 2 })
+  const roomId = await createRoom(host, `收纳${String(Date.now() % 1000)}`)
   await joinRoomByLink(guest, roomId, `陪练${String(Date.now() % 1000)}`)
   await takeSeat(host, 1)
   await takeSeat(guest, 2)
@@ -282,14 +285,15 @@ test('移除玩家：房主把客人移出房间，客人跳到错误页，释�
   const watcher = await watcherContext.newPage()
   const errors = [...watchErrors(host), ...watchErrors(guest), ...watchErrors(watcher)]
 
-  const roomId = await createRoom(host, `房主${Date.now() % 1000}`, undefined, { maxSeats: 3 })
+  const roomId = await createRoom(host, `房主${Date.now() % 1000}`)
   const guestName = `客人${Date.now() % 1000}`
   await joinRoomByLink(guest, roomId, guestName)
   await takeSeat(host, 1)
   await takeSeat(guest, 2)
-  // 第三个人是旁观者：由他来证明「座位真的空出来了」（席位空位按钮只对旁观者渲染）
+  // 第三个人是旁观者：由他来证明「座位真的空出来了」（桌面空位只对旁观者渲染）。
+  // 固定 9 人桌：坐了 2 人 → 还剩 7 个空位。
   await joinRoomByLink(watcher, roomId, `观战${Date.now() % 1000}`)
-  await expect(watcher.locator('.seat-empty')).toHaveCount(1)
+  await expect(watcher.locator('.seat-empty')).toHaveCount(7)
 
   // 客人看不到「移除玩家」入口：这一项只属于主持人。
   // 窄屏下「更多」按钮本身会被收进媒体查询里，所以两种情况分别断言。
@@ -362,7 +366,7 @@ test('移除玩家：窄屏顶栏收进「更多」菜单时，主持人仍能�
   const guest = await guestContext.newPage()
   const errors = [...watchErrors(host), ...watchErrors(guest)]
 
-  const roomId = await createRoom(host, `窄屏${Date.now() % 1000}`, undefined, { maxSeats: 3 })
+  const roomId = await createRoom(host, `窄屏${Date.now() % 1000}`)
   const guestName = `陪练${Date.now() % 1000}`
   await joinRoomByLink(guest, roomId, guestName)
   await takeSeat(host, 1)
@@ -390,11 +394,13 @@ test('移除玩家：窄屏顶栏收进「更多」菜单时，主持人仍能�
 })
 
 /**
- * 观战选座在窄屏必须保持「一排」：9 人桌最多 8 个空位，换行会把底部区域撑成两行，
- * 牌桌被挤掉一截。这里验证 390×844 竖屏下 7 个空位按钮同排（可横向滚动）、
- * 不产生横向页面溢出，并且点空位 → 确认买入 → 真正落座。
+ * 桌面空位落座（第 3 项需求改版后）：
+ *   底部观战面板不再有「选择座位」网格与「入座」按钮——座位号与「入座」都画在桌面的空位上，
+ *   两处并存只会让人不知道该点哪个。这里在 390×844 竖屏下验证：
+ *   ① 底部没有选座 UI；② 桌面上 7 个空位各自带座位号与可访问名称、触控尺寸达标、不横向溢出；
+ *   ③ 点桌面第 5 个空位 → 确认买入 → 真正落座。
  */
-test('观战选座：9 人桌空位在窄屏仍是一排，点空位买入即可落座', async ({ browser }) => {
+test('桌面空位落座：窄屏点桌面空位买入即可落座，底部不再有第二套选座 UI', async ({ browser }) => {
   const hostContext = await browser.newContext({ viewport: { width: 1280, height: 720 } })
   const guestContext = await browser.newContext({ viewport: { width: 1280, height: 720 } })
   const watcherContext = await browser.newContext({ viewport: { width: 390, height: 844 } })
@@ -403,53 +409,51 @@ test('观战选座：9 人桌空位在窄屏仍是一排，点空位买入即可
   const watcher = await watcherContext.newPage()
   const errors = [...watchErrors(host), ...watchErrors(guest), ...watchErrors(watcher)]
 
-  const roomId = await createRoom(host, `选座${String(Date.now() % 1000)}`, undefined, { maxSeats: 9 })
+  // 不再传 maxSeats：产品固定 9 人桌（大厅也没有座位数选项了）
+  const roomId = await createRoom(host, `选座${String(Date.now() % 1000)}`)
   await joinRoomByLink(guest, roomId, `陪练${String(Date.now() % 1000)}`)
   await takeSeat(host, 1)
   await takeSeat(guest, 2)
   // 第三个人以观战身份进来：9 人桌还剩 7 个空位
   await joinRoomByLink(watcher, roomId, `观战${String(Date.now() % 1000)}`)
 
-  const picker = watcher.getByRole('group', { name: '选择座位' })
-  await expect(picker).toBeVisible()
-  const buttons = picker.getByRole('button')
-  await expect(buttons).toHaveCount(7)
+  /* ① 底部观战面板：只有状态、已入座人数与退出按钮，没有选座网格。 */
+  await expect(watcher.locator('.spectator-seat-picker')).toHaveCount(0)
+  await expect(watcher.locator('.seat-picker')).toHaveCount(0)
+  await expect(watcher.locator('.spectator-state')).toContainText('观战中')
+  await expect(watcher.locator('.spectator-seats')).toContainText('2/9')
 
-  const boxes = await picker.locator('.p-button').evaluateAll((nodes) =>
+  /* ② 座位号与「入座」字样画在桌面的每个空位上：数量、触控尺寸、不横向溢出。 */
+  const emptySeats = watcher.locator('.table .seat-empty')
+  await expect(emptySeats).toHaveCount(7)
+  const boxes = await emptySeats.evaluateAll((nodes) =>
     nodes.map((node) => {
       const rect = node.getBoundingClientRect()
-      return { top: Math.round(rect.top), height: Math.round(rect.height), width: Math.round(rect.width) }
+      const label = (node.textContent ?? '').replace(/\s+/g, '')
+      return {
+        label,
+        aria: node.getAttribute('aria-label') ?? '',
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      }
     }),
   )
-  // 同排：所有按钮的纵向位置一致（换行会让 top 出现第二个值）
-  expect(new Set(boxes.map((box) => box.top)).size, `座位按钮应排在同一行：${JSON.stringify(boxes)}`).toBe(1)
-  boxes.forEach((box) => {
+  // 每个空位都带得走的座位号：视觉文案「N入座」+ aria-label「坐到 N 号座位」
+  boxes.forEach((box, index) => {
+    expect(box.label, `第 ${String(index + 1)} 个空位应显示座位号`).toMatch(/\d+入座/)
+    expect(box.aria, `第 ${String(index + 1)} 个空位应有可访问名称`).toMatch(/坐到 \d+ 号座位/)
     expect(box.width).toBeGreaterThanOrEqual(40)
     expect(box.height).toBeGreaterThanOrEqual(32)
   })
+  const overflowX = await watcher.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  )
+  expect(overflowX, '窄屏不应横向溢出').toBe(0)
+  await watcher.screenshot({ path: 'artifacts/e2e/15-spectator-empty-seats-narrow.png' })
 
-  const layout = await watcher.evaluate(() => {
-    const list = document.querySelector('.seat-picker')
-    const seatRow = document.querySelector('.spectator-seat-picker')
-    return {
-      wrap: list ? getComputedStyle(list).flexWrap : '',
-      scrollable: list ? list.scrollWidth > list.clientWidth : false,
-      overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-      rowHeight: Math.round(seatRow?.getBoundingClientRect().height ?? 0),
-    }
-  })
-  expect(layout.wrap).toBe('nowrap')
-  expect(layout.scrollable).toBe(true)
-  expect(layout.overflowX).toBe(0)
-  expect(layout.rowHeight).toBeLessThan(64)
-  await watcher.screenshot({ path: 'artifacts/e2e/15-spectator-seat-picker-narrow.png' })
-
-  // 点空位 → 买入确认 → 落座（第 5 项需求的完整闭环）
-  await buttons.nth(4).click()
-  const buyIn = watcher.locator('.p-dialog')
-  await expect(buyIn).toBeVisible()
-  await expect(buyIn).toContainText('买入范围')
-  await buyIn.getByRole('button', { name: '确认买入' }).click()
+  /* ③ 点桌面第 5 个空位 → 买入确认 → 落座（新流程的完整闭环）。
+        takeAnyFreeSeat 内部已覆盖「弹窗出现 → 填/用默认金额 → 确认 → 落座」全流程。 */
+  await takeAnyFreeSeat(watcher, 4)
   await expect(watcher.getByText('观战中')).toBeHidden({ timeout: 10_000 })
   await expect(watcher.locator('.hero-cards')).toBeVisible()
   await watcher.screenshot({ path: 'artifacts/e2e/20-seated-by-picking-a-seat.png' })
@@ -484,7 +488,7 @@ test('界面改造：牌面无中央花色、座位角色槽位、底部当前�
   const errors = [...watchErrors(host), ...watchErrors(guest), ...watchErrors(third)]
 
   const stamp = String(Date.now() % 1000)
-  const roomId = await createRoom(host, `界面${stamp}`, '界面回归', { maxSeats: 6 })
+  const roomId = await createRoom(host, `界面${stamp}`, '界面回归')
   await joinRoomByLink(guest, roomId, `乙${stamp}`)
   await joinRoomByLink(third, roomId, `丙${stamp}`)
   await takeSeat(host, 1)

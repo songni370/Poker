@@ -16,7 +16,6 @@ import type {
   SeatPublic,
 } from '../../shared/protocol.ts'
 import type { ActionType, Card, HandCategory, Street } from '../../shared/poker.ts'
-import { minBuyInFor } from '../../shared/poker.ts'
 import { HAND_CATEGORY_NAMES, TABLE_RULES } from '../../shared/poker.ts'
 
 /* ────────────────────────────── 基础工具 ────────────────────────────── */
@@ -135,8 +134,8 @@ function buildState(init: StateInit): GameStatePublic {
     smallBlind: TABLE_RULES.smallBlind,
     bigBlind: TABLE_RULES.bigBlind,
     startingStack: TABLE_RULES.startingStack,
-    buyInMin: minBuyInFor(TABLE_RULES.bigBlind),
-    buyInMax: TABLE_RULES.startingStack,
+    buyInMin: TABLE_RULES.startingStack,
+    buyInMax: TABLE_RULES.maxBuyInDefault,
     buyInStep: TABLE_RULES.smallBlind,
     maxSeats: init.maxSeats,
     turnSeconds: TABLE_RULES.turnSeconds,
@@ -889,9 +888,9 @@ export const MOCK_ROOM_INFO: RoomInfoResponse = {
   roomName: '周五夜局',
   status: 'waiting',
   seated: 2,
-  maxSeats: 6,
-  buyInMin: minBuyInFor(TABLE_RULES.bigBlind),
-  buyInMax: TABLE_RULES.startingStack,
+  maxSeats: TABLE_RULES.maxSeats,
+  buyInMin: TABLE_RULES.startingStack,
+  buyInMax: TABLE_RULES.maxBuyInDefault,
   buyInStep: TABLE_RULES.smallBlind,
   smallBlind: TABLE_RULES.smallBlind,
   bigBlind: TABLE_RULES.bigBlind,

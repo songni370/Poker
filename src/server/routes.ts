@@ -1,4 +1,3 @@
-import { minBuyInFor } from '../shared/poker.ts'
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import {
   CreateRoomRequestSchema,
@@ -99,7 +98,7 @@ export async function registerHttpRoutes(
       status: room.status,
       seated: room.seatedCount(),
       maxSeats: room.maxSeats,
-      buyInMin: minBuyInFor(room.bigBlind),
+      buyInMin: room.minBuyIn,
       buyInMax: room.buyInMax,
       buyInStep: room.smallBlind,
       smallBlind: room.smallBlind,

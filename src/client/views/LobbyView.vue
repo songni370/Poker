@@ -5,8 +5,7 @@ import Button from 'primevue/button'
 import InputNumber from 'primevue/inputnumber'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
-import Select from 'primevue/select'
-import { NICKNAME_MAX, ROOM_NAME_MAX, TABLE_RULES, minBuyInFor } from '../../shared/poker.ts'
+import { NICKNAME_MAX, ROOM_NAME_MAX, TABLE_RULES } from '../../shared/poker.ts'
 import { SessionError, connectRoom, createRoom as apiCreateRoom, joinRoom as apiJoinRoom } from '../net/session.ts'
 import { useRoomStore } from '../stores/room.ts'
 
@@ -41,28 +40,30 @@ const roomLimitReached = computed(() => Boolean(roomLimit.value && roomLimit.val
 const nickname = ref(room.nickname)
 const roomName = ref('')
 const joinCode = ref('')
-const maxSeats = ref(6)
-/** 房主自定义买入上限：买入下限固定为 10 个大盲，步进等于小盲（服务端同样校验）。 */
-const buyInMax = ref(TABLE_RULES.startingStack)
+/**
+ * 初始筹码 = 玩家上桌最低要买入多少（默认 2000）；买入上限 = 一次最多带多少上桌（默认 5000）。
+ * 座位数不再让房主选：本产品固定 9 人桌（服务端也只认 9）。
+ */
+const minBuyIn = ref(TABLE_RULES.startingStack)
+const buyInMax = ref(TABLE_RULES.maxBuyInDefault)
 const error = ref('')
 const busy = ref(false)
-
-const seatOptions = computed(() =>
-  Array.from({ length: TABLE_RULES.maxSeats - TABLE_RULES.minSeats + 1 }, (_, index) => {
-    const value = TABLE_RULES.minSeats + index
-    return { label: `${String(value)} 人桌`, value }
-  }),
-)
 
 function problem(): string | null {
   const name = nickname.value.trim()
   if (!name) return '请先填写昵称，其他玩家会看到这个名字。'
   if (name.length > NICKNAME_MAX) return `昵称最多 ${String(NICKNAME_MAX)} 个字符。`
   if (roomName.value.trim().length > ROOM_NAME_MAX) return `房间名最多 ${String(ROOM_NAME_MAX)} 个字符。`
-  const buyIn = Number(buyInMax.value)
-  if (!Number.isFinite(buyIn) || buyIn < minBuyInFor(TABLE_RULES.bigBlind) || buyIn > TABLE_RULES.maxBuyInLimit) {
-    return `买入上限需在 ${String(minBuyInFor(TABLE_RULES.bigBlind))}–${String(TABLE_RULES.maxBuyInLimit)} 之间。`
+  const min = Number(minBuyIn.value)
+  const max = Number(buyInMax.value)
+  const range = `${String(TABLE_RULES.minBuyInFloor)}–${String(TABLE_RULES.maxBuyInLimit)}`
+  if (!Number.isFinite(min) || min < TABLE_RULES.minBuyInFloor || min > TABLE_RULES.maxBuyInLimit) {
+    return `初始筹码需在 ${range} 之间。`
   }
+  if (!Number.isFinite(max) || max < TABLE_RULES.minBuyInFloor || max > TABLE_RULES.maxBuyInLimit) {
+    return `买入上限需在 ${range} 之间。`
+  }
+  if (max < min) return '买入上限不能低于初始筹码。'
   return null
 }
 
@@ -83,8 +84,8 @@ async function createRoom(): Promise<void> {
     const credentials = await apiCreateRoom({
       nickname: nickname.value.trim(),
       roomName: roomName.value.trim() || undefined,
-      maxSeats: maxSeats.value,
-      buyInMax: buyInMax.value,
+      minBuyIn: Number(minBuyIn.value),
+      buyInMax: Number(buyInMax.value),
     })
     room.setCredentials(credentials)
     connectRoom(credentials)
@@ -129,8 +130,9 @@ async function joinRoom(): Promise<void> {
         <p class="mark">私人牌局 · 邀请制</p>
         <h1>开一桌德州</h1>
         <p class="lede">
-          2–9 人、盲注 {{ TABLE_RULES.smallBlind }}/{{ TABLE_RULES.bigBlind }}、买入上限由主持人设定
-          （默认 {{ TABLE_RULES.startingStack }}）。筹码是虚拟分数，不可充值、不可兑换、不可转让。
+          {{ TABLE_RULES.maxSeats }} 人桌、盲注 {{ TABLE_RULES.smallBlind }}/{{ TABLE_RULES.bigBlind }}，
+          初始筹码与买入上限由主持人设定（默认 {{ TABLE_RULES.startingStack }} /
+          {{ TABLE_RULES.maxBuyInDefault }}）。筹码是虚拟分数，不可充值、不可兑换、不可转让。
         </p>
       </header>
 
@@ -166,14 +168,15 @@ async function joinRoom(): Promise<void> {
             />
           </label>
 
-          <label class="field" for="max-seats">
-            <span class="label">座位数</span>
-            <Select
-              v-model="maxSeats"
-              input-id="max-seats"
-              :options="seatOptions"
-              option-label="label"
-              option-value="value"
+          <label class="field" for="min-buy-in">
+            <span class="label">初始筹码</span>
+            <InputNumber
+              input-id="min-buy-in"
+              v-model="minBuyIn"
+              :min="TABLE_RULES.minBuyInFloor"
+              :max="TABLE_RULES.maxBuyInLimit"
+              :step="TABLE_RULES.smallBlind"
+              :use-grouping="false"
               fluid
             />
           </label>
@@ -183,7 +186,7 @@ async function joinRoom(): Promise<void> {
             <InputNumber
               input-id="buy-in-max"
               v-model="buyInMax"
-              :min="minBuyInFor(TABLE_RULES.bigBlind)"
+              :min="TABLE_RULES.minBuyInFloor"
               :max="TABLE_RULES.maxBuyInLimit"
               :step="TABLE_RULES.smallBlind"
               :use-grouping="false"
@@ -191,7 +194,7 @@ async function joinRoom(): Promise<void> {
             />
           </label>
           <p class="hint">
-            玩家落座时在 {{ minBuyInFor(TABLE_RULES.bigBlind) }}–{{ buyInMax || TABLE_RULES.startingStack }}
+            玩家落座时在 {{ minBuyIn || TABLE_RULES.startingStack }}–{{ buyInMax || TABLE_RULES.maxBuyInDefault }}
             之间选买入额（步进 {{ TABLE_RULES.smallBlind }} 筹码）。
           </p>
 

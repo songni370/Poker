@@ -12,6 +12,8 @@ export interface RoomRecord {
   startingStack: number
   /** 房主自定义的买入上限（老库为 NULL，调用方回落到 startingStack）。 */
   buyInMax?: number
+  /** 初始筹码（上桌最低买入）。老记录没有该列时为 null。 */
+  minBuyIn?: number
   maxSeats: number
   turnSeconds: number
 }
@@ -78,8 +80,8 @@ export class Repo {
     this.db
       .prepare(
         `INSERT INTO rooms (room_id, room_name, host_player_id, status, small_blind, big_blind,
-           starting_stack, buy_in_max, max_seats, turn_seconds, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           starting_stack, buy_in_max, min_buy_in, max_seats, turn_seconds, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         room.roomId,
@@ -90,6 +92,7 @@ export class Repo {
         room.bigBlind,
         room.startingStack,
         room.buyInMax ?? null,
+        room.minBuyIn ?? null,
         room.maxSeats,
         room.turnSeconds,
         now,

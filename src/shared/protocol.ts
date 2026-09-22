@@ -389,8 +389,22 @@ export const NicknameSchema = z
 export const CreateRoomRequestSchema = z.object({
   nickname: NicknameSchema,
   roomName: z.string().trim().max(ROOM_NAME_MAX).optional(),
-  maxSeats: z.number().int().min(TABLE_RULES.minSeats).max(TABLE_RULES.maxSeats).default(6),
-  /** 买入上限（房主自定义）：默认等于起始筹码；下限 10 个大盲，步进为小盲。 */
+  /**
+   * 座位数：产品上固定 9 人桌（大厅不再让房主选），这个字段保留只是为了兼容旧客户端与既有测试，
+   * 服务端一律收敛到 `TABLE_RULES.maxSeats`。
+   */
+  maxSeats: z.number().int().min(TABLE_RULES.minSeats).max(TABLE_RULES.maxSeats).optional(),
+  /**
+   * 初始筹码：玩家上桌**最低**要买入多少（默认 2000）。
+   * 步进为小盲，允许范围 minBuyInFloor–maxBuyInLimit。
+   */
+  minBuyIn: z
+    .number()
+    .int()
+    .min(TABLE_RULES.minBuyInFloor)
+    .max(TABLE_RULES.maxBuyInLimit)
+    .optional(),
+  /** 买入上限：一次最多带多少上桌（默认 5000），不得小于初始筹码。 */
   buyInMax: z
     .number()
     .int()

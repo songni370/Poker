@@ -432,9 +432,14 @@ test('落座买入：买入额按房主上限/下限/步进收敛，离座保留
   const server = await startTestServer()
   t.after(server.stop)
 
-  // 房主把买入上限定成 1000（下限仍是 10 个大盲 = 200，步进 = 小盲 10）
+  // 房主把初始筹码定成 200、买入上限定成 1000（步进 = 小盲 10）：
+  // 这一组就是「区间两端都由房主设定」的常规用例。
   const host = (
-    await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '甲', maxSeats: 3, buyInMax: 1000 })
+    await postJson<RoomCredentials>(`${server.base}/api/rooms`, {
+      nickname: '甲',
+      minBuyIn: 200,
+      buyInMax: 1000,
+    })
   ).data
   const guest = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '乙' })).data
 
@@ -451,7 +456,8 @@ test('落座买入：买入额按房主上限/下限/步进收敛，离座保留
   // 加入即旁观：没有座位，但能拿到本桌买入范围
   assert.equal(snapshot.self.seat, null, '加入后先是旁观者')
   assert.equal(snapshot.state.buyInMax, 1000, '房主自定义的买入上限应下发给客户端')
-  assert.equal(snapshot.state.buyInMin, 200, '买入下限 = 10 个大盲')
+  assert.equal(snapshot.state.buyInMin, 200, '房主设定的初始筹码应下发给客户端')
+  assert.equal(snapshot.state.maxSeats, 9, '产品固定 9 人桌（请求里的 maxSeats 只作兼容保留）')
   assert.equal(snapshot.state.buyInStep, 10, '买入步进 = 小盲')
 
   b.send(joinCommand(guest))

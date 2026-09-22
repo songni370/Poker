@@ -183,6 +183,7 @@ test('单进程重启：从 SQLite 快照恢复一致牌局，继续打完且不
   await clientB.waitFor((m) => m.type === 'room.snapshot')
   await takeSeat(clientA, 0)
   await takeSeat(clientB, 1)
+  const totalChips = clientA.lastState()!.seats.reduce((sum, seat) => sum + (seat ? seat.stack : 0), 0)
 
   clientA.send({ type: 'game.start', requestId: rid() })
   await clientA.waitFor((m) => m.type === 'hand.started')
@@ -280,7 +281,7 @@ test('单进程重启：从 SQLite 快照恢复一致牌局，继续打完且不
   }
   const settled = reconnectA.lastState()!
   assert.equal(settled.phase, 'settlement', '恢复后应能打完这一手')
-  assert.equal(settled.seats.reduce((sum, seat) => sum + (seat ? seat.stack + seat.committedHand : 0), 0), 4000)
+  assert.equal(settled.seats.reduce((sum, seat) => sum + (seat ? seat.stack + seat.committedHand : 0), 0), totalChips)
 
   // 重复结算为 0：同一 handId 只允许一条结算记录
   const rows = second.handle.db
@@ -332,7 +333,8 @@ test('重启恢复：从未开过手的等待房间也必须存活（无牌堆�
   const info = (await response.json()) as { roomName: string; seated: number; maxSeats: number }
   assert.equal(info.roomName, '等待中的房')
   assert.equal(info.seated, 2, '两名玩家都应还在座位上')
-  assert.equal(info.maxSeats, 3)
+  // 产品上固定 9 人桌：接口给的 maxSeats 一律是 9（请求里的 3 只作兼容保留）。
+  assert.equal(info.maxSeats, 9)
 
   // 恢复后仍能正常开局
   const reconnect = new TestClient(second.wsUrl)

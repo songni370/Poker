@@ -113,10 +113,16 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
 
     <div class="panel">
       <!--
-        面板左侧 = 牌局角色槽位（庄家 / 小盲 / 大盲）。
-        角色胶囊只是视觉，完整说法在座位 aria-label 的「庄家位 / 小盲 / 大盲」里；
-        没有角色时整块不渲染，左侧不留空位，昵称与筹码直接顶到面板内边距。
+        面板左侧 = 座位号 + 牌局角色槽位（庄家 / 小盲 / 大盲），都横排在一行里。
+        第 4 项需求：座位号从「昵称上方单独一行」搬到左侧同行——面板因此从两行收到一行，
+        牌桌上每个座位卡片矮 13px，小屏的公共牌区就多 13px。
+        两者都只是视觉，完整说法在座位 aria-label 里（「座位 3」「庄家位」…）；
+        没有角色时只留座位号，不会出现空槽位。
       -->
+      <span class="seat-no num" aria-hidden="true">{{ seat.seat + 1 }}</span>
+      <!-- 视觉分隔：座位号是徽标、昵称是文本，紧挨着会读成「3小明」。读屏不受影响（两者都在 aria-label 里）。 -->
+      <span class="seat-sep" aria-hidden="true">·</span>
+
       <span v-if="roleBadges.length > 0" class="roles" aria-hidden="true">
         <span v-for="badge in roleBadges" :key="badge.key" class="role-badge" :class="`role-badge--${badge.tone}`">
           {{ badge.label }}
@@ -285,7 +291,32 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
 }
 
 /*
- * 牌局角色槽位：面板最左侧的一列胶囊，是面板内唯一的「非本人信息」元素。
+ * 座位号：面板最左侧的小徽标（第 4 项需求）。
+ * 它与角色胶囊横排在同一行，面板因此只有一行高；数字用等宽字形，1 与 9 不会挤动版式。
+ */
+.seat-no {
+  flex: none;
+  min-width: 15px;
+  padding: 0 3px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  color: var(--muted);
+  font-size: 0.58rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* 座位号与昵称之间的间隔符：只是个视觉锚点，不参与无障碍。 */
+.seat-sep {
+  flex: none;
+  color: color-mix(in srgb, var(--muted) 60%, transparent);
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+/*
+ * 牌局角色槽位：座位号右侧的一列胶囊，是面板内唯一的「非本人信息」元素。
  * 双人桌同一座位可能同时是庄家与小盲（D + SB），所以是一组而不是一个；
  * 面板高度由昵称+筹码（约 33px）决定，两个胶囊横排约 13px，不会把面板撑高。
  */
@@ -405,6 +436,11 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
     padding: 0 2px;
     font-size: 0.5rem;
     line-height: 1.4;
+  }
+
+  /* 贴边座位只有 64px：间隔符让位给昵称。 */
+  .seat-sep {
+    display: none;
   }
 
   /*

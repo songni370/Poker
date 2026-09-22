@@ -708,25 +708,6 @@ function toggleSound(): void {
 const occupiedCount = computed(() => game.seats.filter(Boolean).length)
 const maxSeats = computed(() => game.state?.maxSeats ?? 0)
 
-/** 第一个空座位号；没有空位时为 null（入座按钮据此禁用）。 */
-const firstFreeSeat = computed<number | null>(() => {
-  const total = maxSeats.value
-  for (let index = 0; index < total; index += 1) {
-    if (!game.seats[index]) return index
-  }
-  return null
-})
-
-/** 所有空座位号（观战者可以自己挑，而不是只能坐第一个）。 */
-const freeSeats = computed(() => {
-  const seats: number[] = []
-  for (let index = 0; index < maxSeats.value; index += 1) {
-    if (!game.seats[index]) seats.push(index)
-  }
-  return seats
-})
-
-const freeSeatText = computed(() => freeSeats.value.map((seat) => `${String(seat + 1)} 号`).join('、'))
 
 /* 落座前先确认买入额：房主定上限，下限 10 个大盲，步进 = 小盲（服务端同样校验）。 */
 const buyInOpen = ref(false)
@@ -755,16 +736,6 @@ function confirmBuyIn(): void {
   announcement.value = `正在坐到 ${String(seat + 1)} 号座位，买入 ${String(amount)} 筹码。`
   buyInOpen.value = false
   buyInSeat.value = null
-}
-
-function takeSeatAt(seat: number): void {
-  openBuyIn(seat)
-}
-
-function takeFreeSeat(): void {
-  const seat = firstFreeSeat.value
-  if (seat === null) return
-  openBuyIn(seat)
 }
 
 /* ── 座位挑选（旁观者与离座者） ── */
@@ -1180,27 +1151,13 @@ onBeforeUnmount(() => onFatalRoomError(null))
         <p class="spectator-seats">
           <span class="muted">已入座</span>
           <b class="num">{{ occupiedCount }}/{{ maxSeats }}</b>
-          <span v-if="freeSeats.length > 0" class="muted">· 空位：{{ freeSeatText }}</span>
         </p>
 
-        <!-- 空位可选：观战者自己挑座位，而不是只能坐第一个。离座者只看自己的座位。 -->
-        <div v-if="freeSeats.length > 0 && !mySeatAway" class="spectator-seat-picker">
-          <span id="seat-picker-label" class="muted">选择座位</span>
-          <div class="seat-picker" role="group" aria-labelledby="seat-picker-label">
-            <Button
-              v-for="seat in freeSeats"
-              :key="seat"
-              size="small"
-              outlined
-              :aria-label="`坐到 ${String(seat + 1)} 号座位`"
-              :title="`坐到 ${String(seat + 1)} 号座位`"
-              @click="takeSeatAt(seat)"
-            >
-              <span class="num">{{ seat + 1 }}</span>
-            </Button>
-          </div>
-        </div>
-
+        <!--
+          第 3 项需求：底部不再重复展示「选择座位」。
+          座位号与「入座」按钮已经画在桌面的每个空位上（PokerTable 的 .seat-empty），
+          两处并存反而让人不知道点哪个；这里只留一句指路 + 坐回/退出。
+        -->
         <div class="spectator-actions">
           <Button
             v-if="mySeatAway"
@@ -1209,15 +1166,6 @@ onBeforeUnmount(() => onFatalRoomError(null))
           >
             <i class="pi pi-user-plus" aria-hidden="true" />
             <span>坐回 {{ (game.self.seat ?? 0) + 1 }} 号位</span>
-          </Button>
-          <Button
-            v-else
-            :disabled="firstFreeSeat === null"
-            :title="firstFreeSeat === null ? '座位已满，等有人离座' : `坐到 ${String(firstFreeSeat + 1)} 号座位`"
-            @click="takeFreeSeat"
-          >
-            <i class="pi pi-user-plus" aria-hidden="true" />
-            <span>{{ firstFreeSeat === null ? '入座' : `入座 ${firstFreeSeat + 1} 号位` }}</span>
           </Button>
           <Button outlined :title="'退出房间（释放座位）'" @click="exitRoomOpen = true">
             <i class="pi pi-times" aria-hidden="true" />
@@ -1228,8 +1176,9 @@ onBeforeUnmount(() => onFatalRoomError(null))
         <p v-if="mySeatAway" class="hint" role="status">
           座位为你保留着，点「坐回 {{ (game.self.seat ?? 0) + 1 }} 号位」就能接着玩。
         </p>
-        <p v-else-if="firstFreeSeat === null" class="hint" role="status">座位已满，等有人离座。</p>
-        <p v-else class="hint spectator-tip">入座后即可参与下一手牌；观战期间不下注、不行动。</p>
+        <p v-else class="hint spectator-tip">
+          点桌面上的空位（带座位号与「入座」）即可买入落座；入座后参与下一手牌，观战期间不下注、不行动。
+        </p>
       </section>
 
       <p v-else class="hint">正在载入你的座位信息…</p>
@@ -2367,39 +2316,6 @@ onBeforeUnmount(() => onFatalRoomError(null))
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-}
-
-/* 观战者选座：一排小号按钮。窄屏（9 人桌最多 8 个空位）改为横向滚动，
- * 不换行——换行会把底部区域撑高，把牌桌挤掉一截（紧凑标签的通用规则：宁可滚动不折行）。 */
-.spectator-seat-picker {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  min-width: 0;
-}
-
-.spectator-seat-picker > .muted {
-  flex: none;
-}
-
-.seat-picker {
-  display: flex;
-  flex: 1 1 auto;
-  flex-wrap: nowrap;
-  gap: 6px;
-  min-width: 0;
-  /* 滚动容器会裁掉溢出内容，这里留出内边距，键盘焦点环（outline-offset: 2px）不被切掉。 */
-  padding: 3px 3px 4px;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scrollbar-width: thin;
-}
-
-.seat-picker :deep(.p-button) {
-  /* 触控目标不参与收缩：宁可横向滚动，也不把按钮压到 40px 以下。 */
-  flex: 0 0 auto;
-  min-width: 40px;
-  padding-inline: 8px;
 }
 
 /* 移除玩家：一行一人，昵称与座位号在左、按钮在右；长昵称换行而不是把按钮挤出弹窗。 */

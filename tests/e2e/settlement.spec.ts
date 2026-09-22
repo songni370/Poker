@@ -31,7 +31,7 @@ test('结算叠层：一人刷新不会让全桌重弹，本人已确认过的�
   const a = await aCtx.newPage()
   const b = await bCtx.newPage()
 
-  const roomId = await createRoom(a, '刷新A', '刷新复现', { maxSeats: 2 })
+  const roomId = await createRoom(a, '刷新A', '刷新复现')
   await joinRoomByLink(b, roomId, '旁观B')
   await takeSeat(a, 1)
   await takeSeat(b, 2)

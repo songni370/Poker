@@ -63,7 +63,8 @@ test('两个独立会话打完一手：摊牌前不泄露对手底牌，结算�
   const hostErrors = watchErrors(host)
   const guestErrors = watchErrors(guest)
 
-  const roomId = await createRoom(host, `房主${Date.now() % 1000}`, '端到端验收房')
+  // 买入区间由房主设定（默认 2000–5000）：这里把下限放到 1000，好验证「按自己填的金额买入」
+  const roomId = await createRoom(host, `房主${Date.now() % 1000}`, '端到端验收房', { minBuyIn: 1000 })
   // 新流程：建房后直接落在牌桌，房主自己先选座买入
   await takeSeat(host, 1, 1200)
   await expect(host.locator('.seat-slot').first()).toContainText('1200')
@@ -176,7 +177,7 @@ test('牌桌小屏几何：740×360 / 844×390 / 390×844 无横向溢出且座�
   const guest = await guestContext.newPage()
   const errors = [...watchErrors(host), ...watchErrors(guest)]
 
-  const roomId = await createRoom(host, `几何${String(Date.now() % 1000)}`, '几何回归', { maxSeats: 9 })
+  const roomId = await createRoom(host, `几何${String(Date.now() % 1000)}`, '几何回归')
   await joinRoomByLink(guest, roomId, `陪练${String(Date.now() % 1000)}`)
   await takeSeat(host, 1)
   await takeSeat(guest, 2)

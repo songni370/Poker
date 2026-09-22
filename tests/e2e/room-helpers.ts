@@ -16,20 +16,25 @@ export function watchErrors(page: Page): string[] {
   return errors
 }
 
-/** 大厅建房：填昵称（可选房间名/座位数/买入上限）→ 直接进牌桌（还没落座）。返回房间号。 */
+/**
+ * 大厅建房：填昵称（可选房间名 / 初始筹码 / 买入上限）→ 直接进牌桌（还没落座）。返回房间号。
+ *
+ * 产品固定 9 人桌，大厅不再有「座位数」选项：`options.maxSeats` 仅为兼容旧调用保留、**忽略**。
+ */
 export async function createRoom(
   page: Page,
   nickname: string,
   roomName?: string,
-  options: { maxSeats?: number; buyInMax?: number } = {},
+  options: { maxSeats?: number; minBuyIn?: number; buyInMax?: number } = {},
 ): Promise<string> {
   await page.goto('/')
   await expect(page.getByRole('heading', { name: '开一桌德州' })).toBeVisible()
   await page.getByPlaceholder('例如：小满').fill(nickname)
   if (roomName) await page.getByPlaceholder('例如：周五夜局').fill(roomName)
-  if (options.maxSeats !== undefined) {
-    await page.locator('.p-select, [role="combobox"]').first().click()
-    await page.getByRole('option', { name: `${String(options.maxSeats)} 人桌` }).click()
+  if (options.minBuyIn !== undefined) {
+    const input = page.locator('#min-buy-in')
+    await input.fill(String(options.minBuyIn))
+    await input.blur()
   }
   if (options.buyInMax !== undefined) {
     const input = page.locator('#buy-in-max')
@@ -54,8 +59,15 @@ export async function joinRoomByLink(page: Page, roomId: string, nickname: strin
   await expect(page.getByText('观战中')).toBeVisible()
 }
 
-/** 点某个空位并确认买入（不传金额就用弹窗默认值 = 本桌买入上限）。 */
+/**
+ * 点某个空位并确认买入（不传金额就用弹窗默认值 = 本桌买入上限）。
+ *
+ * 幂等：已经坐好了就直接返回。买入是本地弹窗 → 服务端确认的异步过程，点击「确认买入」与
+ * 弹窗关闭之间存在竞态——实测出现过「座位已经坐好、Playwright 仍在等那个按钮可点」，
+ * 一路重试到 90s 用例超时（第 3 项需求改版后新增的用例就踩到了）。先看状态再点，两条路都成立。
+ */
 export async function takeSeat(page: Page, seatNumber: number, buyIn?: number): Promise<void> {
+  if (await page.locator('.hero-cards').isVisible().catch(() => false)) return
   await page.getByRole('button', { name: `坐到 ${String(seatNumber)} 号座位` }).first().click()
   const dialog = page.locator('.p-dialog')
   await expect(dialog).toBeVisible()
@@ -64,7 +76,11 @@ export async function takeSeat(page: Page, seatNumber: number, buyIn?: number): 
     await input.fill(String(buyIn))
     await input.blur()
   }
-  await dialog.getByRole('button', { name: '确认买入' }).click()
+  // 点确认也是幂等的：弹窗可能已经被服务端广播关掉（此时 click 会抛超时），忽略即可。
+  const confirm = dialog.getByRole('button', { name: '确认买入' })
+  if (await confirm.isVisible().catch(() => false)) {
+    await confirm.click({ timeout: 5000 }).catch(() => undefined)
+  }
   // 落座后底部出现「你的底牌」区（观战/离座面板消失）
   await expect(page.locator('.hero-cards')).toBeVisible()
 }

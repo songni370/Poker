@@ -250,6 +250,9 @@ test('联机闭环：两个独立会话建房入座、打完一手摊牌，且�
   await takeSeat(a, 0)
   await takeSeat(b, 1)
   assert.equal(a.lastState()!.seats.filter(Boolean).length, 2, '两名玩家各占一席')
+  // 本桌筹码总量：买入额由房主设定的区间决定（默认 2000–5000），守恒断言对着它算，不写死数字。
+  const totalChips = a.lastState()!.seats.reduce((sum, seat) => sum + (seat ? seat.stack : 0), 0)
+  assert.ok(totalChips > 0)
   assert.equal(snapA.self.holeCards.length, 0, '开局前没有底牌')
   assert.equal(snapA.state.phase, 'waiting')
 
@@ -281,7 +284,7 @@ test('联机闭环：两个独立会话建房入座、打完一手摊牌，且�
   const finalState = a.lastState()!
   const totalStacks = finalState.seats.reduce((sum, seat) => sum + (seat ? seat.stack : 0), 0)
   const totalCommitted = finalState.seats.reduce((sum, seat) => sum + (seat ? seat.committedHand : 0), 0)
-  assert.equal(totalStacks + totalCommitted, 4000, '一手结束后筹码必须守恒')
+  assert.equal(totalStacks + totalCommitted, totalChips, '一手结束后筹码必须守恒')
 
   // ── 信息安全核查：摊牌之前，主机收到的任何报文都不得包含对手底牌 ──
   const settleIndex = a.settledIndex()
@@ -318,7 +321,7 @@ test('联机闭环：两个独立会话建房入座、打完一手摊牌，且�
   assert.equal(playerStacks.length, 2)
   assert.equal(
     playerStacks.reduce((sum, row) => sum + Number(row.stack), 0),
-    4000,
+    totalChips,
     '落库后的筹码同样守恒',
   )
 })
@@ -357,6 +360,7 @@ test('连续两手：结算后可以开始下一手，庄位轮转且筹码继�
   await b.waitFor((message) => message.type === 'room.snapshot')
   await takeSeat(a, 0)
   await takeSeat(b, 1)
+  const totalChips = a.lastState()!.seats.reduce((sum, seat) => sum + (seat ? seat.stack : 0), 0)
 
   const clients = new Map([
     [host.playerId, a],
@@ -382,7 +386,7 @@ test('连续两手：结算后可以开始下一手，庄位轮转且筹码继�
     assert.ok((await playHandToShowdown(clients, a)).settled, `第 ${handNo} 手应能结算`)
     const settled = a.lastState()!
     const total = settled.seats.reduce((sum, seat) => sum + (seat ? seat.stack + seat.committedHand : 0), 0)
-    assert.equal(total, 4000, `第 ${handNo} 手后筹码守恒`)
+    assert.equal(total, totalChips, `第 ${handNo} 手后筹码守恒`)
     assert.equal(settled.phase, 'settlement')
   }
 

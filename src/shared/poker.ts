@@ -109,27 +109,32 @@ export const ACTION_NAMES: Record<ActionType, string> = {
 export const TABLE_RULES = {
   minSeats: 2,
   maxSeats: 9,
-  /** 默认买入上限（= 起始筹码）。房主创建房间时可以自定义，见 minBuyInFloor / maxBuyInLimit。 */
+  /**
+   * 起始筹码 = 房主设定的「初始筹码」默认值。
+   * 每个玩家落座时的买入额由自己选，范围是 [初始筹码, 买入上限]：
+   *   - `startingStack`（初始筹码，默认 2000）：上桌最低要买入多少；
+   *   - `maxBuyInDefault`（买入上限，默认 5000）：一次最多能带多少上桌。
+   * 两者都由房主在创建房间时设定，服务端只做区间收敛与步进取整。
+   */
   startingStack: 2000,
+  /** 默认买入上限（用户指定默认 5000）。 */
+  maxBuyInDefault: 5000,
   smallBlind: 10,
   bigBlind: 20,
   turnSeconds: 20,
-  /** 最低买入 = 10 个大盲。 */
-  minBuyInBlinds: 10,
-  /** 房主可选买入上限的允许区间；步进等于小盲。 */
+  /** 房主可选买入区间的允许范围；步进等于小盲。 */
   minBuyInFloor: 200,
   maxBuyInLimit: 20000,
 } as const
 
-/** 本桌最低买入（10 个大盲）。 */
-export function minBuyInFor(bigBlind: number): number {
-  return bigBlind * TABLE_RULES.minBuyInBlinds
-}
-
-/** 把买入额夹到本桌允许的范围并按小盲取整。 */
-export function normalizeBuyIn(amount: number, bigBlind: number, maxBuyIn: number, smallBlind: number): number {
-  const min = Math.min(minBuyInFor(bigBlind), maxBuyIn)
-  const clamped = Math.min(Math.max(amount, min), maxBuyIn)
+/**
+ * 把买入额夹到本桌允许的范围并按小盲取整。
+ * 区间由房间配置给出（房主设定的「初始筹码 ~ 买入上限」），不再写死「10 个大盲」。
+ */
+export function normalizeBuyIn(amount: number, minBuyIn: number, maxBuyIn: number, smallBlind: number): number {
+  const min = Math.min(minBuyIn, maxBuyIn)
+  const max = Math.max(minBuyIn, maxBuyIn)
+  const clamped = Math.min(Math.max(amount, min), max)
   return Math.round(clamped / smallBlind) * smallBlind
 }
 
