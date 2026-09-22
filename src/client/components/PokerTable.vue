@@ -530,7 +530,7 @@ const tableStatus = computed(() => {
   .seat-slot {
     /* 非贴边座位 96px：9 人桌上相邻面板（本人↔两侧 ±50° 位、下沿的两个 sin 0.94 位）
        才不会互相压住；再宽一点就要靠截断昵称来换，没必要。 */
-    --seat-w: 96px;
+    --seat-w: 88px;
   }
 
   .seat-slot.is-side-seat {
@@ -541,6 +541,23 @@ const tableStatus = computed(() => {
      不这么做的话，同时挂着 BB 胶囊的座位会把筹码「2640」省略成「264…」（实测 24/30px）。 */
   .seat-slot.is-side-seat :deep(.panel) {
     padding-inline: 5px;
+  }
+
+  /*
+   * 竖屏面板高度也是稀缺资源：桌面按 dvh 缩到 198px（360×740）后，9 人桌相邻座位的
+   * 纵向中心距只有约 40px，而面板本身约 41px —— 必然会互相压住。
+   * 内边距 6 → 4px（面板 41 → 37px），并在 740 及以下再收一档到 3px（→ 35px），
+   * `npm run probe:table` 实测：360×740 上 4px 还剩 1.2×2px、3px 完全干净。
+   */
+  .seat-slot :deep(.panel) {
+    padding-block: 4px;
+  }
+
+  /* 更矮的竖屏手机（如 740 高）：面板再收 1px/边，换掉最后那点互压。 */
+  @media (max-height: 780px) {
+    .seat-slot :deep(.panel) {
+      padding-block: 3px;
+    }
   }
 
   /* 公共牌宽度跟着视口走：两侧贴边座位各占 64px + 4px 边距后剩下的横向空间，

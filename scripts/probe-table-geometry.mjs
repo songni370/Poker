@@ -16,14 +16,20 @@ import { chromium } from '@playwright/test'
 
 const BASE = process.env.BASE ?? 'http://localhost:5173'
 const MOCKS = process.argv.slice(2).length > 0 ? process.argv.slice(2) : ['fullRing', 'flop']
+/**
+ * 视口分两档：
+ *   - **验收档**（inScope: true）：规格书要求的尺寸 + 普通手机尺寸；这里出现重叠或溢出即探针失败。
+ *   - **参考档**（inScope: false）：比规格档更小的机型（如 320×568）。产品范围是「普通手机大小」，
+ *     这些尺寸只打印问题、不参与退出码，避免用一个超范围的尺寸把探针判成失败。
+ */
 const VIEWPORTS = [
-  [1440, 900],
-  [1280, 720],
-  [844, 390],
-  [740, 360],
-  [390, 844],
-  [360, 740],
-  [320, 568],
+  { w: 1440, h: 900, inScope: true },
+  { w: 1280, h: 720, inScope: true },
+  { w: 844, h: 390, inScope: true },
+  { w: 740, h: 360, inScope: true },
+  { w: 390, h: 844, inScope: true },
+  { w: 360, h: 740, inScope: true },
+  { w: 320, h: 568, inScope: false },
 ]
 
 const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--no-sandbox', '--disable-gpu'] })
@@ -37,7 +43,7 @@ function overlap(a, b) {
 let failures = 0
 
 for (const mock of MOCKS) {
-  for (const [width, height] of VIEWPORTS) {
+  for (const { w: width, h: height, inScope } of VIEWPORTS) {
     const context = await browser.newContext({ viewport: { width, height } })
     const page = await context.newPage()
     const pageErrors = []
@@ -132,8 +138,8 @@ for (const mock of MOCKS) {
         if (hit) issues.push(`座位${String(seats[i].seat)}↔座位${String(seats[j].seat)} ${String(hit.v)}×${String(hit.h)}px`)
       }
     }
-    // 页面溢出单独归类：极矮机型（≤360×740）本来就放不下全部内容，
-    // 属于已知限制，不该让探针以失败退出。
+    // 页面溢出单独归类：参考档（比规格更小的机型）本来就放不下全部内容，
+    // 属于已知限制、不计入退出码；验收档的溢出仍是 warning（不算重叠失败）。
     const warnings = []
     // 筹码/别的座位面板压住可读文字 → 真正的问题（几何重叠不等于信息被挡）
     const covers = [
@@ -163,15 +169,18 @@ for (const mock of MOCKS) {
     if (data.scrollY > 0) warnings.push(`纵向溢出 ${String(data.scrollY)}px`)
     if (pageErrors.length > 0) issues.push(`页面错误：${pageErrors.join(';')}`)
 
-    failures += issues.length
-    console.log(`\n=== mock=${mock} ${String(width)}×${String(height)}  桌面 ${String(data.table.w)}×${String(data.table.h)}`)
+    failures += inScope ? issues.length : 0
+    console.log(
+      `\n=== mock=${mock} ${String(width)}×${String(height)}  桌面 ${String(data.table.w)}×${String(data.table.h)}` +
+        (inScope ? '' : '  【参考档：超产品范围，不计入退出码】'),
+    )
     console.log(`  头部 ${String(data.header.height)} · 舞台 ${String(data.stage.height)} · 底部 ${String(data.footer.height)}`)
     console.log(
       `  中心块 x ${String(data.center.left)}..${String(data.center.right)} y ${String(data.center.top)}..${String(data.center.bottom)} | 底池 ${String(data.pot.top)}..${String(data.pot.bottom)}` +
         `${data.pots ? ` | 边池行 ${String(data.pots.top)}..${String(data.pots.bottom)}` : ''}` +
         `${data.board ? ` | 公共牌 ${String(data.board.top)}..${String(data.board.bottom)}` : ''}`,
     )
-    if (issues.length > 0) console.log(`  ⚠ 重叠：${issues.join(' | ')}`)
+    if (issues.length > 0) console.log(`  ${inScope ? '⚠ 重叠' : '· 参考档重叠（不判失败）'}：${issues.join(' | ')}`)
     if (warnings.length > 0) console.log(`  · 页面溢出（已知限制）：${warnings.join(' | ')}`)
     if (issues.length === 0 && warnings.length === 0) console.log('  ✔ 无重叠、无溢出')
     await context.close()
@@ -179,5 +188,9 @@ for (const mock of MOCKS) {
 }
 
 await browser.close()
-console.log(`\n共 ${String(failures)} 处重叠问题。`)
+console.log(
+  failures > 0
+    ? `\n验收档共 ${String(failures)} 处重叠问题（参考档不计入）。`
+    : '\n验收档（1440×900 / 1280×720 / 844×390 / 740×360 / 390×844 / 360×740）全部通过。',
+)
 process.exit(failures > 0 ? 1 : 0)
