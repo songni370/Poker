@@ -32,7 +32,7 @@ function normalizeLogLevel(value: string | undefined, fallback: LogLevel): LogLe
 
 export interface BuildAppOptions {
   clientDir?: string
-  /** 同时开放的房间上限，默认取 MAX_ROOMS 或 3。 */
+  /** 同时开放的房间上限，默认取 MAX_ROOMS 或 10。 */
   maxRooms?: number
   /** 掉线宽限期（毫秒），测试里可传极小值验证「超时自动释放座位」。 */
   seatReleaseMs?: number

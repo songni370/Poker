@@ -1087,15 +1087,6 @@ onBeforeUnmount(() => onFatalRoomError(null))
     <p class="sr-only" aria-live="polite" aria-atomic="true">{{ announcement }}</p>
 
     <!--
-      竖屏提示（第 1 项需求后手机版只支持竖屏）：手机竖屏与桌面窄窗显示，
-      手机横屏时整块被上面的「请竖屏使用」遮罩挡住。
-    -->
-    <p class="rotate-hint">
-      <i class="pi pi-mobile" aria-hidden="true" />
-      <span>竖屏操作最顺手；手机版只支持竖屏。</span>
-    </p>
-
-    <!--
       notice-slot：给通知条预留固定高度（单行 32px）。
       通知条本身按内容增高（0～2 行），若不预留，它一出现就把牌桌往下推、
       竖屏立刻开始整页滚动（实测 360×740 溢出 43px）。预留成本只有 32px，
@@ -1697,19 +1688,6 @@ onBeforeUnmount(() => onFatalRoomError(null))
   overflow: visible;
 }
 
-.rotate-hint {
-  display: none;
-  margin: var(--space-1) var(--space-2) 0;
-  padding: 6px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-  color: var(--muted);
-  font-size: 0.78rem;
-  gap: 6px;
-  align-items: center;
-}
-
 .hero {
   display: grid;
   gap: var(--space-1);
@@ -2121,7 +2099,6 @@ onBeforeUnmount(() => onFatalRoomError(null))
 
 @media (orientation: landscape) and (max-height: 560px) {
   .table-view > .bar,
-  .table-view > .rotate-hint,
   .table-view > .notice-strip,
   .table-view > .stage,
   .table-view > .hero,
@@ -2159,15 +2136,6 @@ onBeforeUnmount(() => onFatalRoomError(null))
 
 /* 竖屏窄屏：牌桌与操作区保持可用（提示条只是说明，不影响操作）。 */
 @media (orientation: portrait) and (max-width: 560px) {
-  /* 提示条高度按竖屏预算压到 22px（原来 48px）。 */
-  .rotate-hint {
-    display: flex;
-    gap: 4px;
-    margin: 2px var(--space-1) 0;
-    padding: 2px 8px;
-    font-size: 0.72rem;
-  }
-
   /* 竖屏高度按 8px 一档抠：通知槽位 32 → 26px，仍放得下一条 24–26px 的通知。 */
   .notice-slot {
     height: 26px;

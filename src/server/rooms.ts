@@ -68,6 +68,12 @@ const CHAT_WINDOW_LIMIT = 5
 
 /** 掉线宽限期：成员掉线后超过这个时间仍没回来，就释放他占的座位（可用环境变量覆盖，测试用短值）。 */
 const SEAT_RELEASE_MS = Number(process.env.SEAT_RELEASE_MS ?? 5 * 60 * 1000)
+/**
+ * 房间「没人操作」多久就关闭（第 2 项需求，默认 5 分钟，可用 `IDLE_ROOM_MS` 覆盖）。
+ * 判定依据是「最后一次有人在牌桌上做事」的时间（RoomRuntime.lastActivityAt）：
+ * 任何命令（心跳除外）、成员进出、开局都会刷新它。
+ */
+const IDLE_ROOM_MS = Number(process.env.IDLE_ROOM_MS ?? 5 * 60 * 1000)
 
 /** 房间快照结构版本；改动结构时必须同步提升，旧快照会被安全丢弃。 */
 export const SNAPSHOT_VERSION = 1
@@ -137,6 +143,18 @@ export class RoomRuntime {
   table: HoldemTable
   readonly members = new Map<string, RoomMember>()
   readonly createdAt = Date.now()
+  /**
+   * 最后一次「有人在牌桌上做事」的时间：任何命令（含心跳之外的玩家动作）、成员进出、
+   * 以及每一手牌开始都会刷新它。回收器用它判断「5 分钟没有玩家操作」（第 2 项需求）。
+   * 注意与 createdAt 的分工：createdAt 是房间寿命（用于「建了房但一直没人来」的兜底回收），
+   * lastActivityAt 是活跃度。
+   */
+  lastActivityAt = Date.now()
+
+  /** 记一次活跃（成员进出 / 命令 / 开局都算）。 */
+  touch(): void {
+    this.lastActivityAt = Date.now()
+  }
 
   status: RoomStatus = 'waiting'
   version = 0
@@ -488,6 +506,8 @@ export class RoomManager {
     const room = this.rooms.get(roomId)
     if (!room) throw new CommandError('room_not_found')
     if (room.status === 'closed') throw new CommandError('room_closed')
+    // 有人加入也算活跃（第 2 项需求）。
+    room.touch()
 
     // 加入后先以旁观者身份进桌（自己挑座位并确认买入）；观战位满了才拒绝。
     const observers = [...room.members.values()].filter((member) => member.seat === null).length
@@ -530,6 +550,8 @@ export class RoomManager {
     const room = this.rooms.get(roomId)
     const member = this.authenticate(roomId, playerId, token)
     if (!room || !member) return 'unauthorized'
+    // 连上来也算活跃（第 2 项需求）：否则「刚进桌、还没点任何按钮」会被误判成没人操作。
+    room.touch()
 
     // 同一玩家只保留一个活动连接：新连接顶掉旧连接，避免双端同时操作。
     if (member.socket && member.socket !== socket && member.socket.readyState === 1) {
@@ -557,6 +579,8 @@ export class RoomManager {
     const room = this.rooms.get(roomId)
     const member = room?.members.get(playerId)
     if (!room || !member || member.socket !== socket) return
+    // 断线也刷新活跃时间：5 分钟从「最后一个人掉线」开始算，给重连留出完整窗口。
+    room.touch()
     member.socket = null
     member.disconnectedAt = Date.now()
     // 掉线只影响展示；但座位不能无限期占着：宽限期到了就释放（见 scheduleSeatRelease）。
@@ -584,27 +608,54 @@ export class RoomManager {
     if (this.rooms.size > 0) this.logger.info(`关闭 ${String(this.rooms.size)} 个仍在内存中的房间`)
   }
 
-  /** 定期回收长期无人在线的房间：内存房间不能无限增长。 */
-  startSweeper(intervalMs = 10 * 60 * 1000, idleMs = 30 * 60 * 1000): void {
+  /**
+   * 定期回收房间（第 2 项需求）：内存房间不能无限增长，也不能留着空桌子。
+   * 三个关闭条件（满足任一即关）：
+   *   1. **所有人都退出了房间**（`members` 为空）→ 立即关闭；
+   *   2. **没人落座、房间里也没有人**（例如大家只旁观就走了）→ 立即关闭；
+   *   3. **没有任何在线连接**且超过 `idleMs`（默认 5 分钟）→ 关闭，也就是
+   *      「最后一个人掉线 / 退出后 5 分钟没有任何玩家操作」；房间建立后一直没人连过
+   *      也按这一条处理（`lastActivityAt` 初值即建房时间）。
+   * 只要还有人在线就不动它——正在玩的桌子不能被回收器关掉；
+   * 「房主刚建好房、还没落座」也不算条件 2，否则新房会被自己关掉（实测踩到）。
+   */
+  startSweeper(intervalMs = 60 * 1000, idleMs = IDLE_ROOM_MS): void {
     const timer = setInterval(() => {
       const closed = this.sweepIdleRooms(idleMs)
-      if (closed > 0) this.logger.info(`已回收 ${String(closed)} 个无人在线的房间（超过 ${String(Math.round(idleMs / 60000))} 分钟没人连）`)
+      if (closed > 0) {
+        this.logger.info(
+          `已关闭 ${String(closed)} 个房间（没人落座或超过 ${String(Math.round(idleMs / 60000))} 分钟没有玩家操作）`,
+        )
+      }
     }, intervalMs)
     timer.unref()
   }
 
-  /** 关闭并移除「所有成员都离线且已超过 idleMs」的房间。返回回收数量。 */
-  sweepIdleRooms(idleMs: number): number {
+  /**
+   * 关闭并移除满足上面三条之一的房间。返回回收数量。
+   * `idleMs = 0`：只要没人在线（或没人落座）就立刻回收——测试用。
+   */
+  sweepIdleRooms(idleMs: number = IDLE_ROOM_MS): number {
     const now = Date.now()
     let closed = 0
     for (const [roomId, room] of this.rooms) {
       let connected = 0
-      let lastSeen = room.createdAt
       for (const member of room.members.values()) {
         if (member.socket) connected += 1
-        else if (member.disconnectedAt !== null) lastSeen = Math.max(lastSeen, member.disconnectedAt)
       }
-      if (connected > 0 || now - lastSeen < idleMs) continue
+      const aliveFor = now - room.createdAt
+      const idleFor = now - room.lastActivityAt
+      const empty = room.members.size === 0
+      const nobodySeated = room.table.presentSeatCount() === 0
+      /*
+       * 判定顺序里有两条容易踩的边界：
+       *   · 「没人落座且没人在线」不能立刻生效 —— 房主刚建好房、WebSocket 还没连上的那一瞬间
+       *     正是这个状态（实测：新建的房间被自己的回收器关掉，单测立刻报「未超过阈值不应回收」）；
+       *   · 真没人连过的房也不能永远留着，所以给它 `idleMs` 的宽限期，之后再按「从没来过」处理。
+       */
+      const nobodySeatedAndGone = nobodySeated && (room.members.size === 0 || connected === 0) && (idleFor >= idleMs || aliveFor >= idleMs)
+      const abandoned = connected === 0 && idleFor >= idleMs
+      if (!empty && !nobodySeatedAndGone && !abandoned) continue
       if (room.turnTimer) clearTimeout(room.turnTimer)
       room.clearRevealTimers()
       for (const timer of room.seatReleaseTimers.values()) clearTimeout(timer)
@@ -661,6 +712,9 @@ export class RoomManager {
       this.sendTo(member, { type: 'pong', eventId: randomUUID(), serverTime: Date.now() })
       return
     }
+
+    // 任何真实命令都算一次「玩家操作」：房间因此重新获得 5 分钟寿命（第 2 项需求）。
+    room.touch()
 
     // 幂等：同一 requestId 只生效一次，重放请求只补发当前快照。
     if (this.repo.hasReceipt(command.requestId)) {

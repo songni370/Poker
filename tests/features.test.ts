@@ -4,31 +4,32 @@ import { CHAT_MAX_LENGTH } from '../src/shared/protocol.ts'
 import type { ChatMessage, RoomCredentials, ServerMessage } from '../src/shared/protocol.ts'
 import { TestClient, delay, joinCommand, postJson, rid, startTestServer, takeSeat } from './helpers.ts'
 
-test('房间上限：服务器最多同时开放 3 桌，关闭一桌后可以再开', async (t) => {
-  const server = await startTestServer({ maxRooms: 3 })
+test('房间上限：服务器最多同时开放 10 桌，关闭一桌后可以再开', async (t) => {
+  // 产品默认上限是 10（DEFAULT_MAX_ROOMS）；这里显式传 10，避免测试依赖环境变量。
+  const server = await startTestServer({ maxRooms: 10 })
   t.after(server.stop)
 
   const created: RoomCredentials[] = []
-  for (let index = 0; index < 3; index++) {
+  for (let index = 0; index < 10; index++) {
     const response = await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: `房主${String(index)}` })
     assert.equal(response.status, 201, `第 ${String(index + 1)} 桌应创建成功`)
     created.push(response.data)
   }
 
-  const fourth = await postJson<{ error: string; message: string }>(`${server.base}/api/rooms`, { nickname: '第四桌' })
-  assert.equal(fourth.status, 409, '第 4 桌应被拒绝')
-  assert.equal(fourth.data.error, 'room_full')
-  assert.match(fourth.data.message, /3 桌/, '提示里要说清上限是 3 桌')
+  const eleventh = await postJson<{ error: string; message: string }>(`${server.base}/api/rooms`, { nickname: '第十一桌' })
+  assert.equal(eleventh.status, 409, '第 11 桌应被拒绝')
+  assert.equal(eleventh.data.error, 'room_full')
+  assert.match(eleventh.data.message, /10 桌/, '提示里要说清上限是 10 桌')
 
   const health = (await (await fetch(`${server.base}/api/health`)).json()) as { rooms: number; maxRooms: number }
-  assert.equal(health.rooms, 3)
-  assert.equal(health.maxRooms, 3)
+  assert.equal(health.rooms, 10)
+  assert.equal(health.maxRooms, 10)
 
   // 回收一桌（全员离线且到达阈值）后应能再开
-  assert.equal(server.rooms.sweepIdleRooms(0), 3, '三桌都无人在线，应可全部回收')
+  assert.equal(server.rooms.sweepIdleRooms(0), 10, '十桌都无人在线，应可全部回收')
   const afterSweep = await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '新桌主' })
   assert.equal(afterSweep.status, 201, '回收后应能重新开桌')
-  assert.ok(created.length === 3)
+  assert.ok(created.length === 10)
 })
 
 test('聊天：广播给房内所有人、重连能拿到历史、服务端限流与长度校验', async (t) => {

@@ -63,7 +63,7 @@ export const ErrorResponseSchema = z.object({
 export type ErrorResponse = z.infer<typeof ErrorResponseSchema>
 
 /** 服务器同时允许开放的房间数上限（可用 MAX_ROOMS 覆盖）。 */
-export const DEFAULT_MAX_ROOMS = 3
+export const DEFAULT_MAX_ROOMS = 10
 
 /* ────────────────────────────── 房间与牌局公开状态 ────────────────────────────── */
 

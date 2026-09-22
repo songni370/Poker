@@ -17,6 +17,15 @@ import type {
 let requestCounter = 0
 const rid = (): string => `req-${++requestCounter}`
 
+/** 加入房间命令（多个用例共用；凭证里的重连令牌只在本进程有效）。 */
+const joinCommand = (credentials: RoomCredentials): ClientCommand => ({
+  type: 'room.join',
+  requestId: rid(),
+  roomId: credentials.roomId,
+  playerId: credentials.playerId,
+  reconnectToken: credentials.reconnectToken,
+})
+
 /**
  * 落座（新流程）：建房/加入后所有人都是旁观者，必须显式 seat.take 才能入座。
  * 只接受「发送之后」的新消息，否则坐回保留座位时会匹配到历史快照。
@@ -411,6 +420,43 @@ test('闲置房间回收：全员离线超过阈值后关闭并移出内存', as
   assert.equal(server.rooms.roomCount(), 0)
   assert.equal(server.rooms.get(host.roomId), undefined)
   assert.equal((await fetch(`${server.base}/api/rooms/${host.roomId}`)).status, 404, '回收后房间不可再访问')
+})
+
+test('房间自动关闭：全员退出立即关、没人落座且无人在线关、5 分钟没人操作关', async (t) => {
+  const server = await startServer()
+  t.after(server.close)
+
+  // ① 所有人都退出 → 立即关闭
+  const first = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '甲' })).data
+  const client = new TestClient(server.wsUrl)
+  t.after(() => client.close())
+  await client.open()
+  client.send(joinCommand(first))
+  await client.waitFor((m) => m.type === 'room.snapshot')
+  assert.equal(server.rooms.roomCount(), 1)
+  client.send({ type: 'room.leave', requestId: rid() })
+  await delay(120)
+  assert.equal(server.rooms.sweepIdleRooms(60 * 60 * 1000), 1, '所有人都退出的房间应立即关闭（不受阈值影响）')
+  assert.equal(server.rooms.get(first.roomId), undefined)
+
+  // ② 没人在线、也没人落座 → 过了宽限期就关
+  const second = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '乙' })).data
+  assert.equal(server.rooms.sweepIdleRooms(60 * 60 * 1000), 0, '刚建好、还没人连上时不能被自己的回收器关掉')
+  assert.equal(server.rooms.sweepIdleRooms(0), 1, '到达阈值后应关闭')
+  assert.equal(server.rooms.get(second.roomId), undefined)
+
+  // ③ 「5 分钟没有任何玩家操作」：有人落座且在线时不关；掉线后到达阈值才关
+  const third = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '丙' })).data
+  const owner = new TestClient(server.wsUrl)
+  t.after(() => owner.close())
+  await owner.open()
+  owner.send(joinCommand(third))
+  await owner.waitFor((m) => m.type === 'room.snapshot')
+  await takeSeat(owner, 0)
+  assert.equal(server.rooms.sweepIdleRooms(0), 0, '还有人在线时不能回收正在玩的桌子')
+  owner.close()
+  await delay(120)
+  assert.equal(server.rooms.sweepIdleRooms(0), 1, '最后一个人掉线后到达阈值应关闭')
 })
 
 test('网络一致性：重复请求幂等、过期版本被拒绝', async (t) => {
