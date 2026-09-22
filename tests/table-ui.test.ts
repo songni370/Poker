@@ -1,12 +1,14 @@
 // 牌桌界面用到的纯逻辑单测（不依赖浏览器）：
 //   1) 底部「你的底牌」区的当前牌型文案 —— src/engine/evaluate.ts 的 describeHand；
-//   2) 操作区快捷额度（1/2、2/3、满池、超池）的换算与夹取 —— action-bar-sizing.ts。
+//   2) 操作区快捷额度（1/2、2/3、满池、超池）的换算与夹取 —— action-bar-sizing.ts；
+//   3) 邀请面板的复制退路 —— clipboard.ts（局域网 http 明文下没有 navigator.clipboard）。
 //
-// 这两块共同点：界面上的数字/文案必须与服务端裁定一致，不能只靠肉眼看截图。
+// 这几块共同点：界面上的数字/文案必须与服务端裁定一致，不能只靠肉眼看截图。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { describeHand, evaluateHand } from '../src/engine/evaluate.ts'
 import { clampAmount, quickSizes } from '../src/client/components/action-bar-sizing.ts'
+import { copyText } from '../src/client/components/clipboard.ts'
 import { parseCard, type Card } from '../src/shared/poker.ts'
 
 const cards = (...values: string[]): Card[] => values.map((value) => parseCard(value))
@@ -131,4 +133,30 @@ test('快捷额度：取整与边界只有一套实现（clampAmount）', () => 
   assert.equal(clampAmount(104.6, 20, 2000), 105)
   assert.equal(clampAmount(5, 20, 2000), 20)
   assert.equal(clampAmount(99999, 20, 2000), 2000)
+})
+
+/* ───────────── 邀请面板的复制（src/client/components/clipboard.ts） ───────────── */
+
+test('复制：拿到剪贴板就写进去，文本原样不加工', async () => {
+  const written: string[] = []
+  const result = await copyText('http://192.168.1.5:3000/table/482913', {
+    writeText: (text: string) => {
+      written.push(text)
+      return Promise.resolve()
+    },
+  })
+  assert.equal(result, 'copied')
+  assert.deepEqual(written, ['http://192.168.1.5:3000/table/482913'])
+})
+
+test('复制：没有剪贴板 API（局域网 http 明文）返回 manual，让界面走「已选中，按 Ctrl/⌘+C」', async () => {
+  // 非安全上下文下 navigator.clipboard 是 undefined，硬调会抛错、按钮看起来没反应。
+  assert.equal(await copyText('482913', undefined), 'manual')
+})
+
+test('复制：权限被拒（writeText 抛错）也算 manual，不能把异常抛到界面上', async () => {
+  const result = await copyText('482913', {
+    writeText: () => Promise.reject(new Error('NotAllowedError')),
+  })
+  assert.equal(result, 'manual')
 })

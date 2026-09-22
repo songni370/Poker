@@ -34,6 +34,7 @@ import HandResultOverlay from '../components/HandResultOverlay.vue'
 import NoticeStrip from '../components/NoticeStrip.vue'
 import PlayingCard from '../components/PlayingCard.vue'
 import PokerTable from '../components/PokerTable.vue'
+import { copyText } from '../components/clipboard.ts'
 import { playPing, soundEnabled, unlockAudio } from '../sound.ts'
 import { useChatStore } from '../stores/chat.ts'
 import { useConnectionStore } from '../stores/connection.ts'
@@ -341,13 +342,59 @@ watch(
 /* ───────────── 交互 ───────────── */
 
 const drawerOpen = ref(false)
-const drawerSection = ref<'rules' | 'history' | 'chat'>('rules')
+type DrawerSection = 'invite' | 'rules' | 'history' | 'chat'
+const drawerSection = ref<DrawerSection>('rules')
+
+/* ── 邀请朋友：房间号是 6 位纯数字（见 §6.8），这里把它和邀请链接摆出来给朋友。 ── */
+/** 房间号：以凭证为准；没有凭证（理论上进不了牌桌）时回落到路由里那串。 */
+const roomCode = computed(() => room.roomId ?? props.roomId)
+/** 邀请链接：store 里已有唯一定义，兜底按当前域名拼一份。 */
+const inviteLink = computed(() => room.inviteUrl || `${window.location.origin}/table/${props.roomId}`)
+const codeText = ref<HTMLElement | null>(null)
+const linkField = ref<{ $el?: HTMLInputElement } | null>(null)
+const copyStatus = ref('')
+
+/**
+ * 复制房间号 / 邀请链接。
+ * 成功 → 「已复制…」；局域网 http 明文下没有剪贴板 API（见 components/clipboard.ts）→
+ * 把文字选中并提示用户自己按 Ctrl/⌘ + C，不能让按钮看起来「点了没反应」。
+ */
+async function copyInvite(kind: 'link' | 'code'): Promise<void> {
+  const text = kind === 'link' ? inviteLink.value : roomCode.value
+  if ((await copyText(text)) === 'copied') {
+    copyStatus.value = kind === 'link' ? '已复制邀请链接' : '已复制房间号'
+    return
+  }
+  if (kind === 'link') {
+    linkField.value?.$el?.focus()
+    linkField.value?.$el?.select()
+  } else if (codeText.value) {
+    const range = document.createRange()
+    range.selectNodeContents(codeText.value)
+    const selection = window.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+  }
+  copyStatus.value = '已选中，按 Ctrl/⌘ + C 复制'
+}
+
+/** 链接框一获得焦点就全选：这样手按 Ctrl/⌘ + C 也能复制（见 copyInvite 的退路）。 */
+function selectLinkValue(event: Event): void {
+  const input = event.target as HTMLInputElement
+  input.select()
+}
+
+/** 换分节就清掉上一次的复制反馈，免得回来看到过期的「已复制」。 */
+watch(drawerSection, () => {
+  copyStatus.value = ''
+})
 
 /* ── 中等宽度收纳：顶栏按钮太多会折行（实测 ≤1000px 时顶栏从 61px 变 121px），
  * 把「规则 / 历史 / 聊天 / 提示音」收进「更多」菜单，退出与开始下一手始终露在外面。 ── */
 const moreMenu = ref<InstanceType<typeof Menu> | null>(null)
 
 const moreItems = computed<MenuItem[]>(() => [
+  { label: '邀请朋友', icon: 'pi pi-share-alt', command: () => openDrawer('invite') },
   { label: '规则摘要', icon: 'pi pi-book', command: () => openDrawer('rules') },
   {
     label: game.history.length > 0 ? `手牌历史（${String(game.history.length)} 手）` : '手牌历史',
@@ -382,7 +429,7 @@ function toggleMore(event: Event): void {
   moreMenu.value?.toggle(event)
 }
 
-function openDrawer(section: 'rules' | 'history' | 'chat'): void {
+function openDrawer(section: DrawerSection): void {
   drawerSection.value = section
   drawerOpen.value = true
 }
@@ -1016,6 +1063,17 @@ onBeforeUnmount(() => onFatalRoomError(null))
         size="small"
         text
         class="bar-secondary"
+        aria-label="邀请朋友"
+        :title="'邀请朋友：房间号与邀请链接'"
+        @click="openDrawer('invite')"
+      >
+        <i class="pi pi-share-alt" aria-hidden="true" />
+        <span>邀请</span>
+      </Button>
+      <Button
+        size="small"
+        text
+        class="bar-secondary"
         aria-label="规则"
         :title="'查看规则摘要'"
         @click="openDrawer('rules')"
@@ -1052,7 +1110,7 @@ onBeforeUnmount(() => onFatalRoomError(null))
         text
         class="bar-more"
         :aria-label="moreAria"
-        :title="room.isHost ? '更多操作（规则 / 历史 / 聊天 / 提示音 / 移除玩家）' : '更多操作（规则 / 历史 / 聊天 / 提示音）'"
+        :title="room.isHost ? '更多操作（邀请 / 规则 / 历史 / 聊天 / 提示音 / 移除玩家）' : '更多操作（邀请 / 规则 / 历史 / 聊天 / 提示音）'"
         aria-haspopup="true"
         aria-controls="bar-more-menu"
         @click="toggleMore"
@@ -1250,6 +1308,17 @@ onBeforeUnmount(() => onFatalRoomError(null))
           <div class="drawer-tabs" role="tablist" aria-label="牌桌信息分类">
           <Button
             size="small"
+            :severity="drawerSection === 'invite' ? 'help' : 'secondary'"
+            :outlined="drawerSection !== 'invite'"
+            role="tab"
+            :aria-selected="drawerSection === 'invite'"
+            :title="'邀请朋友'"
+            @click="drawerSection = 'invite'"
+          >
+            <span>邀请</span>
+          </Button>
+          <Button
+            size="small"
             :severity="drawerSection === 'rules' ? 'help' : 'secondary'"
             :outlined="drawerSection !== 'rules'"
             role="tab"
@@ -1283,7 +1352,45 @@ onBeforeUnmount(() => onFatalRoomError(null))
           </Button>
         </div>
 
-        <section v-if="drawerSection === 'rules'" class="drawer-body" aria-label="规则摘要">
+        <section v-if="drawerSection === 'invite'" class="drawer-body" aria-label="邀请朋友">
+          <h3>邀请朋友</h3>
+          <!-- 房间号是这块的主角：6 位纯数字，能直接念给对面听、也能单独复制走。 -->
+          <p class="invite-plate">
+            <span class="invite-label">房间号</span>
+            <b ref="codeText" class="invite-code num" translate="no">{{ roomCode }}</b>
+          </p>
+          <div class="invite-field">
+            <label class="invite-field-label" for="invite-link">邀请链接</label>
+            <InputText
+              id="invite-link"
+              ref="linkField"
+              :model-value="inviteLink"
+              readonly
+              fluid
+              autocomplete="off"
+              translate="no"
+              @focus="selectLinkValue"
+            />
+          </div>
+          <div class="invite-actions">
+            <Button :title="'复制邀请链接'" @click="copyInvite('link')">
+              <i class="pi pi-copy" aria-hidden="true" />
+              <span>复制邀请链接</span>
+            </Button>
+            <Button severity="secondary" text :title="'只复制房间号'" @click="copyInvite('code')">
+              <i class="pi pi-copy" aria-hidden="true" />
+              <span>复制房间号</span>
+            </Button>
+          </div>
+          <p class="invite-status" role="status">{{ copyStatus }}</p>
+          <ul class="invite-hints hint">
+            <li>打开链接，或在大厅输入这 6 位房间号，都能进桌。</li>
+            <li>进桌后先当旁观者，点桌面空位、确认买入才算落座。</li>
+            <li>别人看不到未公开的底牌；离座只是暂时离开，退出房间才释放座位。</li>
+          </ul>
+        </section>
+
+        <section v-else-if="drawerSection === 'rules'" class="drawer-body" aria-label="规则摘要">
           <h3>本桌规则</h3>
           <dl>
             <div><dt>游戏</dt><dd>无限注德州扑克，52 张牌</dd></div>
@@ -1798,6 +1905,70 @@ onBeforeUnmount(() => onFatalRoomError(null))
 
 .drawer-body dd {
   margin: 0;
+}
+
+/* ───────────── 邀请朋友（抽屉内的 invite 分节） ─────────────
+ * 这块只做一件事：把 6 位房间号念给朋友 / 发出去。
+ * 所以全块只有「数字」是响的（等宽 + 字距，像桌上的桌号牌），
+ * 其余（标签、链接、说明）一律压到抽屉既有正文尺度，不加渐变、不加动效。 */
+
+.invite-plate {
+  display: grid;
+  gap: 2px;
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2) var(--space-2) calc(var(--space-2) - 2px);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--felt-deep);
+  text-align: center;
+}
+
+.invite-label {
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.invite-code {
+  font-size: 1.9rem;
+  line-height: 1.2;
+  letter-spacing: 0.14em;
+  /* 字距会在最后一个字后面也留一份，居中时看起来偏左；用同样的缩进补回来。 */
+  text-indent: 0.14em;
+  color: var(--gold);
+}
+
+.invite-field {
+  display: grid;
+  gap: 4px;
+  margin-bottom: var(--space-1);
+}
+
+.invite-field-label {
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+
+.invite-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+.invite-status {
+  /* 预留一行：出现「已复制…」时不推动下面的说明。 */
+  min-height: 1.2em;
+  margin: var(--space-1) 0 0;
+  font-size: 0.82rem;
+  color: var(--text);
+}
+
+.invite-hints {
+  margin: var(--space-2) 0 0;
+  padding-left: 1.1em;
+  display: grid;
+  gap: 4px;
 }
 
 /* ───────────── 顶栏角标：手数 / 未读数（数字 + aria-label 双重表意） ───────────── */

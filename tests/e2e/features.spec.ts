@@ -737,3 +737,122 @@ test('房间号：纯数字，大厅可以按号加入，非数字当场拦下',
   await hostContext.close()
   await guestContext.close()
 })
+
+/**
+ * 邀请面板（抽屉里的「邀请」分节）：
+ * 房间号是纯数字后要真的能念、能发出去——所以这里验四件事：
+ *   ① 房间号与邀请链接的来源（路由 / 凭证）一致；
+ *   ② 复制有明确反馈，且剪贴板里就是那串文本；
+ *   ③ 局域网 http 明文（非安全上下文）没有 navigator.clipboard 时，退到「已选中，按 Ctrl/⌘+C」；
+ *   ④ 顶栏多一个入口也不能折成两行，窄屏仍能从「更多」进得去。
+ */
+test('邀请：抽屉里给出房间号与邀请链接，复制有反馈，没剪贴板时退到手动复制', async ({ browser }) => {
+  const hostContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  await hostContext.grantPermissions(['clipboard-read', 'clipboard-write'])
+  const host = await hostContext.newPage()
+  const errors = watchErrors(host)
+
+  const roomId = await createRoom(host, `房主${String(Date.now() % 1000)}`)
+  const link = `${new URL(host.url()).origin}/table/${roomId}`
+
+  // 宽屏：顶栏有直达入口（不能只藏在窄屏的「更多」菜单里）。
+  await host.getByRole('button', { name: '邀请朋友' }).click()
+  const panel = host.locator('section[aria-label="邀请朋友"]')
+  await expect(panel).toBeVisible()
+  await expect(panel.locator('.invite-code')).toHaveText(roomId)
+  await expect(host.locator('#invite-link')).toHaveValue(link)
+  await host.locator('.p-drawer').screenshot({ path: 'artifacts/e2e/35-invite-panel.png' })
+
+  // 分节内容不能横向溢出（长链接 + 两个按钮挤在一起时最容易撑破抽屉）。
+  const fit = await panel.evaluate((section) => {
+    const pick = (element: Element | null) => {
+      const rect = element!.getBoundingClientRect()
+      return { left: Math.round(rect.left), right: Math.round(rect.right), width: Math.round(rect.width) }
+    }
+    return {
+      section: pick(section),
+      plate: pick(section.querySelector('.invite-plate')),
+      input: pick(section.querySelector('#invite-link')),
+      actions: pick(section.querySelector('.invite-actions')),
+      scrollWidth: section.scrollWidth,
+      clientWidth: section.clientWidth,
+    }
+  })
+  expect(fit.scrollWidth, `邀请分节横向溢出：${JSON.stringify(fit)}`).toBeLessThanOrEqual(fit.clientWidth + 1)
+  expect(fit.plate.right, `房间号号牌超出分节：${JSON.stringify(fit)}`).toBeLessThanOrEqual(fit.section.right + 1)
+  expect(fit.input.right, `链接框超出分节：${JSON.stringify(fit)}`).toBeLessThanOrEqual(fit.section.right + 1)
+  expect(fit.actions.right, `按钮行超出分节：${JSON.stringify(fit)}`).toBeLessThanOrEqual(fit.section.right + 1)
+
+  // 复制邀请链接 / 复制房间号：反馈文案与剪贴板内容都要对得上。
+  await panel.getByRole('button', { name: '复制邀请链接' }).click()
+  await expect(panel.locator('.invite-status')).toHaveText('已复制邀请链接')
+  expect(await host.evaluate(() => navigator.clipboard.readText())).toBe(link)
+  await panel.getByRole('button', { name: '复制房间号' }).click()
+  await expect(panel.locator('.invite-status')).toHaveText('已复制房间号')
+  expect(await host.evaluate(() => navigator.clipboard.readText())).toBe(roomId)
+
+  // 触控目标：两个按钮都不低于 40px。
+  const heights = await panel
+    .locator('.invite-actions .p-button')
+    .evaluateAll((els) => els.map((el) => Math.round(el.getBoundingClientRect().height)))
+  expect(heights.length).toBe(2)
+  expect(heights.every((height) => height >= 40), `触控高度：${heights.join('、')}`).toBe(true)
+
+  /* 顶栏多一个按钮：1150px 正好在「二级操作露出来」的一侧，最容易折行。 */
+  await host.setViewportSize({ width: 1150, height: 800 })
+  const barHeight = await host.evaluate(() =>
+    Math.round(document.querySelector('.bar')!.getBoundingClientRect().height),
+  )
+  expect(barHeight, '顶栏必须保持一行').toBeLessThan(80)
+  await host.screenshot({ path: 'artifacts/e2e/36-invite-bar-1150.png' })
+
+  /* 窄屏：入口收进「更多」，四个分节标签不能横向溢出。 */
+  await host.setViewportSize({ width: 360, height: 740 })
+  await host
+    .locator('.p-drawer-close, [aria-label="Close"]')
+    .first()
+    .click()
+    .catch(() => host.keyboard.press('Escape'))
+  await host.getByRole('button', { name: '更多操作' }).click()
+  const menu = host.getByRole('menu').or(host.locator('.p-menu'))
+  await menu.first().getByText('邀请朋友').click()
+  await expect(panel).toBeVisible()
+  await expect(panel.locator('.invite-code')).toHaveText(roomId)
+  const tabs = await host.evaluate(() => {
+    const row = document.querySelector('.drawer-tabs')!
+    return { scrollWidth: row.scrollWidth, clientWidth: row.clientWidth }
+  })
+  expect(tabs.scrollWidth, '四个分节标签不能横向溢出').toBeLessThanOrEqual(tabs.clientWidth + 1)
+  await host.waitForTimeout(500) // 等抽屉滑入动画结束再截图
+  await host.screenshot({ path: 'artifacts/e2e/38-invite-portrait-360x740.png' })
+  expect(errors).toEqual([])
+  await hostContext.close()
+
+  /* 局域网明文部署（http://192.168.x.x:3000）：没有剪贴板 API，必须有退路。 */
+  const plainContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  await plainContext.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+  })
+  const plain = await plainContext.newPage()
+  const plainErrors = watchErrors(plain)
+  await joinRoomByLink(plain, roomId, `明文${String(Date.now() % 1000)}`)
+  await plain.getByRole('button', { name: '邀请朋友' }).click()
+  const plainPanel = plain.locator('section[aria-label="邀请朋友"]')
+
+  await plainPanel.getByRole('button', { name: '复制房间号' }).click()
+  await expect(plainPanel.locator('.invite-status')).toHaveText('已选中，按 Ctrl/⌘ + C 复制')
+  expect(await plain.evaluate(() => window.getSelection()?.toString() ?? '')).toBe(roomId)
+
+  await plainPanel.getByRole('button', { name: '复制邀请链接' }).click()
+  await expect(plainPanel.locator('.invite-status')).toHaveText('已选中，按 Ctrl/⌘ + C 复制')
+  const picked = await plain.evaluate(() => {
+    const input = document.querySelector<HTMLInputElement>('#invite-link')!
+    return { start: input.selectionStart, end: input.selectionEnd, value: input.value }
+  })
+  expect(picked.value).toBe(link)
+  expect([picked.start, picked.end], '链接应被整段选中，手按 Ctrl/⌘+C 就能复制').toEqual([0, link.length])
+  await plainPanel.screenshot({ path: 'artifacts/e2e/37-invite-manual-copy.png' })
+
+  expect(plainErrors).toEqual([])
+  await plainContext.close()
+})
