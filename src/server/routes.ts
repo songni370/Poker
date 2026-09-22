@@ -64,9 +64,10 @@ export async function registerHttpRoutes(
     try {
       const credentials = manager.createRoom(parsed.data)
       // 「谁开了哪一桌」是最有用的一条业务日志：房间号就是邀请链接里的那串。
+      // 座位数取房间实际值（请求里的 maxSeats 已被忽略，直接用请求值会打成 undefined）。
       logger.info(
-        `建房「${parsed.data.roomName?.trim() || '未命名牌局'}」房主 ${parsed.data.nickname}，${String(parsed.data.maxSeats)} 人桌，房间号 ${credentials.roomId}`,
-        { roomId: credentials.roomId, maxSeats: parsed.data.maxSeats },
+        `建房「${parsed.data.roomName?.trim() || '未命名牌局'}」房主 ${parsed.data.nickname}，${String(credentials.maxSeats)} 人桌，房间号 ${credentials.roomId}`,
+        { roomId: credentials.roomId, maxSeats: credentials.maxSeats },
       )
       return reply.code(201).send(credentials)
     } catch (error) {

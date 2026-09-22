@@ -5,7 +5,7 @@ import Button from 'primevue/button'
 import InputNumber from 'primevue/inputnumber'
 import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
-import { NICKNAME_MAX, ROOM_NAME_MAX, TABLE_RULES } from '../../shared/poker.ts'
+import { NICKNAME_MAX, ROOM_ID_DIGITS, ROOM_NAME_MAX, TABLE_RULES } from '../../shared/poker.ts'
 import { SessionError, connectRoom, createRoom as apiCreateRoom, joinRoom as apiJoinRoom } from '../net/session.ts'
 import { useRoomStore } from '../stores/room.ts'
 
@@ -40,6 +40,8 @@ const roomLimitReached = computed(() => Boolean(roomLimit.value && roomLimit.val
 const nickname = ref(room.nickname)
 const roomName = ref('')
 const joinCode = ref('')
+/** 房间号输入框（PrimeVue InputText）：校验失败时把焦点放回去。 */
+const codeField = ref<{ $el?: HTMLInputElement } | null>(null)
 /**
  * 初始筹码 = 玩家上桌最低要买入多少（默认 2000）；买入上限 = 一次最多带多少上桌（默认 5000）。
  * 座位数不再让房主选：本产品固定 9 人桌（服务端也只认 9）。
@@ -105,8 +107,11 @@ async function joinRoom(): Promise<void> {
     return
   }
   const code = joinCode.value.trim()
-  if (!code) {
-    error.value = '请填写邀请链接里的房间号，或直接打开朋友发来的邀请链接。'
+  // 房间号是纯数字：位数不对或夹了字母就直接说清楚，不用白跑一趟服务端。
+  if (code.length !== ROOM_ID_DIGITS || !/^\d+$/.test(code)) {
+    error.value = `房间号是 ${String(ROOM_ID_DIGITS)} 位数字（例如 482913），也可以直接打开朋友发来的邀请链接。`
+    // 报错后把焦点放回输入框：不用再点一次，直接重打（界面规范：错误要落在出错的字段上）。
+    codeField.value?.$el?.focus()
     return
   }
   busy.value = true
@@ -214,16 +219,18 @@ async function joinRoom(): Promise<void> {
 
         <section class="panel" aria-labelledby="join-title">
           <h2 id="join-title" class="panel-title">加入房间</h2>
-          <p class="hint">收到邀请链接就直接打开；也可以在这里输入房间号。</p>
+          <p class="hint">收到邀请链接就直接打开；也可以在这里输入 {{ ROOM_ID_DIGITS }} 位房间号。</p>
 
           <label class="field" for="join-code">
             <span class="label">房间号</span>
             <InputText
               id="join-code"
+              ref="codeField"
               v-model="joinCode"
-              maxlength="32"
-              placeholder="例如：7K2QF9"
-              autocapitalize="characters"
+              :maxlength="ROOM_ID_DIGITS"
+              placeholder="例如：482913"
+              inputmode="numeric"
+              autocomplete="off"
               spellcheck="false"
               fluid
             />

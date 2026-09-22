@@ -703,3 +703,37 @@ test('界面改造：牌面无中央花色、座位角色槽位、底部当前�
   await guestContext.close()
   await thirdContext.close()
 })
+
+test('房间号：纯数字，大厅可以按号加入，非数字当场拦下', async ({ browser }) => {
+  const hostContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const guestContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const host = await hostContext.newPage()
+  const guest = await guestContext.newPage()
+  const errors = [...watchErrors(host), ...watchErrors(guest)]
+
+  const roomId = await createRoom(host, `房主${String(Date.now() % 1000)}`)
+  expect(roomId, '建房返回的房间号应是 6 位纯数字').toMatch(/^[1-9]\d{5}$/)
+
+  await guest.goto('/')
+  await expect(guest.locator('#join-code')).toHaveAttribute('inputmode', 'numeric')
+  await expect(guest.locator('#join-code')).toHaveAttribute('maxlength', '6')
+  await guest.getByPlaceholder('例如：小满').fill(`按号${String(Date.now() % 1000)}`)
+
+  // 非数字：大厅当场给出可执行的提示，不白跑一趟服务端；焦点回到房间号输入框。
+  await guest.locator('#join-code').fill('12ab56')
+  await guest.getByRole('button', { name: '加入房间' }).click()
+  await expect(guest.getByRole('alert')).toContainText('房间号是 6 位数字')
+  await expect(guest.locator('#join-code')).toBeFocused()
+
+  // 按号加入：落在邀请链接同一个牌桌页，先当旁观者。
+  await guest.locator('#join-code').fill(roomId)
+  await guest.getByRole('button', { name: '加入房间' }).click()
+  await guest.waitForURL(new RegExp(`/table/${roomId}$`))
+  await expect(guest.locator('.table')).toBeVisible()
+  await expect(guest.getByText('观战中')).toBeVisible()
+  await guest.screenshot({ path: 'artifacts/e2e/34-lobby-join-by-code.png' })
+
+  expect(errors).toEqual([])
+  await hostContext.close()
+  await guestContext.close()
+})

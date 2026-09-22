@@ -45,7 +45,8 @@ export async function createRoom(
   await page.waitForURL(/\/table\//)
   await expect(page.locator('.table')).toBeVisible()
   const roomId = new URL(page.url()).pathname.split('/table/')[1]!
-  expect(roomId.length).toBeGreaterThan(3)
+  // 房间号是纯数字 6 位（首位非 0）：邀请链接里那串就是它。
+  expect(roomId).toMatch(/^[1-9]\d{5}$/)
   return roomId
 }
 

@@ -431,7 +431,8 @@ export class RoomManager {
         `服务器最多同时开放 ${String(this.maxRooms)} 桌，请等其中一桌结束或关闭后再开新桌`,
       )
     }
-    const roomId = newRoomId()
+    // 房间号是纯数字：随机 6 位，撞上已有房间（含已关闭的历史房间）就重摇。
+    const roomId = newRoomId((candidate) => this.repo.roomExists(candidate))
     const playerId = newPlayerId()
     const token = newReconnectToken()
     const normalizedMax = normalizeBuyIn(

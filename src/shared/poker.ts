@@ -140,3 +140,6 @@ export function normalizeBuyIn(amount: number, minBuyIn: number, maxBuyIn: numbe
 
 export const ROOM_NAME_MAX = 24
 export const NICKNAME_MAX = 12
+
+/** 房间号位数：纯数字（首位非 0），方便口头传达与手工输入。 */
+export const ROOM_ID_DIGITS = 6

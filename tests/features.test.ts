@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { CHAT_MAX_LENGTH } from '../src/shared/protocol.ts'
 import type { ChatMessage, RoomCredentials, ServerMessage } from '../src/shared/protocol.ts'
 import { TestClient, delay, joinCommand, postJson, rid, startTestServer, takeSeat } from './helpers.ts'
+import { Repo, newRoomId } from '../src/server/repo.ts'
 
 test('房间上限：服务器最多同时开放 10 桌，关闭一桌后可以再开', async (t) => {
   // 产品默认上限是 10（DEFAULT_MAX_ROOMS）；这里显式传 10，避免测试依赖环境变量。
@@ -30,6 +31,48 @@ test('房间上限：服务器最多同时开放 10 桌，关闭一桌后可以�
   const afterSweep = await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '新桌主' })
   assert.equal(afterSweep.status, 201, '回收后应能重新开桌')
   assert.ok(created.length === 10)
+})
+
+test('房间号：纯数字 6 位；撞上已有房间（含历史房间）自动重摇', async (t) => {
+  const server = await startTestServer()
+  t.after(server.stop)
+  const repo = new Repo(server.handle.db)
+
+  // 1) 格式：6 位纯数字且首位非 0，避免「012345」被当成 12345 念出去。
+  for (let index = 0; index < 50; index++) {
+    const id = newRoomId()
+    assert.match(id, /^[1-9]\d{5}$/, `房间号应是 6 位数字，实际 ${id}`)
+  }
+
+  // 2) 撞号就重摇：仓储说已存在时必须换一个，一直撞则报错（不能死循环）。
+  const tried: string[] = []
+  const accepted = newRoomId((candidate) => {
+    tried.push(candidate)
+    return tried.length < 3
+  })
+  assert.equal(tried.length, 3, '前两次被占用时应继续重摇')
+  assert.equal(tried[2], accepted, '返回的应是第三次摇到的号')
+  assert.throws(() => newRoomId(() => true), /房间号分配失败/)
+
+  // 3) 已关闭的历史房间也算占用：room_id 是主键，重号会让建房写库失败。
+  repo.insertRoom({
+    roomId: '100000',
+    roomName: '上一版留下的房',
+    hostPlayerId: 'player-old',
+    status: 'closed',
+    smallBlind: 10,
+    bigBlind: 20,
+    startingStack: 2000,
+    maxSeats: 9,
+    turnSeconds: 20,
+  })
+  assert.equal(repo.roomExists('100000'), true, '历史房间号也算已占用')
+  assert.equal(repo.roomExists('999999'), false, '没建过的号应是空的')
+
+  // 4) 真实建房拿到的房间号同样是纯数字，并且已经入库。
+  const created = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '房主' })).data
+  assert.match(created.roomId, /^[1-9]\d{5}$/)
+  assert.equal(repo.roomExists(created.roomId), true, '新房间应已入库')
 })
 
 test('聊天：广播给房内所有人、重连能拿到历史、服务端限流与长度校验', async (t) => {

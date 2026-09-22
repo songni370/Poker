@@ -20,7 +20,8 @@ import { HAND_CATEGORY_NAMES, TABLE_RULES } from '../../shared/poker.ts'
 
 /* ────────────────────────────── 基础工具 ────────────────────────────── */
 
-const roomId = 'MOCK42'
+// 房间号与产品一致：纯数字（开发场景固定一个，方便截图比对）。
+const roomId = '482913'
 
 /** 固定昵称，方便截图比对；下标即座位号。 */
 const NAMES = ['你', '林小满', '陈默', '阿水', '老张', 'Nina', 'Kai', '小柯', '周舟'] as const

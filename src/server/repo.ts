@@ -1,5 +1,6 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
+import { ROOM_ID_DIGITS } from '../shared/poker.ts'
 import type { HandResultPublic, RoomStatus } from '../shared/protocol.ts'
 
 export interface RoomRecord {
@@ -29,9 +30,17 @@ export interface PlayerRecord {
   reconnectHash: string
 }
 
-/** 房间 ID 短且随机不可枚举；邀请链接可安全分享。 */
-export function newRoomId(): string {
-  return randomBytes(8).toString('base64url')
+/**
+ * 房间号：纯数字（默认 6 位且首位非 0），方便口头或短信传达。
+ * `isTaken` 由调用方查仓储给出：历史房间一直占着房间号主键，撞上就得重摇。
+ */
+export function newRoomId(isTaken: (roomId: string) => boolean = () => false): string {
+  const min = 10 ** (ROOM_ID_DIGITS - 1)
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const candidate = String(randomInt(min, min * 10))
+    if (!isTaken(candidate)) return candidate
+  }
+  throw new Error('房间号分配失败：连续 50 次都撞上已有房间')
 }
 
 export function newPlayerId(): string {
@@ -102,6 +111,11 @@ export class Repo {
 
   setRoomStatus(roomId: string, status: RoomStatus): void {
     this.db.prepare('UPDATE rooms SET status = ?, updated_at = ? WHERE room_id = ?').run(status, Date.now(), roomId)
+  }
+
+  /** 房间号是否已被占用（含已关闭的历史房间）：room_id 是主键，重号会让建房写库失败。 */
+  roomExists(roomId: string): boolean {
+    return this.db.prepare('SELECT 1 FROM rooms WHERE room_id = ?').get(roomId) !== undefined
   }
 
   upsertPlayer(player: PlayerRecord): void {
