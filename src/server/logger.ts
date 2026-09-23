@@ -60,14 +60,75 @@ function normalizeContext(context: LogContext): LogContext {
   return result
 }
 
+const LEVEL_NAMES: Record<number, string> = {
+  10: 'TRACE',
+  20: 'DEBUG',
+  30: 'INFO',
+  40: 'WARN',
+  50: 'ERROR',
+  60: 'FATAL',
+}
+
+function logTimestamp(value: unknown): string {
+  const date = new Date(typeof value === 'number' ? value : Date.now())
+  const pad = (part: number) => String(part).padStart(2, '0')
+  return `[${pad(date.getUTCFullYear() % 100)}/${pad(date.getUTCMonth() + 1)}/${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} UTC]`
+}
+
+function compactValue(value: unknown): string {
+  if (typeof value === 'string') return value.replace(/[\r\n]+/g, ' ')
+  if (value === null || typeof value !== 'object') return String(value)
+  return JSON.stringify(value)
+}
+
+function wrapLog(prefix: string, body: string): string {
+  const continuation = ' '.repeat(Array.from(prefix).length)
+  const lines: string[] = []
+  let remaining = Array.from(body)
+  let indent = prefix
+
+  while (remaining.length > 120 - Array.from(indent).length) {
+    const width = 120 - Array.from(indent).length
+    const space = remaining.lastIndexOf(' ', width)
+    const splitAt = space > Math.floor(width * 0.6) ? space : width
+    lines.push(indent + remaining.slice(0, splitAt).join(''))
+    remaining = remaining.slice(splitAt)
+    while (remaining[0] === ' ') remaining = remaining.slice(1)
+    indent = continuation
+  }
+  lines.push(indent + remaining.join(''))
+  return lines.join('\n')
+}
+
+/** Pino destination shared by application and business logs, rendered as concise text. */
+function textDestination(line: string): void {
+  try {
+    const entry = JSON.parse(line) as Record<string, unknown>
+    const level = LEVEL_NAMES[Number(entry.level)] ?? 'INFO'
+    const message = compactValue(entry.msg ?? '')
+    const context = Object.entries(entry)
+      .filter(([key]) => !['level', 'time', 'msg', 'v'].includes(key))
+      .map(([key, value]) => `${key}=${compactValue(value)}`)
+    const prefix = `${logTimestamp(entry.time)} ${level}: `
+    process.stdout.write(`${wrapLog(prefix, `${message}${context.length ? ` ${context.join(' ')}` : ''}`)}\n`)
+  } catch {
+    process.stdout.write(line)
+  }
+}
+
+/** Fastify uses this stream so framework logs share the business log format. */
+export const textLogStream = { write: textDestination }
+
+function pinoLogger(level: LogLevel): PinoLogger {
+  return pino({ level, base: undefined, timestamp: pino.stdTimeFunctions.epochTime }, textLogStream)
+}
+
 /**
- * 包装 pino：只暴露 info/warn/error。
- * 时间戳交给 pino 自己打（ISO 字符串，排序友好），业务字段作为结构化数据保留。
+ * 包装 pino：只暴露 info/warn/error，并统一输出 UTC 时间戳和紧凑上下文。
  */
 export function createLogger(level: LogLevel = 'info'): Logger {
   if (level === 'silent') return silentLogger
-  // 去掉 pid / hostname：单进程部署里它们只是噪声；时间戳用 ISO 便于阅读与排序。
-  const base: PinoLogger = pino({ level, base: undefined, timestamp: pino.stdTimeFunctions.isoTime })
+  const base = pinoLogger(level)
   return {
     info: (message, context) => {
       const detail = asContext(context)

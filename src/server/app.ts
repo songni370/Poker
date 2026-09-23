@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify'
+import Fastify, { type FastifyInstance } from 'fastify'
 import { pino } from 'pino'
 import fastifyStatic from '@fastify/static'
 import { existsSync, readFileSync } from 'node:fs'
@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 import type { DbHandle } from './db/index.ts'
 import { Repo } from './repo.ts'
 import { RoomManager } from './rooms.ts'
-import { createLogger, type LogLevel } from './logger.ts'
+import { createLogger, textLogStream, type LogLevel } from './logger.ts'
 import { QuietRequestLogger } from './log-controller.ts'
 import { DEFAULT_MAX_ROOMS } from '../shared/protocol.ts'
 import { registerHttpRoutes } from './routes.ts'
@@ -51,7 +51,7 @@ export interface BuiltApp {
 export async function buildApp(handle: DbHandle, options: BuildAppOptions = {}): Promise<BuiltApp> {
   // 日志策略见 logger.ts：
   //   - 关闭 Fastify 的「每个请求两行」噪声（QuietRequestLogger）；
-  //   - pino 去掉 pid/hostname，时间戳由 pino 统一打；
+  //   - Pino 与业务日志统一输出精简文本；
   //   - 只保留启动 / 数据库升级 / 建房 / 每手结算 / 房间回收 / 关服 + 错误。
   const level = normalizeLogLevel(
     options.logLevel ?? process.env.LOG_LEVEL,
@@ -59,21 +59,18 @@ export async function buildApp(handle: DbHandle, options: BuildAppOptions = {}):
   )
   const logger = createLogger(level)
 
-  // Fastify 自己的日志（app.log，框架级提示用）沿用同一套约定：base 去掉 pid/hostname。
-  const fastifyLogger: FastifyServerOptions['logger'] = {
-    level: level === 'silent' ? 'silent' : level,
-    base: undefined,
-    // 与 logger.ts 一致的 ISO 时间戳：两种来源的日志行长得一样。
-    timestamp: pino.stdTimeFunctions.isoTime,
-    // 日志脱敏：不记录凭证类请求头；底牌等敏感字段由业务层保证不入日志。
-    redact: {
-      paths: ['req.headers.authorization', 'req.headers.cookie', 'res.headers["set-cookie"]'],
-      remove: true,
-    },
-  }
-
   const app = Fastify({
-    logger: fastifyLogger,
+    logger: {
+      level,
+      base: undefined,
+      timestamp: pino.stdTimeFunctions.epochTime,
+      stream: textLogStream,
+      // 日志脱敏：不记录凭证类请求头；底牌等敏感字段由业务层保证不入日志。
+      redact: {
+        paths: ['req.headers.authorization', 'req.headers.cookie', 'res.headers["set-cookie"]'],
+        remove: true,
+      },
+    },
     logController: new QuietRequestLogger(),
     bodyLimit: 64 * 1024,
   })

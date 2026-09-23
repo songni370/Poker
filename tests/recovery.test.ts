@@ -292,6 +292,8 @@ test('单进程重启：从 SQLite 快照恢复一致牌局，继续打完且不
   // 再重启一次：结算后的状态同样可恢复，且不会二次结算
   const third = await startServer(dbPath)
   t.after(third.stop)
+  const settledRoom = await fetch(`${third.base}/api/rooms/${before.roomId}`)
+  assert.equal(settledRoom.status, 200, '摊牌快照恢复后房间仍应存在')
   const rows2 = third.handle.db
     .prepare('SELECT COUNT(*) AS c FROM hand_results WHERE hand_id = ?')
     .get(handId) as unknown as { c: number }

@@ -3,8 +3,8 @@
 // 为什么要测：日志是**给人看的**，最容易悄悄退化——要么被请求级噪声淹没，
 // 要么被人顺手改成打一整坨 JSON，要么在测试里刷屏。这里把三条约定钉住：
 //   1) silent 级别完全不输出（测试环境靠它保持 node --test 输出干净）；
-//   2) info 级别的每行都是「一条消息 + ISO 时间戳」，不带 pid/hostname 这类噪声；
-//   3) 结构化上下文作为数据保留（便于 grep），但消息本身仍是人话。
+//   2) 每行使用 `[yy/mm/dd HH:mm:ss UTC] LEVEL: message` 格式；
+//   3) 上下文压成 key=value，避免把 JSON 直接展示给人看。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createLogger, silentLogger } from '../src/server/logger.ts'
@@ -37,29 +37,27 @@ test('日志：silent 级别什么也不输出', () => {
   assert.equal(createLogger('silent'), silentLogger)
 })
 
-test('日志：info 每行一条消息，带 ISO 时间戳，不带 pid/hostname', () => {
+test('日志：info 输出指定时间戳和级别格式', () => {
   const lines = capture(() => createLogger('info').info('建房「周末局」房主 阿水')).split('\n')
   assert.equal(lines.length, 1)
-  const line = JSON.parse(lines[0]!) as { level: number; time: string; msg: string; pid?: number; hostname?: string }
-  assert.equal(line.msg, '建房「周末局」房主 阿水')
-  assert.equal(line.level, 30)
-  // ISO 时间戳：肉眼可读、可排序。
-  assert.match(line.time, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
-  // 单进程部署里 pid/hostname 只是噪声，必须去掉。
-  assert.equal(line.pid, undefined)
-  assert.equal(line.hostname, undefined)
+  assert.match(lines[0]!, /^\[\d{2}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2} UTC\] INFO: 建房「周末局」房主 阿水$/)
 })
 
-test('日志：上下文里的 Error 压成一行文本（否则 pino 会输出成 {} 把原因丢掉）', () => {
+test('日志：上下文压成简洁的 key=value 文本，Error 保留原因', () => {
   const lines = capture(() =>
     createLogger('info').error('端口监听失败，进程退出', { host: '127.0.0.1', port: 3000, detail: new Error('EADDRINUSE') }),
   ).split('\n')
   assert.equal(lines.length, 1)
-  const line = JSON.parse(lines[0]!) as Record<string, unknown>
-  assert.equal(line.msg, '端口监听失败，进程退出')
-  assert.equal(line.host, '127.0.0.1')
-  assert.equal(line.port, 3000)
-  assert.equal(line.detail, 'EADDRINUSE')
+  assert.match(lines[0]!, / ERROR: 端口监听失败，进程退出 host=127\.0\.0\.1 port=3000 detail=EADDRINUSE$/)
+})
+
+test('日志：长文本按 120 个字符换行，续行缩进对齐', () => {
+  const lines = capture(() => createLogger('info').info('牌局摘要'.repeat(50))).split('\n')
+  assert.ok(lines.length > 1)
+  assert.match(lines[0]!, /^\[\d{2}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2} UTC\] INFO: /)
+  const indent = ' '.repeat(lines[0]!.indexOf('INFO: ') + 'INFO: '.length)
+  assert.ok(lines.slice(1).every((line) => line.startsWith(indent)))
+  assert.ok(lines.every((line) => Array.from(line).length <= 120))
 })
 
 test('日志：warn 及以上才输出时，info 被过滤', () => {

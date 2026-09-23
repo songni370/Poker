@@ -179,6 +179,8 @@ test('最小加注与未满额 All-in：不重新开放已行动玩家的加注�
     !p1Actions.some((action) => action.action === 'raise'),
     '未满额 all-in 后，已行动过的 p1 不得再加注',
   )
+  assert.ok(!p1Actions.some((action) => action.action === 'all_in'), '不能用全下绕过未重开的加注权')
+  assert.throws(() => table.act('p1', 'all_in'), /当前不合法操作/)
   assert.equal(p1Actions.find((action) => action.action === 'call')!.amount, 10, 'p1 仍需补齐 10')
 
   table.act('p1', 'call')
@@ -186,6 +188,32 @@ test('最小加注与未满额 All-in：不重新开放已行动玩家的加注�
   const flop = table.publicState()
   assert.equal(flop.street, 'flop')
   assert.equal(flop.potTotal, 440, '四人各投入 110')
+})
+
+test('多次短额全下累计成完整加注后，给先前行动者重新开放加注', () => {
+  const config = { ...CONFIG, smallBlind: 50, bigBlind: 100 }
+  let table = makeTable([
+    ['c', 0, 2000],
+    ['d', 1, 200],
+    ['e', 2, 2000],
+    ['a', 3, 2000],
+    ['b', 4, 125],
+  ], config)
+  table.startHand({ handId: 'h-cumulative', rng: seededRng(1), buttonSeat: 0 })
+  table.act('a', 'call')
+  table.act('b', 'all_in') // 100 → 125
+  const oldSnapshot = table.serialize()
+  delete oldSnapshot.lastActedBet
+  table = HoldemTable.restore(oldSnapshot)
+  table.act('c', 'call')
+  table.act('d', 'all_in') // 125 → 200；两次短额合计等于完整的 100 加注
+  table.act('e', 'call')
+
+  assert.equal(table.publicState().actingSeat, 3)
+  assert.equal(table.publicState().minRaise, 100)
+  assert.equal(table.legalActions('a').find((action) => action.action === 'raise')?.min, 300)
+  table.act('a', 'raise', 300)
+  assert.equal(table.publicState().currentBet, 300)
 })
 
 test('非法操作被拒绝且不改变状态', () => {
@@ -245,6 +273,28 @@ test('三家不同筹码全下：主池与边池按牌力分配，未被跟注�
   assert.equal(byPlayer.get('p3'), 1500)
   assert.equal(byPlayer.get('p2'), 1000)
   assert.equal(byPlayer.get('p1'), 2000)
+})
+
+test('全下后离座仍参与边池，坐回时不能在本手中重新买入或换座', () => {
+  const table = makeTable([
+    ['a', 0, 1000],
+    ['b', 1, 500],
+    ['c', 2, 500],
+  ])
+  table.startHand({ handId: 'h-away-allin', rng: seededRng(9), buttonSeat: 0 })
+  table.act('a', 'all_in')
+  table.leave('a')
+  assert.equal(table.seatOf('a')!.folded, false)
+  assert.throws(() => table.reSit('a', 'a', 3), /本手牌结束后才能换座/)
+  table.sit('a', 'a', 0, 2000)
+  assert.equal(table.seatOf('a')!.stack, 0, '本手仍在进行，不可补充筹码')
+  table.act('b', 'all_in')
+  table.act('c', 'all_in')
+
+  const result = table.publicState().result!
+  assert.equal(result.potTotal, 2000)
+  assert.equal(result.winners.reduce((sum, winner) => sum + winner.amount, 0), 2000)
+  assert.equal(table.totalChips(), 2000)
 })
 
 test('全员弃牌：最后一人直接收池，不进入摊牌', () => {
@@ -414,6 +464,41 @@ test('快照往返：中局序列化再恢复，状态逐字节一致且能继�
   }
   assert.deepEqual(restored.publicState().result, original.publicState().result)
   assert.equal(restored.totalChips(), 6000, '恢复后继续打完仍须筹码守恒')
+})
+
+test('摊牌后的亮牌快照能恢复，且亮牌必须等于该玩家的底牌', () => {
+  const table = makeTable([
+    ['a', 0, 20],
+    ['b', 1, 20],
+  ])
+  table.startHand({ handId: 'h-showdown-restore', rng: seededRng(2), buttonSeat: 0 })
+  table.act('a', 'call')
+  const snapshot = table.serialize()
+  assert.equal(snapshot.phase, 'settlement')
+  assert.deepEqual(HoldemTable.restore(snapshot).publicState(), table.publicState())
+
+  const corrupted = structuredClone(snapshot)
+  corrupted.seats[0]!.revealedCards = [...corrupted.seats[1]!.holeCards]
+  assert.throws(() => HoldemTable.restore(corrupted), /快照亮牌与底牌不一致/)
+})
+
+test('结算前退出的玩家底牌仍计入私有快照的 52 张校验', () => {
+  const table = makeTable([
+    ['a', 0, 1000],
+    ['b', 1, 1000],
+    ['c', 2, 1000],
+  ])
+  table.startHand({ handId: 'h-removed-cards', rng: seededRng(4), buttonSeat: 0 })
+  table.removePlayer('a')
+  table.removePlayer('b')
+  const snapshot = table.serialize()
+  assert.equal(snapshot.phase, 'settlement')
+  assert.equal(snapshot.removedHoleCards?.length, 4)
+  assert.deepEqual(HoldemTable.restore(snapshot).publicState(), table.publicState())
+
+  const corrupted = structuredClone(snapshot)
+  corrupted.removedHoleCards!.pop()
+  assert.throws(() => HoldemTable.restore(corrupted), /快照牌数不为 52/)
 })
 
 test('快照校验：损坏或版本不符的快照必须被拒绝，不能带病恢复', () => {

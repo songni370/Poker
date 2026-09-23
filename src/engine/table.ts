@@ -96,6 +96,8 @@ export interface TableSnapshot {
   deck: Card[]
   burn: Card[]
   board: Card[]
+  /** 本手结算时已退出玩家的底牌，只用于恢复时核对完整牌堆。 */
+  removedHoleCards?: Card[]
   phase: HandPhase
   street: Street | null
   handId: string | null
@@ -110,6 +112,8 @@ export interface TableSnapshot {
   minRaise: number
   needsToAct: number[]
   raiseAllowed: [number, boolean][]
+  /** 上次行动后本轮的最高下注额；旧版快照可缺省。 */
+  lastActedBet?: [number, number][]
   result: HandResultPublic | null
 }
 
@@ -123,6 +127,7 @@ export class HoldemTable {
   private deck: Card[] = []
   private burn: Card[] = []
   private board: Card[] = []
+  private removedHoleCards: Card[] = []
   private phase: HandPhase = 'waiting'
   private street: Street | null = null
   private handId: string | null = null
@@ -138,8 +143,9 @@ export class HoldemTable {
   private minRaise = 0
   /** 本轮仍需行动（且能行动）的座位。 */
   private needsToAct = new Set<number>()
-  /** 每个座位本轮是否仍有加注权（未满额 all-in 后会被收回）。 */
+  /** 每个座位本轮是否仍有加注权；累计短额加注由 lastActedBet 补判。 */
   private raiseAllowed = new Map<number, boolean>()
+  private lastActedBet = new Map<number, number>()
   private result: HandResultPublic | null = null
 
   constructor(config: TableConfig) {
@@ -202,7 +208,7 @@ export class HoldemTable {
       if (!existing.away) throw new EngineError('bad_state', '你已经入座')
       existing.away = false
       existing.pendingRemoval = false
-      if (existing.stack <= 0) existing.stack = stack
+      if (existing.stack <= 0 && !this.isHandRunning()) existing.stack = stack
       return
     }
     if (this.seatAt(seat)) throw new EngineError('bad_state', '该座位已被占用')
@@ -231,6 +237,7 @@ export class HoldemTable {
    * 语义：离座只是「暂时不玩」，座位与筹码仍属于本人；本人可以选择**任意**空位坐下，
    * 而不是只能坐回原位。原座位腾空释放，筹码原样带到新座位——
    * 所以这里的 `buyIn` 只在原筹码为 0（输光了、重新买入）时才用到。
+   * 仍参与本手的离座玩家要等结算后才能换座。
    *
    * @returns 离座前的筹码（服务端用它决定是否需要重新买入，以及给客户端回执金额）
    */
@@ -238,6 +245,9 @@ export class HoldemTable {
     const existing = this.seatOf(playerId)
     if (!existing || !existing.away) {
       throw new EngineError('bad_state', '只有离座保留座位的玩家可以换座位')
+    }
+    if (this.isHandRunning() && existing.inHand) {
+      throw new EngineError('bad_state', '本手牌结束后才能换座')
     }
     if (existing.seat === seat) {
       this.sit(playerId, nickname, seat, buyIn)
@@ -255,14 +265,15 @@ export class HoldemTable {
 
   /**
    * 离座（seat.leave）：座位与筹码都留着，只有本人能坐回。
-   * 手牌进行中离座会先自动弃牌，已投入的筹码留在池中（本手照样参与分池），
+   * 手牌进行中离座会先自动弃牌；已全下者保留争池资格。
+   * 已投入的筹码留在池中，
    * 本手结束后座位仍然保留，随时可以坐回来接着玩。
    */
   leave(playerId: string): void {
     const seat = this.seatOf(playerId)
     if (!seat) return
     seat.away = true
-    if (this.isHandRunning() && seat.inHand && !seat.folded) {
+    if (this.isHandRunning() && seat.inHand && !seat.folded && !seat.allIn) {
       this.foldOut(seat)
     }
   }
@@ -282,7 +293,8 @@ export class HoldemTable {
 
   /**
    * 退出房间：真正释放座位。
-   * 手牌进行中且筹码还在池里时只能先弃牌 + 标记，等本手结算后再移除（否则筹码会凭空消失）。
+   * 手牌进行中且筹码还在池里时标记待移除，等本手结算后再移除。
+   * 未全下者先弃牌；已全下者保留争池资格。
    */
   removePlayer(playerId: string): void {
     const seat = this.seatOf(playerId)
@@ -290,7 +302,7 @@ export class HoldemTable {
     if (this.isHandRunning() && seat.inHand) {
       seat.away = true
       seat.pendingRemoval = true
-      if (!seat.folded) this.foldOut(seat)
+      if (!seat.folded && !seat.allIn) this.foldOut(seat)
       return
     }
     this.seats = this.seats.filter((entry) => entry.playerId !== playerId)
@@ -325,6 +337,7 @@ export class HoldemTable {
     this.handNo += 1
     this.result = null
     this.board = []
+    this.removedHoleCards = []
     this.burn = []
     // deck 仅用于测试注入固定牌序（数组末尾是第一个被发出的牌）；生产走安全随机洗牌。
     this.deck = options.deck ? [...options.deck] : shuffle(createDeck(), options.rng)
@@ -387,7 +400,10 @@ export class HoldemTable {
     if (toCall <= 0) actions.push({ action: 'check' })
     else actions.push({ action: 'call', amount: Math.min(toCall, seat.stack) })
 
-    const mayRaise = this.raiseAllowed.get(seat.seat) ?? false
+    const lastBet = this.lastActedBet.get(seat.seat)
+    const mayRaise =
+      (this.raiseAllowed.get(seat.seat) ?? false) ||
+      (lastBet !== undefined && this.currentBet - lastBet >= this.minRaise)
     if (mayRaise && maxTarget > this.currentBet) {
       const minTarget = this.currentBet === 0 ? this.config.bigBlind : this.currentBet + this.minRaise
       const bounded = Math.min(minTarget, maxTarget)
@@ -398,7 +414,9 @@ export class HoldemTable {
       )
     }
 
-    if (seat.stack > 0) actions.push({ action: 'all_in', amount: maxTarget })
+    if (seat.stack > 0 && (maxTarget <= this.currentBet || mayRaise)) {
+      actions.push({ action: 'all_in', amount: maxTarget })
+    }
     return actions
   }
 
@@ -436,6 +454,7 @@ export class HoldemTable {
         break
     }
 
+    this.lastActedBet.set(seat.seat, this.currentBet)
     this.actionCursor = seat.seat
     this.progress()
   }
@@ -520,6 +539,7 @@ export class HoldemTable {
     const active = this.activeSeats()
     this.needsToAct = new Set(active.map((seat) => seat.seat))
     this.raiseAllowed = new Map(active.map((seat) => [seat.seat, true]))
+    this.lastActedBet.clear()
     this.firstToActSeat = firstToActSeat
     this.actionCursor = null
     this.actingSeat = null
@@ -630,7 +650,9 @@ export class HoldemTable {
     this.actingSeat = null
     this.needsToAct.clear()
     this.raiseAllowed.clear()
+    this.lastActedBet.clear()
     // 本手结束：退出房间的人现在可以真正让出座位（筹码已经结算完了）。
+    this.removedHoleCards.push(...this.seats.filter((seat) => seat.pendingRemoval).flatMap((seat) => seat.holeCards))
     this.seats = this.seats.filter((seat) => !seat.pendingRemoval)
   }
 
@@ -773,6 +795,7 @@ export class HoldemTable {
       deck: [...this.deck],
       burn: [...this.burn],
       board: [...this.board],
+      removedHoleCards: [...this.removedHoleCards],
       phase: this.phase,
       street: this.street,
       handId: this.handId,
@@ -787,6 +810,7 @@ export class HoldemTable {
       minRaise: this.minRaise,
       needsToAct: [...this.needsToAct],
       raiseAllowed: [...this.raiseAllowed.entries()],
+      lastActedBet: [...this.lastActedBet.entries()],
       result: this.result ? { ...this.result } : null,
     }
   }
@@ -801,8 +825,10 @@ export class HoldemTable {
       !Array.isArray(snapshot.deck) ||
       !Array.isArray(snapshot.burn) ||
       !Array.isArray(snapshot.board) ||
+      (snapshot.removedHoleCards !== undefined && !Array.isArray(snapshot.removedHoleCards)) ||
       !Array.isArray(snapshot.needsToAct) ||
       !Array.isArray(snapshot.raiseAllowed) ||
+      (snapshot.lastActedBet !== undefined && !Array.isArray(snapshot.lastActedBet)) ||
       typeof snapshot.config !== 'object' ||
       snapshot.config === null
     ) {
@@ -867,18 +893,31 @@ export class HoldemTable {
       throw new EngineError('bad_state', `快照公共牌数量异常：${String(snapshot.board.length)}`)
     }
 
-    // 全局查重：牌堆 + 弃牌 + 公共牌 + 所有底牌之间不允许出现同一张牌。
+    // 亮出的牌只是底牌的公开副本，不应作为另一张实体牌参与查重。
+    for (const entry of snapshot.seats) {
+      if (entry.revealedCards !== null &&
+        (entry.revealedCards.length !== entry.holeCards.length ||
+          entry.revealedCards.some((card, index) => card !== entry.holeCards[index]))) {
+        throw new EngineError('bad_state', '快照亮牌与底牌不一致')
+      }
+    }
+    // 全局查重：牌堆 + 烧牌 + 公共牌 + 所有底牌之间不允许出现同一张牌。
     const allCards = [
       ...snapshot.deck,
       ...snapshot.burn,
       ...snapshot.board,
-      ...snapshot.seats.flatMap((entry) => [...entry.holeCards, ...(entry.revealedCards ?? [])]),
+      ...(snapshot.removedHoleCards ?? []),
+      ...snapshot.seats.flatMap((entry) => entry.holeCards),
     ]
     if (new Set(allCards).size !== allCards.length) throw new EngineError('bad_state', '快照出现重复的牌')
     if (snapshot.phase === 'waiting') {
       // 还没开过手：不该有任何已发出的牌（此时牌堆本来就是空的）。
       if (allCards.length > 0) throw new EngineError('bad_state', '未开局快照不应含已发出的牌')
-    } else if (allCards.length !== 52) {
+    } else if (
+      snapshot.phase === 'settlement' && snapshot.removedHoleCards === undefined
+        ? allCards.length > 52
+        : allCards.length !== 52
+    ) {
       // 手牌进行中：牌堆 + 已发出的牌必须刚好是完整一副。
       throw new EngineError('bad_state', `快照牌数不为 52：${String(allCards.length)}`)
     }
@@ -889,10 +928,15 @@ export class HoldemTable {
     if (snapshot.actingSeat !== null && !snapshot.needsToAct.includes(snapshot.actingSeat)) {
       throw new EngineError('bad_state', '快照行动者不在待行动集合中')
     }
+    if (snapshot.lastActedBet?.some(([seat, bet]) =>
+      !seenSeatNumbers.has(seat) || !Number.isSafeInteger(bet) || bet < 0 || bet > snapshot.currentBet)) {
+      throw new EngineError('bad_state', '快照上次行动下注额不合法')
+    }
 
     table.deck = [...snapshot.deck]
     table.burn = [...snapshot.burn]
     table.board = [...snapshot.board]
+    table.removedHoleCards = [...(snapshot.removedHoleCards ?? [])]
     table.phase = snapshot.phase
     table.street = snapshot.street
     table.handId = snapshot.handId
@@ -907,6 +951,9 @@ export class HoldemTable {
     table.minRaise = snapshot.minRaise
     table.needsToAct = new Set(snapshot.needsToAct)
     table.raiseAllowed = new Map(snapshot.raiseAllowed)
+    table.lastActedBet = new Map(
+      snapshot.lastActedBet ?? table.seats.map((seat) => [seat.seat, seat.committedStreet]),
+    )
     table.result = snapshot.result ? { ...snapshot.result } : null
 
     return table
