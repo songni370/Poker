@@ -194,13 +194,8 @@ onBeforeUnmount(() => {
       <p v-for="item in notices" :key="item.key" class="strip-row" :class="`is-${item.tone}`">
         <span class="strip-icon" aria-hidden="true">{{ iconOf(item) }}</span>
         <span class="strip-text">{{ item.text }}</span>
-        <button
-          type="button"
-          class="strip-close"
-          :aria-label="`关闭通知：${item.text}`"
-          title="关闭这条通知"
-          @click="dismiss(item.key)"
-        >
+        <button type="button" class="strip-close" :aria-label="`关闭通知：${item.text}`" title="关闭这条通知"
+          @click="dismiss(item.key)">
           <i class="pi pi-times" aria-hidden="true" />
         </button>
       </p>

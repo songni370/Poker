@@ -737,8 +737,6 @@ const historyAria = computed(() =>
 /* ───────────── 提示音开关 ─────────────
  * soundEnabled 已持久化；打开时必须由用户手势解锁音频上下文。 */
 
-const soundAria = computed(() => `提示音：${soundEnabled.value ? '开' : '关'}`)
-
 function toggleSound(): void {
   soundEnabled.value = !soundEnabled.value
   if (soundEnabled.value) {
@@ -1059,81 +1057,66 @@ onBeforeUnmount(() => onFatalRoomError(null))
         <Select v-model="scenario" :options="scenarioOptions" option-label="label" option-value="value" size="small" />
       </label>
 
-      <Button
-        size="small"
-        text
-        class="bar-secondary"
-        aria-label="邀请朋友"
-        :title="'邀请朋友：房间号与邀请链接'"
-        @click="openDrawer('invite')"
-      >
-        <i class="pi pi-share-alt" aria-hidden="true" />
-        <span>邀请</span>
-      </Button>
-      <Button
-        size="small"
-        text
-        class="bar-secondary"
-        aria-label="规则"
-        :title="'查看规则摘要'"
-        @click="openDrawer('rules')"
-      >
-        <i class="pi pi-book" aria-hidden="true" />
-        <span>规则</span>
-      </Button>
-      <Button size="small" text class="bar-secondary" :aria-label="historyAria" :title="'查看手牌历史'" @click="openDrawer('history')">
-        <i class="pi pi-list" aria-hidden="true" />
-        <span>历史</span>
-        <!-- 手数只在宽屏显示，窄屏交给 aria-label 说明。 -->
-        <span v-if="game.history.length > 0" class="count-chip count-chip--history num" aria-hidden="true">{{ game.history.length }}</span>
-      </Button>
-      <Button size="small" text class="bar-secondary" :aria-label="chatAria" :title="chatTitle" @click="openDrawer('chat')">
-        <i class="pi pi-comments" aria-hidden="true" />
-        <span>聊天</span>
-        <!-- 未读数：数字 + aria-label 双重说明，不靠颜色或红点单独表意。 -->
-        <span v-if="chat.unread > 0" class="count-chip count-chip--unread num" aria-hidden="true">{{ unreadText }}</span>
-      </Button>
-      <Button
-        size="small"
-        text
-        class="bar-secondary"
-        :aria-label="soundAria"
-        :aria-pressed="soundEnabled"
-        :title="`${soundAria}，点击切换`"
-        @click="toggleSound"
-      >
-        <i :class="soundEnabled ? 'pi pi-volume-up' : 'pi pi-volume-off'" aria-hidden="true" />
-        <span>提示音：{{ soundEnabled ? '开' : '关' }}</span>
-      </Button>
-      <Button
-        size="small"
-        text
-        class="bar-more"
-        :aria-label="moreAria"
-        :title="room.isHost ? '更多操作（邀请 / 规则 / 历史 / 聊天 / 提示音 / 移除玩家）' : '更多操作（邀请 / 规则 / 历史 / 聊天 / 提示音）'"
-        aria-haspopup="true"
-        aria-controls="bar-more-menu"
-        @click="toggleMore"
-      >
-        <i class="pi pi-ellipsis-h" aria-hidden="true" />
-        <span>更多</span>
-        <span v-if="chat.unread > 0" class="count-chip count-chip--unread num" aria-hidden="true">{{ unreadText }}</span>
-      </Button>
-      <Menu id="bar-more-menu" ref="moreMenu" :model="moreItems" :popup="true" />
+      <!-- 顶栏右侧操作区：突出核心高频功能（手牌历史、聊天），兼顾邀请与收纳菜单 -->
+      <div class="bar-right" role="toolbar" aria-label="牌桌快捷工具栏">
+        <!-- 1. 手牌历史：突出展示，带扑克历史图标与手数徽标 -->
+        <Button
+          size="small"
+          text
+          class="bar-btn bar-btn--history"
+          :aria-label="historyAria"
+          :title="'查看手牌历史'"
+          @click="openDrawer('history')"
+        >
+          <i class="pi pi-history" aria-hidden="true" />
+          <span class="bar-btn-text">历史</span>
+          <span v-if="game.history.length > 0" class="count-chip count-chip--history num" aria-hidden="true">{{ game.history.length }}</span>
+        </Button>
 
-      <!-- 宽屏下「更多」菜单是收起的，所以主持人另给一个直达入口；
-           ≤1100px 时它跟其它二级操作一起收进「更多」菜单，不会把顶栏挤成两行。 -->
-      <Button
-        v-if="room.isHost"
-        size="small"
-        text
-        class="bar-secondary"
-        :title="'移除玩家（主持人）'"
-        @click="openKick"
-      >
-        <i class="pi pi-user-minus" aria-hidden="true" />
-        <span>移除玩家</span>
-      </Button>
+        <!-- 2. 聊天：突出展示，带气泡图标与未读数徽标，有 @ 时视觉强化 -->
+        <Button
+          size="small"
+          text
+          class="bar-btn bar-btn--chat"
+          :class="{ 'has-unread': chat.unread > 0, 'has-mention': mentionCount > 0 }"
+          :aria-label="chatAria"
+          :title="chatTitle"
+          @click="openDrawer('chat')"
+        >
+          <i class="pi pi-comments" aria-hidden="true" />
+          <span class="bar-btn-text">聊天</span>
+          <span v-if="chat.unread > 0" class="count-chip count-chip--unread num" aria-hidden="true">{{ unreadText }}</span>
+        </Button>
+
+        <!-- 3. 邀请朋友：快捷桌牌与复制入口 -->
+        <Button
+          size="small"
+          text
+          class="bar-btn bar-btn--invite"
+          aria-label="邀请朋友"
+          :title="'邀请朋友：房间号与邀请链接'"
+          @click="openDrawer('invite')"
+        >
+          <i class="pi pi-share-alt" aria-hidden="true" />
+          <span class="bar-btn-text">邀请</span>
+        </Button>
+
+        <!-- 4. 更多设置菜单：收纳规则摘要、提示音与主持人管理操作 -->
+        <Button
+          size="small"
+          text
+          class="bar-btn bar-btn--more bar-more"
+          :aria-label="moreAria"
+          :title="room.isHost ? '更多操作（邀请 / 规则 / 历史 / 聊天 / 提示音 / 移除玩家）' : '更多操作（邀请 / 规则 / 历史 / 聊天 / 提示音）'"
+          aria-haspopup="true"
+          aria-controls="bar-more-menu"
+          @click="toggleMore"
+        >
+          <i class="pi pi-ellipsis-h" aria-hidden="true" />
+          <span class="bar-btn-text">更多</span>
+        </Button>
+        <Menu id="bar-more-menu" ref="moreMenu" :model="moreItems" :popup="true" />
+      </div>
 
       <!--
         「开始下一手」与「退出房间」已按第 3 项需求搬到底部操作栏（见下方 ActionBar 的 secondary 行）：
@@ -1216,28 +1199,36 @@ onBeforeUnmount(() => onFatalRoomError(null))
           </span>
         </span>
         <span class="hero-seat-actions">
+          <!-- 房主开始对局按钮：置于手牌与资产区域，一目了然 -->
+          <Button
+            v-if="canStartNextHand"
+            severity="success"
+            class="hero-start-btn"
+            :title="hasPlayedHand ? '开始下一手牌' : '开始第一手牌'"
+            :aria-label="hasPlayedHand ? '开始下一手' : '开始牌局'"
+            @click="startNextHand"
+          >
+            <i class="pi pi-play" aria-hidden="true" />
+            <span>{{ hasPlayedHand ? '开始下一手' : '开始牌局' }}</span>
+          </Button>
           <Button size="small" text :title="'离座（座位与筹码为你保留）'" @click="requestLeaveSeat">
-            <i class="pi pi-sign-out" aria-hidden="true" />
+            <i class="pi pi-user-minus" aria-hidden="true" />
             <span>离座</span>
           </Button>
           <Button size="small" text :title="'退出房间（释放座位）'" @click="exitRoomOpen = true">
-            <i class="pi pi-times" aria-hidden="true" />
+            <i class="pi pi-power-off" aria-hidden="true" />
             <span>退出房间</span>
           </Button>
         </span>
       </div>
 
-      <!-- 观战者：只显示公开信息与入座入口，绝不渲染任何玩家的底牌。 -->
+      <!-- 观战者：只显示公开状态与退出入口，绝不渲染底牌与下注操作栏。 -->
       <section v-else-if="game.self" class="spectator" aria-labelledby="spectator-state">
         <p id="spectator-state" class="spectator-state">
           <i :class="mySeatAway ? 'pi pi-user-minus' : 'pi pi-eye'" aria-hidden="true" />
           <b>{{ mySeatAway ? '已离座' : '观战中' }}</b>
-          <span class="muted">
-            {{
-              mySeatAway
-                ? `座位与筹码保留着（${String((game.self.seat ?? 0) + 1)} 号位），随时可以坐回。`
-                : '你正在旁观这桌牌局，只能看到已经公开的牌。'
-            }}
+          <span v-if="mySeatAway" class="muted">
+            {{ `座位保留在 ${String((game.self.seat ?? 0) + 1)} 号位` }}
           </span>
         </p>
 
@@ -1246,12 +1237,18 @@ onBeforeUnmount(() => onFatalRoomError(null))
           <b class="num">{{ occupiedCount }}/{{ maxSeats }}</b>
         </p>
 
-        <!--
-          第 3 项需求：底部不再重复展示「选择座位」。
-          座位号与「入座」按钮已经画在桌面的每个空位上（PokerTable 的 .seat-empty），
-          两处并存反而让人不知道点哪个；这里只留一句指路 + 坐回/退出。
-        -->
         <div class="spectator-actions">
+          <!-- 观战中的房主也可开始对局 -->
+          <Button
+            v-if="canStartNextHand"
+            severity="success"
+            :title="hasPlayedHand ? '开始下一手牌' : '开始第一手牌'"
+            :aria-label="hasPlayedHand ? '开始下一手' : '开始牌局'"
+            @click="startNextHand"
+          >
+            <i class="pi pi-play" aria-hidden="true" />
+            <span>{{ hasPlayedHand ? '开始下一手' : '开始牌局' }}</span>
+          </Button>
           <Button
             v-if="mySeatAway"
             :title="`坐回 ${String((game.self.seat ?? 0) + 1)} 号座位`"
@@ -1265,47 +1262,59 @@ onBeforeUnmount(() => onFatalRoomError(null))
             <span>退出房间</span>
           </Button>
         </div>
-
-        <p v-if="mySeatAway" class="hint" role="status">
-          座位为你保留着，点「坐回 {{ (game.self.seat ?? 0) + 1 }} 号位」就能接着玩。
-        </p>
-        <p v-else class="hint spectator-tip">
-          点桌面上的空位（带座位号与「入座」）即可买入落座；入座后参与下一手牌，观战期间不下注、不行动。
-        </p>
       </section>
 
       <p v-else class="hint">正在载入你的座位信息…</p>
 
       <!--
-        底部操作栏：动作按钮 + 下注额度 + 局级操作（开始下一手 / 离座 / 退出房间）。
-        观战者与离座者也渲染它——否则「开始牌局」（主持人）与「退出房间」就没有入口了。
+        底部操作栏：仅入座且未离座的玩家才渲染操作栏；观战中不展示操作栏。
       -->
       <ActionBar
-        v-if="game.self"
+        v-if="game.isSeated && !mySeatAway"
         class="hero-actions"
-        :legal-actions="game.isSeated && !mySeatAway ? game.myLegalActions : []"
+        :legal-actions="game.myLegalActions"
         :pot-total="potTotal"
         :current-bet="game.state?.currentBet ?? 0"
         :my-stack="myStack"
-        :is-my-turn="game.isSeated && !mySeatAway && game.isMyTurn"
+        :is-my-turn="game.isMyTurn"
         :remaining-seconds="remainingSeconds"
         :turn-seconds="turnSeconds"
         :blocked-reason="blockedReason"
         :enabled="connection.isOnline"
-        :can-start-hand="canStartNextHand"
-        :has-played-hand="hasPlayedHand"
-        :seated="game.isSeated && !mySeatAway"
+        :seated="true"
         @action="submitAction"
-        @start="startNextHand"
-        @leave="requestLeaveSeat"
-        @exit="exitRoomOpen = true"
       />
     </footer>
 
-    <!-- 侧边抽屉：规则 / 手牌历史 / 聊天；默认收起，不抢占桌面宽度。 -->
+    <!-- 侧边抽屉：聊天 / 手牌历史 / 邀请 / 规则；默认收起，不抢占桌面宽度。 -->
     <Drawer v-model:visible="drawerOpen" position="right" :header="'牌桌信息'" :style="{ width: 'min(92vw, 360px)' }">
       <div class="drawer-inner">
-          <div class="drawer-tabs" role="tablist" aria-label="牌桌信息分类">
+        <div class="drawer-tabs" role="tablist" aria-label="牌桌信息分类">
+          <!-- 优先展示最重要的核心模块：聊天与手牌历史 -->
+          <Button
+            size="small"
+            :severity="drawerSection === 'chat' ? 'help' : 'secondary'"
+            :outlined="drawerSection !== 'chat'"
+            role="tab"
+            :aria-selected="drawerSection === 'chat'"
+            :title="'聊天'"
+            @click="drawerSection = 'chat'"
+          >
+            <span>聊天</span>
+            <span v-if="chat.unread > 0" class="count-chip count-chip--unread num" aria-hidden="true">{{ unreadText }}</span>
+          </Button>
+          <Button
+            size="small"
+            :severity="drawerSection === 'history' ? 'help' : 'secondary'"
+            :outlined="drawerSection !== 'history'"
+            role="tab"
+            :aria-selected="drawerSection === 'history'"
+            :title="'手牌历史'"
+            @click="drawerSection = 'history'"
+          >
+            <span>历史</span>
+            <span v-if="game.history.length > 0" class="count-chip count-chip--history num" aria-hidden="true">{{ game.history.length }}</span>
+          </Button>
           <Button
             size="small"
             :severity="drawerSection === 'invite' ? 'help' : 'secondary'"
@@ -1327,28 +1336,6 @@ onBeforeUnmount(() => onFatalRoomError(null))
             @click="drawerSection = 'rules'"
           >
             <span>规则</span>
-          </Button>
-          <Button
-            size="small"
-            :severity="drawerSection === 'history' ? 'help' : 'secondary'"
-            :outlined="drawerSection !== 'history'"
-            role="tab"
-            :aria-selected="drawerSection === 'history'"
-            :title="'手牌历史'"
-            @click="drawerSection = 'history'"
-          >
-            <span>历史</span>
-          </Button>
-          <Button
-            size="small"
-            :severity="drawerSection === 'chat' ? 'help' : 'secondary'"
-            :outlined="drawerSection !== 'chat'"
-            role="tab"
-            :aria-selected="drawerSection === 'chat'"
-            :title="'聊天'"
-            @click="drawerSection = 'chat'"
-          >
-            <span>聊天</span>
           </Button>
         </div>
 
@@ -1796,21 +1783,31 @@ onBeforeUnmount(() => onFatalRoomError(null))
 }
 
 .hero {
-  display: grid;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-2) var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px var(--space-2) 10px;
+  background: color-mix(in srgb, var(--bg-elevated) 88%, transparent);
+  border-top: 1px solid var(--line);
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.2);
 }
 
 .hero-cards {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  flex-wrap: wrap;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg) 45%, transparent);
+  border: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
 }
 
 .hero-label {
-  font-size: 0.78rem;
+  font-size: 0.76rem;
+  font-weight: 600;
   color: var(--muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 .cards {
@@ -1819,30 +1816,30 @@ onBeforeUnmount(() => onFatalRoomError(null))
   gap: 6px;
 }
 
-/* 「当前牌型 + 筹码」：一组，整体靠右（原来 auto 边距挂在筹码上，
-   牌型要跟筹码挨着，所以边距上移到这一层）。 */
+/* 「当前牌型 + 筹码」：整体靠右，质感胶囊展示 */
 .hero-meta {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--space-2);
-  /* 允许被压窄：窄屏一行放不下时优先省略号码，而不是换行把操作区顶高。 */
   min-width: 0;
   margin-left: auto;
 }
 
 .hero-hand {
   display: inline-flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
-  min-width: 0;
-  font-size: 0.86rem;
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--felt) 35%, transparent);
+  border: 1px solid color-mix(in srgb, var(--felt) 65%, transparent);
+  font-size: 0.84rem;
 }
 
 .hand-name {
-  color: var(--text);
+  color: var(--gold);
   font-size: 0.92rem;
-  /* 引擎给出的牌型名可能带一串踢脚牌（如「高牌（A K 9 7 3）」）：
-     宁可省略号截断也不换行——底部操作区每多一行，矮屏上的牌桌就被挤掉一行。 */
+  font-weight: 700;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
@@ -1851,14 +1848,51 @@ onBeforeUnmount(() => onFatalRoomError(null))
 
 .hero-stack {
   display: inline-flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
-  font-size: 0.86rem;
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg-elevated) 80%, transparent);
+  border: 1px solid var(--line);
+  font-size: 0.84rem;
 }
 
 .hero-stack b {
   color: var(--gold);
-  font-size: 1rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.hero-seat-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.hero-seat-actions :deep(.hero-start-btn) {
+  padding: 4px 12px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #ffffff;
+  background: var(--positive);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 2px 8px rgba(23, 108, 83, 0.4);
+}
+
+.hero-seat-actions :deep(.hero-start-btn:hover) {
+  background: color-mix(in srgb, var(--positive) 85%, #ffffff);
+  color: #ffffff;
+}
+
+.hero-seat-actions :deep(.p-button:not(.hero-start-btn)) {
+  padding: 3px 8px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.hero-seat-actions :deep(.p-button:not(.hero-start-btn):hover) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 10%, transparent);
 }
 
 .hero-actions {
@@ -1969,6 +2003,60 @@ onBeforeUnmount(() => onFatalRoomError(null))
   padding-left: 1.1em;
   display: grid;
   gap: 4px;
+}
+
+/* ───────────── 顶栏右侧重构：主次分明的操作工具栏 ───────────── */
+
+.bar-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+/* 核心焦点：手牌历史 */
+.bar-btn--history {
+  background: color-mix(in srgb, var(--felt) 25%, transparent);
+  border: 1px solid color-mix(in srgb, var(--felt) 50%, transparent);
+  color: var(--text);
+}
+
+.bar-btn--history:hover {
+  background: color-mix(in srgb, var(--felt) 40%, transparent);
+}
+
+/* 核心焦点：聊天 */
+.bar-btn--chat {
+  background: color-mix(in srgb, var(--action) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--action) 40%, transparent);
+  color: var(--text);
+}
+
+.bar-btn--chat:hover {
+  background: color-mix(in srgb, var(--action) 30%, transparent);
+}
+
+.bar-btn--chat.has-unread {
+  border-color: var(--action);
+}
+
+.bar-btn--chat.has-mention {
+  border-color: var(--gold);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--gold) 40%, transparent);
+}
+
+.bar-btn-text {
+  font-size: 0.82rem;
+  font-weight: 500;
 }
 
 /* ───────────── 顶栏角标：手数 / 未读数（数字 + aria-label 双重表意） ───────────── */
@@ -2338,9 +2426,9 @@ onBeforeUnmount(() => onFatalRoomError(null))
     padding-inline: 8px;
   }
 
-  /* 按钮文字（含 PrimeVue 的 label span）在竖屏隐藏：title 与 aria-label 仍完整。 */
-  .hero-cards .hero-seat-actions :deep(.p-button-label),
-  .hero-cards .hero-seat-actions :deep(.p-button > span:not([class])) {
+  /* 按钮文字在竖屏隐藏：离座与退出收成图标，开始对局按钮保留完整文字识别 */
+  .hero-cards .hero-seat-actions :deep(.p-button:not(.hero-start-btn) .p-button-label),
+  .hero-cards .hero-seat-actions :deep(.p-button:not(.hero-start-btn) > span:not([class])) {
     display: none;
   }
 
@@ -2360,16 +2448,18 @@ onBeforeUnmount(() => onFatalRoomError(null))
   }
 
   .bar :deep(.p-button) {
-    min-width: 40px;
-    padding-inline: 10px;
+    min-width: 36px;
+    padding-inline: 7px;
   }
 
-  .bar :deep(.p-button-label) {
-    display: none;
-  }
-
+  .bar-btn-text,
+  .bar :deep(.p-button-label),
   .bar :deep(.p-button > span:not([class])) {
     display: none;
+  }
+
+  .bar-right {
+    gap: 4px;
   }
 
   /* 手数角标窄屏省略（按钮 aria-label 仍带手数）；未读角标始终保留。 */
@@ -2392,7 +2482,17 @@ onBeforeUnmount(() => onFatalRoomError(null))
   .hero {
     /* 竖屏按 2px 一档抠：行间距 6 → 4px、底部内边距 16 → 8px。 */
     gap: 4px;
-    padding-bottom: var(--space-1);
+    padding: 4px var(--space-1) var(--space-1);
+  }
+
+  .hero-hand {
+    padding: 2px 6px;
+    font-size: 0.76rem;
+  }
+
+  .hero-stack {
+    padding: 2px 6px;
+    font-size: 0.76rem;
   }
 
   /* 动作按钮在竖屏收一档内边距：四个按钮合计省 32px（10 → 6px/边）。 */
@@ -2418,21 +2518,11 @@ onBeforeUnmount(() => onFatalRoomError(null))
   }
 }
 /*
- * 中等宽度收纳：顶栏 6 个按钮在 ≤1000px 会折成两行（实测顶栏 61px → 121px）。
- * ≤1100px 时把二级操作收进「更多」菜单，只保留「开始下一手」与「退出」。
+ * 顶栏右侧重构后稳定收敛为 4 个按钮（历史、聊天、邀请、更多），
+ * 无论宽屏还是窄屏均常驻一行，不再发生多余折行。
  */
 .bar-more {
-  display: none;
-}
-
-@media (max-width: 1100px) {
-  .bar-more {
-    display: inline-flex;
-  }
-
-  .bar .bar-secondary {
-    display: none;
-  }
+  display: inline-flex;
 }
 /*
  * 更窄（≤820px）：连收纳后的顶栏也放不下，隐藏「阶段」与连接状态文案
