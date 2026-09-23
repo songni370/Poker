@@ -38,6 +38,11 @@
   --card-back-line: #2c6b8c;
   --gold-soft: rgba(212, 177, 106, 0.42);
   --gold-dim: rgba(212, 177, 106, 0.18);
+  --gold-gradient: linear-gradient(135deg, #f6e27a 0%, #cb9b51 50%, #d4b16a 100%);
+  --gold-glow: 0 0 24px rgba(212, 177, 106, 0.22);
+  --glass-bg: rgba(22, 29, 37, 0.76);
+  --glass-border: rgba(212, 177, 106, 0.18);
+  --glass-blur: 16px;
 
   /* 牌桌几何：椭圆桌面与座位槽位的定位尺寸。 */
   --table-w: min(100%, 1000px);

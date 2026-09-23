@@ -119,10 +119,18 @@ export async function startTestServer(
 }
 
 export async function postJson<T>(url: string, body: unknown): Promise<{ status: number; data: T }> {
+  const path = new URL(url).pathname
+  const requestBody =
+    (path === '/api/rooms' || /^\/api\/rooms\/[^/]+\/join$/.test(path)) &&
+    typeof body === 'object' &&
+    body !== null &&
+    !Array.isArray(body)
+      ? { password: '123456', ...body }
+      : body
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify(requestBody),
   })
   return { status: response.status, data: (await response.json()) as T }
 }

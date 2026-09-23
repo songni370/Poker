@@ -21,7 +21,16 @@ import {
   type ServerEvent,
   type ServerEventType,
 } from '../shared/protocol.ts'
-import { hashToken, newPlayerId, newRoomId, newReconnectToken, tokenMatches, type Repo } from './repo.ts'
+import {
+  hashRoomPassword,
+  hashToken,
+  newPlayerId,
+  newRoomId,
+  newReconnectToken,
+  roomPasswordMatches,
+  tokenMatches,
+  type Repo,
+} from './repo.ts'
 import { silentLogger, type Logger } from './logger.ts'
 
 /** 命令校验失败：只回给发起者，不改变牌局状态。 */
@@ -86,6 +95,8 @@ export interface RoomSnapshot {
   schemaVersion: number
   roomId: string
   name: string
+  /** 服务端私有快照内只保存密码摘要；旧快照可能没有密码。 */
+  passwordHash?: string | null
   hostPlayerId: string
   maxSeats: number
   smallBlind: number
@@ -115,6 +126,7 @@ export interface RoomSnapshot {
 interface RoomInit {
   id: string
   name: string
+  passwordHash?: string | null
   hostPlayerId: string
   maxSeats: number
   smallBlind: number
@@ -129,6 +141,7 @@ interface RoomInit {
 export class RoomRuntime {
   readonly id: string
   readonly name: string
+  readonly passwordHash: string | null
   /** 主持人可以移交：原主持人退出房间时交给下一位成员。 */
   hostPlayerId: string
   readonly maxSeats: number
@@ -180,6 +193,7 @@ export class RoomRuntime {
   constructor(init: RoomInit) {
     this.id = init.id
     this.name = init.name
+    this.passwordHash = init.passwordHash ?? null
     this.hostPlayerId = init.hostPlayerId
     this.maxSeats = init.maxSeats
     this.smallBlind = init.smallBlind
@@ -208,6 +222,7 @@ export class RoomRuntime {
       schemaVersion: SNAPSHOT_VERSION,
       roomId: this.id,
       name: this.name,
+      passwordHash: this.passwordHash,
       hostPlayerId: this.hostPlayerId,
       maxSeats: this.maxSeats,
       smallBlind: this.smallBlind,
@@ -242,6 +257,7 @@ export class RoomRuntime {
     const room = new RoomRuntime({
       id: snapshot.roomId,
       name: snapshot.name,
+      passwordHash: snapshot.passwordHash ?? null,
       hostPlayerId: snapshot.hostPlayerId,
       maxSeats: snapshot.maxSeats,
       smallBlind: snapshot.smallBlind,
@@ -417,6 +433,7 @@ export class RoomManager {
 
   createRoom(input: {
     nickname: string
+    password: string
     roomName?: string
     /** 已忽略：产品上固定 9 人桌（保留参数只为兼容旧客户端与测试）。 */
     maxSeats?: number
@@ -424,6 +441,8 @@ export class RoomManager {
     minBuyIn?: number
     /** 买入上限（默认 5000）。 */
     buyInMax?: number
+    smallBlind?: number
+    bigBlind?: number
   }): RoomCredentials {
     if (this.rooms.size >= this.maxRooms) {
       throw new CommandError(
@@ -431,39 +450,44 @@ export class RoomManager {
         `服务器最多同时开放 ${String(this.maxRooms)} 桌，请等其中一桌结束或关闭后再开新桌`,
       )
     }
+    const smallBlind = input.smallBlind ?? TABLE_RULES.smallBlind
+    const bigBlind = input.bigBlind ?? TABLE_RULES.bigBlind
+    if (
+      !Number.isSafeInteger(smallBlind) || !Number.isSafeInteger(bigBlind) ||
+      smallBlind < 1 || bigBlind <= smallBlind || bigBlind > TABLE_RULES.maxBigBlind
+    ) {
+      throw new CommandError('bad_request', `盲注须为正整数，且小盲低于大盲（大盲最多 ${TABLE_RULES.maxBigBlind}）`)
+    }
+    const buyInFloor = Math.max(TABLE_RULES.minBuyInFloor, 10 * bigBlind)
+    const firstValidBuyIn = Math.ceil(buyInFloor / smallBlind) * smallBlind
+    const requestedMax = input.buyInMax ?? Math.max(TABLE_RULES.maxBuyInDefault, firstValidBuyIn)
+    if (requestedMax < buyInFloor) throw new CommandError('bad_request', `买入上限至少为 10 个大盲（${buyInFloor}）`)
+    const requestedMin = input.minBuyIn ?? Math.min(Math.max(TABLE_RULES.startingStack, buyInFloor), requestedMax)
+    if (requestedMin < buyInFloor || requestedMin > requestedMax) {
+      throw new CommandError('bad_request', `最低买入须在 ${buyInFloor}–${requestedMax} 之间`)
+    }
+    const normalizedMax = Math.floor(requestedMax / smallBlind) * smallBlind
+    const normalizedMin = Math.ceil(requestedMin / smallBlind) * smallBlind
+    if (normalizedMax > TABLE_RULES.maxBuyInLimit || normalizedMin > normalizedMax || normalizedMax < firstValidBuyIn) {
+      throw new CommandError('bad_request', '买入范围内须至少有一个符合小盲步进的金额')
+    }
     // 房间号是纯数字：随机 6 位，撞上已有房间（含已关闭的历史房间）就重摇。
     const roomId = newRoomId((candidate) => this.repo.roomExists(candidate))
     const playerId = newPlayerId()
     const token = newReconnectToken()
-    const normalizedMax = normalizeBuyIn(
-      input.buyInMax ?? TABLE_RULES.maxBuyInDefault,
-      TABLE_RULES.minBuyInFloor,
-      TABLE_RULES.maxBuyInLimit,
-      TABLE_RULES.smallBlind,
-    )
     const room = new RoomRuntime({
       id: roomId,
       name: input.roomName?.trim() || `${input.nickname} 的牌局`,
+      passwordHash: hashRoomPassword(input.password),
       hostPlayerId: playerId,
       // 固定 9 人桌：大厅不再让房主选座位数，服务端也只认这一个值。
       maxSeats: TABLE_RULES.maxSeats,
-      smallBlind: TABLE_RULES.smallBlind,
-      bigBlind: TABLE_RULES.bigBlind,
+      smallBlind,
+      bigBlind,
       startingStack: TABLE_RULES.startingStack,
       buyInMax: normalizedMax,
-      /*
-       * 初始筹码（上桌最低买入）：
-       *   - 房主没填 → 取「2000 与买入上限的较小值」：上限只有 1000 时最低买入就是 1000
-       *     （否则会出现买入下限 > 上限的矛盾区间）。
-       *   - 房主填了 → 收敛到 [允许下限, 买入上限] 内。
-       */
-      minBuyIn: normalizeBuyIn(
-        // 没填就取「2000 与买入上限的较小值」：上限本来就比 2000 低时，最低买入跟着上限走。
-        input.minBuyIn ?? Math.min(TABLE_RULES.startingStack, normalizedMax),
-        TABLE_RULES.minBuyInFloor,
-        normalizedMax,
-        TABLE_RULES.smallBlind,
-      ),
+      // 房主输入的下限向上、上限向下对齐小盲，实际买入不会越过其设定的范围。
+      minBuyIn: normalizedMin,
       turnSeconds: TABLE_RULES.turnSeconds,
     })
 
@@ -503,10 +527,13 @@ export class RoomManager {
     return this.credentials(room, member, token)
   }
 
-  joinRoom(roomId: string, nickname: string): RoomCredentials {
+  joinRoom(roomId: string, nickname: string, password: string): RoomCredentials {
     const room = this.rooms.get(roomId)
     if (!room) throw new CommandError('room_not_found')
     if (room.status === 'closed') throw new CommandError('room_closed')
+    if (room.passwordHash && !roomPasswordMatches(password, room.passwordHash)) {
+      throw new CommandError('bad_password')
+    }
     // 有人加入也算活跃（第 2 项需求）。
     room.touch()
 

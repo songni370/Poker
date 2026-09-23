@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import { ROOM_ID_DIGITS } from '../shared/poker.ts'
 import type { HandResultPublic, RoomStatus } from '../shared/protocol.ts'
@@ -60,6 +60,21 @@ export function tokenMatches(token: string, expectedHash: string): boolean {
   const actual = Buffer.from(hashToken(token), 'hex')
   const expected = Buffer.from(expectedHash, 'hex')
   if (actual.length !== expected.length) return false
+  return timingSafeEqual(actual, expected)
+}
+
+/** 六位密码熵较低，SQLite 只保存带随机盐的 scrypt 摘要。 */
+export function hashRoomPassword(password: string): string {
+  const salt = randomBytes(16)
+  const hash = scryptSync(password, salt, 32)
+  return `${salt.toString('hex')}:${hash.toString('hex')}`
+}
+
+export function roomPasswordMatches(password: string, stored: string): boolean {
+  const [saltHex, hashHex] = stored.split(':')
+  if (!saltHex || !hashHex || !/^[\da-f]{32}$/.test(saltHex) || !/^[\da-f]{64}$/.test(hashHex)) return false
+  const expected = Buffer.from(hashHex, 'hex')
+  const actual = scryptSync(password, Buffer.from(saltHex, 'hex'), expected.length)
   return timingSafeEqual(actual, expected)
 }
 

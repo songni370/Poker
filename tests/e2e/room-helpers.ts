@@ -25,11 +25,16 @@ export async function createRoom(
   page: Page,
   nickname: string,
   roomName?: string,
-  options: { maxSeats?: number; minBuyIn?: number; buyInMax?: number } = {},
+  options: { maxSeats?: number; minBuyIn?: number; buyInMax?: number; password?: string } = {},
 ): Promise<string> {
   await page.goto('/')
   await expect(page.getByRole('heading', { name: '开一桌德州' })).toBeVisible()
+  const createTab = page.getByRole('tab', { name: '创建房间' })
+  if (await createTab.isVisible().catch(() => false)) {
+    await createTab.click()
+  }
   await page.getByPlaceholder('例如：小满').fill(nickname)
+  await page.locator('#create-room-password').fill(options.password ?? '123456')
   if (roomName) await page.getByPlaceholder('例如：周五夜局').fill(roomName)
   if (options.minBuyIn !== undefined) {
     const input = page.locator('#min-buy-in')
@@ -51,10 +56,11 @@ export async function createRoom(
 }
 
 /** 邀请链接落地页：填昵称 → 进入牌桌（旁观，未落座）。 */
-export async function joinRoomByLink(page: Page, roomId: string, nickname: string): Promise<void> {
+export async function joinRoomByLink(page: Page, roomId: string, nickname: string, password = '123456'): Promise<void> {
   await page.goto(`/table/${roomId}`)
   await expect(page.getByRole('heading', { name: /加入/ })).toBeVisible()
   await page.getByPlaceholder('例如：小满').fill(nickname)
+  await page.locator('#invite-password').fill(password)
   await page.getByRole('button', { name: '进入牌桌' }).click()
   await expect(page.locator('.table')).toBeVisible()
   await expect(page.getByText('观战中')).toBeVisible()

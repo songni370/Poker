@@ -11,6 +11,7 @@ import type { Logger } from './logger.ts'
 
 const STATUS_BY_CODE: Partial<Record<ErrorCode, number>> = {
   bad_request: 400,
+  bad_password: 403,
   unauthorized: 401,
   room_not_found: 404,
   room_closed: 410,
@@ -21,6 +22,7 @@ const STATUS_BY_CODE: Partial<Record<ErrorCode, number>> = {
 /** 建房限流：同一 IP 在窗口内创建房间的次数上限（首版简单内存计数）。 */
 const CREATE_WINDOW_MS = 10 * 60 * 1000
 const CREATE_LIMIT = 20
+const PASSWORD_FAILURE_LIMIT = 5
 
 function errorBody(code: ErrorCode, message: string): ErrorResponse {
   return { error: code, message, serverTime: Date.now() }
@@ -32,6 +34,7 @@ export async function registerHttpRoutes(
   logger: Logger,
 ): Promise<void> {
   const creations = new Map<string, { count: number; windowStart: number }>()
+  const passwordFailures = new Map<string, { count: number; windowStart: number }>()
 
   const overCreateLimit = (ip: string): boolean => {
     const now = Date.now()
@@ -81,9 +84,25 @@ export async function registerHttpRoutes(
     if (!parsed.success) {
       return reply.code(400).send(errorBody('bad_request', parsed.error.issues[0]?.message ?? '请求格式不正确'))
     }
+    const key = `${request.ip}:${roomId}`
+    const failures = passwordFailures.get(key)
+    if (failures && Date.now() - failures.windowStart < CREATE_WINDOW_MS && failures.count >= PASSWORD_FAILURE_LIMIT) {
+      return reply.code(429).send(errorBody('rate_limited', '密码尝试次数过多，请 10 分钟后重试'))
+    }
     try {
-      return reply.code(201).send(manager.joinRoom(roomId, parsed.data.nickname))
+      const credentials = manager.joinRoom(roomId, parsed.data.nickname, parsed.data.password)
+      passwordFailures.delete(key)
+      return reply.code(201).send(credentials)
     } catch (error) {
+      if (error instanceof CommandError && error.code === 'bad_password') {
+        const active = passwordFailures.get(key)
+        passwordFailures.set(
+          key,
+          active && Date.now() - active.windowStart < CREATE_WINDOW_MS
+            ? { count: active.count + 1, windowStart: active.windowStart }
+            : { count: 1, windowStart: Date.now() },
+        )
+      }
       return fail(reply, error)
     }
   })

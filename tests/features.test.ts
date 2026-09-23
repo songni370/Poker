@@ -1,9 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { CHAT_MAX_LENGTH } from '../src/shared/protocol.ts'
 import type { ChatMessage, RoomCredentials, ServerMessage } from '../src/shared/protocol.ts'
 import { TestClient, delay, joinCommand, postJson, rid, startTestServer, takeSeat } from './helpers.ts'
 import { Repo, newRoomId } from '../src/server/repo.ts'
+import { buildApp } from '../src/server/app.ts'
+import { openDatabase } from '../src/server/db/index.ts'
 
 test('房间上限：服务器最多同时开放 10 桌，关闭一桌后可以再开', async (t) => {
   // 产品默认上限是 10（DEFAULT_MAX_ROOMS）；这里显式传 10，避免测试依赖环境变量。
@@ -73,6 +78,125 @@ test('房间号：纯数字 6 位；撞上已有房间（含历史房间）自�
   const created = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '房主' })).data
   assert.match(created.roomId, /^[1-9]\d{5}$/)
   assert.equal(repo.roomExists(created.roomId), true, '新房间应已入库')
+})
+
+test('房间密码：创建必须设置 6 位数字，错误密码拒绝加入，正确密码允许加入', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'poker-password-test-'))
+  const handle = openDatabase(join(dir, 'poker.sqlite'))
+  const { app, rooms } = await buildApp(handle, { clientDir: join(dir, 'no-client-dir'), logLevel: 'silent' })
+  t.after(async () => {
+    rooms.closeAll()
+    await app.close()
+    handle.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const missingPassword = await app.inject({ method: 'POST', url: '/api/rooms', payload: { nickname: '房主' } })
+  assert.equal(missingPassword.statusCode, 400)
+  const invalidPassword = await app.inject({
+    method: 'POST',
+    url: '/api/rooms',
+    payload: { nickname: '房主', password: '12345' },
+  })
+  assert.equal(invalidPassword.statusCode, 400)
+
+  const created = await app.inject({
+    method: 'POST',
+    url: '/api/rooms',
+    payload: { nickname: '房主', password: '008042' },
+  })
+  assert.equal(created.statusCode, 201)
+  const credentials = created.json<RoomCredentials>()
+  assert.equal(JSON.stringify(credentials).includes('008042'), false, '房间密码不应进入客户端凭证')
+
+  const wrongPassword = await app.inject({
+    method: 'POST',
+    url: `/api/rooms/${credentials.roomId}/join`,
+    payload: { nickname: '访客', password: '123456' },
+  })
+  assert.equal(wrongPassword.statusCode, 403)
+  assert.equal(wrongPassword.json<{ error: string }>().error, 'bad_password')
+
+  const joined = await app.inject({
+    method: 'POST',
+    url: `/api/rooms/${credentials.roomId}/join`,
+    payload: { nickname: '访客', password: '008042' },
+  })
+  assert.equal(joined.statusCode, 201)
+  assert.equal(joined.json<RoomCredentials>().isHost, false)
+  assert.equal(JSON.stringify(rooms.get(credentials.roomId)?.serialize()).includes('008042'), false)
+})
+
+test('房主自定义盲注：建房校验、买入步进、发盲与公开状态使用同一桌规', async (t) => {
+  const server = await startTestServer()
+  t.after(server.stop)
+
+  for (const blinds of [
+    { smallBlind: 20, bigBlind: 20 },
+    { smallBlind: 10, bigBlind: 1001 },
+    { smallBlind: 20, bigBlind: 40, minBuyIn: 200, buyInMax: 1000 },
+    { smallBlind: 39, bigBlind: 40, minBuyIn: 401, buyInMax: 401 },
+  ]) {
+    const rejected = await postJson<{ error: string }>(`${server.base}/api/rooms`, { nickname: '甲', ...blinds })
+    assert.equal(rejected.status, 400)
+    assert.equal(rejected.data.error, 'bad_request')
+  }
+
+  const created = await postJson<RoomCredentials>(`${server.base}/api/rooms`, {
+    nickname: '甲', smallBlind: 15, bigBlind: 30, minBuyIn: 300, buyInMax: 1500,
+  })
+  assert.equal(created.status, 201)
+  const host = created.data
+  const info = await (await fetch(`${server.base}/api/rooms/${host.roomId}`)).json() as {
+    smallBlind: number; bigBlind: number; buyInMin: number; buyInMax: number; buyInStep: number
+  }
+  assert.deepEqual(
+    [info.smallBlind, info.bigBlind, info.buyInMin, info.buyInMax, info.buyInStep],
+    [15, 30, 300, 1500, 15],
+  )
+  const row = server.handle.db.prepare('SELECT small_blind, big_blind FROM rooms WHERE room_id = ?').get(host.roomId) as
+    { small_blind: number; big_blind: number }
+  assert.deepEqual([row.small_blind, row.big_blind], [15, 30])
+
+  const rounded = await postJson<RoomCredentials>(`${server.base}/api/rooms`, {
+    nickname: '丙', smallBlind: 15, bigBlind: 30, minBuyIn: 301, buyInMax: 1508,
+  })
+  assert.equal(rounded.status, 201)
+  const roundedInfo = await (await fetch(`${server.base}/api/rooms/${rounded.data.roomId}`)).json() as {
+    buyInMin: number; buyInMax: number
+  }
+  assert.deepEqual([roundedInfo.buyInMin, roundedInfo.buyInMax], [315, 1500])
+
+  const highBlinds = await postJson<RoomCredentials>(`${server.base}/api/rooms`, {
+    nickname: '丁', smallBlind: 999, bigBlind: 1000,
+  })
+  assert.equal(highBlinds.status, 201)
+  const highInfo = await (await fetch(`${server.base}/api/rooms/${highBlinds.data.roomId}`)).json() as {
+    buyInMin: number; buyInMax: number
+  }
+  assert.deepEqual([highInfo.buyInMin, highInfo.buyInMax], [10989, 10989])
+
+  const guest = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '乙' })).data
+  const a = new TestClient(server.wsUrl)
+  const b = new TestClient(server.wsUrl)
+  t.after(() => { a.close(); b.close() })
+  await Promise.all([a.open(), b.open()])
+  a.send(joinCommand(host))
+  await a.waitFor((message) => message.type === 'room.snapshot')
+  b.send(joinCommand(guest))
+  await b.waitFor((message) => message.type === 'room.snapshot')
+  await takeSeat(a, 0, 308)
+  await takeSeat(b, 1, 1500)
+  assert.equal(a.lastState()!.seats[0]!.stack, 315, '落座买入按本桌小盲 15 取整')
+
+  a.send({ type: 'game.start', requestId: rid() })
+  const started = await a.waitFor((message) => message.type === 'hand.started')
+  assert.ok(started.type === 'hand.started')
+  assert.equal(started.state.smallBlind, 15)
+  assert.equal(started.state.bigBlind, 30)
+  assert.equal(started.state.minRaise, 30)
+  assert.equal(started.state.seats[0]!.committedStreet, 15)
+  assert.equal(started.state.seats[1]!.committedStreet, 30)
 })
 
 test('聊天：广播给房内所有人、重连能拿到历史、服务端限流与长度校验', async (t) => {

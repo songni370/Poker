@@ -7,10 +7,11 @@ import Drawer from 'primevue/drawer'
 import InputNumber from 'primevue/inputnumber'
 import InputText from 'primevue/inputtext'
 import Menu from 'primevue/menu'
+import Password from 'primevue/password'
 import type { MenuItem } from 'primevue/menuitem'
 import Select from 'primevue/select'
 import type { ActionType, Card } from '../../shared/poker.ts'
-import { STREET_NAMES, TABLE_RULES, formatCard } from '../../shared/poker.ts'
+import { ROOM_PASSWORD_DIGITS, STREET_NAMES, TABLE_RULES, formatCard } from '../../shared/poker.ts'
 import { describeHand } from '../../engine/evaluate.ts'
 import type { ChatMessage, RoomMemberPublic } from '../../shared/protocol.ts'
 import { CHAT_MAX_LENGTH } from '../../shared/protocol.ts'
@@ -143,6 +144,7 @@ onMounted(() => {
 
 const joining = ref(false)
 const joinNickname = ref('')
+const joinPassword = ref('')
 const joinError = ref('')
 const joinInfo = ref<{ roomName: string; seated: number; maxSeats: number; status: string } | null>(null)
 const joinInfoError = ref('')
@@ -167,9 +169,13 @@ async function submitJoin(): Promise<void> {
     joinError.value = '请先填写昵称。'
     return
   }
+  if (!new RegExp(`^\\d{${ROOM_PASSWORD_DIGITS}}$`).test(joinPassword.value)) {
+    joinError.value = `请输入 ${String(ROOM_PASSWORD_DIGITS)} 位数字房间密码。`
+    return
+  }
   joining.value = true
   try {
-    const credentials = await apiJoinRoom(props.roomId, { nickname })
+    const credentials = await apiJoinRoom(props.roomId, { nickname, password: joinPassword.value })
     room.setCredentials(credentials)
     connectRoom(credentials)
   } catch (cause) {
@@ -1017,6 +1023,19 @@ onBeforeUnmount(() => onFatalRoomError(null))
             @keyup.enter="submitJoin"
           />
         </label>
+        <label class="field" for="invite-password">
+          <span class="label">房间密码（{{ ROOM_PASSWORD_DIGITS }} 位数字）</span>
+          <Password
+            input-id="invite-password"
+            v-model="joinPassword"
+            placeholder="请输入 6 位数字"
+            autocomplete="current-password"
+            :feedback="false"
+            toggle-mask
+            :input-props="{ inputmode: 'numeric', maxlength: ROOM_PASSWORD_DIGITS, pattern: '[0-9]{6}' }"
+            fluid
+          />
+        </label>
         <p v-if="joinError" class="join-error" role="alert">{{ joinError }}</p>
         <div class="join-actions">
           <Button :disabled="joining || Boolean(joinInfoError)" @click="submitJoin">
@@ -1037,7 +1056,7 @@ onBeforeUnmount(() => onFatalRoomError(null))
     <!-- 顶部：房间名、盲注、连接状态、设置与退出（规格书 §3.3）。 -->
     <header class="bar">
       <h1 class="bar-title">{{ game.state?.roomName || '牌桌' }}</h1>
-      <span class="stat"><span>盲注</span><b class="num">{{ TABLE_RULES.smallBlind }}/{{ TABLE_RULES.bigBlind }}</b></span>
+      <span class="stat"><span>盲注</span><b class="num">{{ game.state?.smallBlind ?? TABLE_RULES.smallBlind }}/{{ game.state?.bigBlind ?? TABLE_RULES.bigBlind }}</b></span>
       <span class="stat stat--hand"><span>第</span><b class="num">{{ game.state?.handNo ?? 0 }}</b><span>手</span></span>
       <span class="stat stat--stage"><span>阶段</span><b>{{ streetText }}</b></span>
       <span
@@ -1381,7 +1400,7 @@ onBeforeUnmount(() => onFatalRoomError(null))
           <h3>本桌规则</h3>
           <dl>
             <div><dt>游戏</dt><dd>无限注德州扑克，52 张牌</dd></div>
-            <div><dt>盲注</dt><dd class="num">{{ TABLE_RULES.smallBlind }}/{{ TABLE_RULES.bigBlind }}</dd></div>
+            <div><dt>盲注</dt><dd class="num">{{ game.state?.smallBlind ?? TABLE_RULES.smallBlind }}/{{ game.state?.bigBlind ?? TABLE_RULES.bigBlind }}</dd></div>
             <div>
               <dt>买入范围</dt>
               <dd class="num">

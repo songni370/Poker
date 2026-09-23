@@ -105,7 +105,7 @@ export const ACTION_NAMES: Record<ActionType, string> = {
   all_in: '全下',
 }
 
-/** 首版固定桌规（规格书 §4）。 */
+/** 默认桌规与房主可设置的金额上限。 */
 export const TABLE_RULES = {
   minSeats: 2,
   maxSeats: 9,
@@ -121,6 +121,8 @@ export const TABLE_RULES = {
   maxBuyInDefault: 5000,
   smallBlind: 10,
   bigBlind: 20,
+  /** 保证 10 个大盲的最低买入仍可落在买入上限内。 */
+  maxBigBlind: 1000,
   turnSeconds: 20,
   /** 房主可选买入区间的允许范围；步进等于小盲。 */
   minBuyInFloor: 200,
@@ -134,8 +136,10 @@ export const TABLE_RULES = {
 export function normalizeBuyIn(amount: number, minBuyIn: number, maxBuyIn: number, smallBlind: number): number {
   const min = Math.min(minBuyIn, maxBuyIn)
   const max = Math.max(minBuyIn, maxBuyIn)
-  const clamped = Math.min(Math.max(amount, min), max)
-  return Math.round(clamped / smallBlind) * smallBlind
+  const first = Math.ceil(min / smallBlind) * smallBlind
+  const last = Math.floor(max / smallBlind) * smallBlind
+  if (first > last) throw new RangeError('买入范围内没有符合小盲步进的金额')
+  return Math.max(first, Math.min(last, Math.round(amount / smallBlind) * smallBlind))
 }
 
 export const ROOM_NAME_MAX = 24
@@ -143,3 +147,4 @@ export const NICKNAME_MAX = 12
 
 /** 房间号位数：纯数字（首位非 0），方便口头传达与手工输入。 */
 export const ROOM_ID_DIGITS = 6
+export const ROOM_PASSWORD_DIGITS = 6

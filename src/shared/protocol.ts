@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { ActionType, Card, Rank, Street, Suit } from './poker.ts'
-import { NICKNAME_MAX, ROOM_NAME_MAX, TABLE_RULES } from './poker.ts'
+import { NICKNAME_MAX, ROOM_NAME_MAX, ROOM_PASSWORD_DIGITS, TABLE_RULES } from './poker.ts'
 
 /* ────────────────────────────── HTTP：健康检查 ────────────────────────────── */
 
@@ -25,6 +25,7 @@ export const ERROR_CODES = [
   'room_not_found',
   'room_full',
   'room_closed',
+  'bad_password',
   'not_seated',
   'seat_taken',
   'not_host',
@@ -43,6 +44,7 @@ export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   room_not_found: '房间不存在或已解散',
   room_full: '房间已满',
   room_closed: '房间已关闭',
+  bad_password: '房间密码错误，请检查后重试',
   not_seated: '你还没有入座',
   seat_taken: '该座位已被占用',
   not_host: '只有主持人可以执行该操作',
@@ -388,12 +390,16 @@ export const NicknameSchema = z
 
 export const CreateRoomRequestSchema = z.object({
   nickname: NicknameSchema,
+  password: z.string().regex(new RegExp(`^\\d{${ROOM_PASSWORD_DIGITS}}$`), `房间密码必须是 ${ROOM_PASSWORD_DIGITS} 位数字`),
   roomName: z.string().trim().max(ROOM_NAME_MAX).optional(),
   /**
    * 座位数：产品上固定 9 人桌（大厅不再让房主选），这个字段保留只是为了兼容旧客户端与既有测试，
    * 服务端一律收敛到 `TABLE_RULES.maxSeats`。
    */
   maxSeats: z.number().int().min(TABLE_RULES.minSeats).max(TABLE_RULES.maxSeats).optional(),
+  /** 房主设置的盲注；旧客户端省略时沿用 10/20。 */
+  smallBlind: z.number().int().min(1).max(TABLE_RULES.maxBigBlind - 1).optional(),
+  bigBlind: z.number().int().min(2).max(TABLE_RULES.maxBigBlind).optional(),
   /**
    * 初始筹码：玩家上桌**最低**要买入多少（默认 2000）。
    * 步进为小盲，允许范围 minBuyInFloor–maxBuyInLimit。
@@ -414,7 +420,10 @@ export const CreateRoomRequestSchema = z.object({
 })
 export type CreateRoomRequest = z.infer<typeof CreateRoomRequestSchema>
 
-export const JoinRoomRequestSchema = z.object({ nickname: NicknameSchema })
+export const JoinRoomRequestSchema = z.object({
+  nickname: NicknameSchema,
+  password: z.string().regex(new RegExp(`^\\d{${ROOM_PASSWORD_DIGITS}}$`), `房间密码必须是 ${ROOM_PASSWORD_DIGITS} 位数字`),
+})
 export type JoinRoomRequest = z.infer<typeof JoinRoomRequestSchema>
 
 export interface RoomCredentials {
