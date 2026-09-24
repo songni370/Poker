@@ -685,6 +685,55 @@ test('落座买入：买入额按房主上限/下限/步进收敛，离座保留
   assert.equal(c.lastState()!.seats[1]!.playerId, late.playerId)
 })
 
+test('筹码归零后可在原座位重新买入，但手牌未结束时不能补筹码', async (t) => {
+  const server = await startTestServer()
+  t.after(server.stop)
+  const host = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, {
+    nickname: '甲', minBuyIn: 200, buyInMax: 1000,
+  })).data
+  const guest = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '乙' })).data
+  const a = new TestClient(server.wsUrl)
+  const b = new TestClient(server.wsUrl)
+  t.after(() => { a.close(); b.close() })
+  await Promise.all([a.open(), b.open()])
+  a.send(joinCommand(host))
+  await a.waitFor((message) => message.type === 'room.snapshot')
+  b.send(joinCommand(guest))
+  await b.waitFor((message) => message.type === 'room.snapshot')
+  await takeSeat(a, 0, 200)
+  await takeSeat(b, 1, 200)
+
+  a.send({ type: 'game.start', requestId: rid() })
+  await a.waitFor((message) => message.type === 'hand.started')
+  a.send({ type: 'game.action', requestId: rid(), handId: a.lastState()!.handId!,
+    expectedVersion: a.lastState()!.version, action: 'all_in' })
+  await a.waitFor((message) => message.type !== 'room.error' && 'state' in message &&
+    message.state.phase === 'preflop' && message.state.seats[0]?.stack === 0)
+  const beforeError = a.messages.length
+  a.send({ type: 'seat.take', requestId: rid(), seat: 0, buyIn: 500 })
+  const early = await a.waitFor((message) => message.type === 'room.error', 5000, beforeError)
+  assert.ok(early.type === 'room.error')
+  assert.equal(early.error?.code, 'bad_request')
+  assert.equal(server.rooms.get(host.roomId)!.table.seatOf(host.playerId)!.stack, 0)
+
+  b.send({ type: 'game.action', requestId: rid(), handId: b.lastState()!.handId!,
+    expectedVersion: b.lastState()!.version, action: 'call' })
+  const settled = await a.waitFor((message) => message.type === 'hand.settled')
+  assert.ok(settled.type === 'hand.settled')
+  const bustedSeat = settled.state.seats[0]?.stack === 0 ? 0 : 1
+  const busted = bustedSeat === 0 ? a : b
+  await takeSeat(busted, bustedSeat, 505)
+  assert.equal(busted.lastState()!.seats[bustedSeat]!.stack, 510, '重新买入仍按小盲步进取整')
+  assert.equal(busted.lastState()!.seats[bustedSeat]!.away, false)
+  assert.equal(server.rooms.get(host.roomId)!.table.canStartHand(), true)
+
+  const beforeDuplicate = busted.messages.length
+  busted.send({ type: 'seat.take', requestId: rid(), seat: bustedSeat, buyIn: 500 })
+  const duplicate = await busted.waitFor((message) => message.type === 'room.error', 5000, beforeDuplicate)
+  assert.ok(duplicate.type === 'room.error')
+  assert.equal(duplicate.error?.code, 'bad_request', '有筹码时不能重复买入')
+})
+
 test('离座/退出发生在手牌中：先自动弃牌并结算，筹码留在池里，退出等本手结束才移除', async (t) => {
   const server = await startTestServer()
   t.after(server.stop)

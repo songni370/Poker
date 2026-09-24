@@ -43,6 +43,10 @@
   --glass-bg: rgba(22, 29, 37, 0.76);
   --glass-border: rgba(212, 177, 106, 0.18);
   --glass-blur: 16px;
+  --table-felt-gradient: radial-gradient(ellipse 75% 65% at 50% 50%, #175447 0%, #103d34 60%, #092620 100%);
+  --table-rail-bg: linear-gradient(180deg, #1d2631 0%, #0f141a 100%);
+  --table-rail-border: rgba(212, 177, 106, 0.28);
+  --acting-glow: 0 0 18px rgba(212, 177, 106, 0.52), inset 0 0 8px rgba(212, 177, 106, 0.3);
 
   /* 牌桌几何：椭圆桌面与座位槽位的定位尺寸。 */
   --table-w: min(100%, 1000px);
@@ -102,6 +106,57 @@ label,
 .p-drawer-content,
 .p-dialog-content {
   overscroll-behavior: contain;
+}
+
+/* ═══════════════ 全局弹窗完全不透明黑金风格（杜绝背景穿透扰乱） ═══════════════ */
+.p-dialog {
+  background: #131922 !important;
+  background-color: #131922 !important;
+  border: 1px solid rgba(212, 177, 106, 0.35) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.95), 0 0 30px rgba(0, 0, 0, 0.8) !important;
+  overflow: hidden !important;
+  opacity: 1 !important;
+}
+
+.p-dialog-header {
+  background: #18202c !important;
+  background-color: #18202c !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+  padding: 16px 20px !important;
+  color: #f5f0e1 !important;
+  opacity: 1 !important;
+}
+
+.p-dialog-title {
+  font-size: 1.1rem !important;
+  font-weight: 700 !important;
+  color: #ffd875 !important;
+  letter-spacing: 0.02em !important;
+}
+
+.p-dialog-content {
+  background: #131922 !important;
+  background-color: #131922 !important;
+  color: var(--text) !important;
+  padding: 20px !important;
+  opacity: 1 !important;
+  overscroll-behavior: contain !important;
+}
+
+.p-dialog-footer {
+  background: #18202c !important;
+  background-color: #18202c !important;
+  border-top: 1px solid rgba(255, 255, 255, 0.08) !important;
+  padding: 14px 20px !important;
+  opacity: 1 !important;
+}
+
+.p-dialog-mask,
+.p-overlay-mask {
+  background-color: rgba(4, 7, 11, 0.86) !important;
+  backdrop-filter: blur(5px) !important;
+  -webkit-backdrop-filter: blur(5px) !important;
 }
 
 /* 键盘可达性：所有可交互元素保留可见焦点环。 */

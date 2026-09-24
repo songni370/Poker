@@ -100,7 +100,7 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
     }"
     :aria-label="spoken"
   >
-    <!-- 底牌：本人正面，其他人按手牌张数画背面。 -->
+    <!-- 底牌：本人正面在底部操作区看大图，其他人按手牌张数画背面 -->
     <div v-if="cardCount > 0" class="cards">
       <PlayingCard
         v-for="index in cardCount"
@@ -111,109 +111,148 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
       />
     </div>
 
+    <!-- 紧凑自适应玩家卡片（轻巧双行结构，彻底告别臃肿厚重，尺寸随屏幕流式缩放） -->
     <div class="panel">
-      <!--
-        面板左侧 = 座位号 + 牌局角色槽位（庄家 / 小盲 / 大盲），都横排在一行里。
-        第 4 项需求：座位号从「昵称上方单独一行」搬到左侧同行——面板因此从两行收到一行，
-        牌桌上每个座位卡片矮 13px，小屏的公共牌区就多 13px。
-        两者都只是视觉，完整说法在座位 aria-label 里（「座位 3」「庄家位」…）；
-        没有角色时只留座位号，不会出现空槽位。
-      -->
-      <span class="seat-no num" aria-hidden="true">{{ seat.seat + 1 }}</span>
-      <!-- 视觉分隔：座位号是徽标、昵称是文本，紧挨着会读成「3小明」。读屏不受影响（两者都在 aria-label 里）。 -->
-      <span class="seat-sep" aria-hidden="true">·</span>
-
-      <span v-if="roleBadges.length > 0" class="roles" aria-hidden="true">
-        <span v-for="badge in roleBadges" :key="badge.key" class="role-badge" :class="`role-badge--${badge.tone}`">
-          {{ badge.label }}
-        </span>
-      </span>
-
-      <span class="meta">
-        <span class="name">
-          {{ seat.nickname }}
+      <!-- 第一行：座位号 + 完整昵称（含自己标） + 右侧角色徽标（D/SB/BB） -->
+      <div class="seat-row seat-row--top">
+        <div class="seat-identity">
+          <span class="seat-no num" aria-hidden="true">{{ seat.seat + 1 }}</span>
+          <span
+            class="name"
+            :class="{
+              'name--compact': seat.nickname.length >= 5 && seat.nickname.length < 8,
+              'name--tight': seat.nickname.length >= 8,
+            }"
+            :title="seat.nickname"
+          >
+            {{ seat.nickname }}
+          </span>
           <span v-if="isHero" class="tag tag--hero">你</span>
+        </div>
+        <div v-if="roleBadges.length > 0" class="roles" aria-hidden="true">
+          <span
+            v-for="badge in roleBadges"
+            :key="badge.key"
+            class="role-badge"
+            :class="`role-badge--${badge.tone}`"
+          >
+            {{ badge.label }}
+          </span>
+        </div>
+      </div>
+
+      <!-- 第二行：筹码金额（等宽鲜艳、100% 完整无截断） + 右侧状态标（ALL IN / 离座 / 弃牌 / 断线） -->
+      <div class="seat-row seat-row--bottom">
+        <span
+          class="stack num"
+          :class="{
+            'stack--compact': String(seat.stack).length >= 6 && String(seat.stack).length < 8,
+            'stack--tight': String(seat.stack).length >= 8,
+          }"
+          :title="`筹码：${seat.stack}`"
+        >
+          {{ seat.stack }}
         </span>
-        <span class="stack num">{{ seat.stack }}</span>
-      </span>
+        <div class="seat-flags">
+          <span v-if="!seat.connected" class="flag flag--off" aria-hidden="true" title="已断线">
+            <i class="pi pi-wifi" />
+          </span>
+          <span v-else-if="seat.allIn" class="flag flag--allin" aria-hidden="true">ALL IN</span>
+          <span v-else-if="seat.away" class="flag flag--away" aria-hidden="true">已离座</span>
+          <span v-else-if="seat.folded" class="flag flag--folded" aria-hidden="true">已弃牌</span>
+        </div>
+      </div>
 
-      <span v-if="!seat.connected" class="flag flag--off" aria-hidden="true">
-        <i class="pi pi-wifi" />
-      </span>
-      <span v-else-if="seat.allIn" class="flag flag--allin" aria-hidden="true">ALL IN</span>
-
-      <!-- 本轮下注：小屏（矮屏横屏 / 竖屏）专用的面板角标。
-           那些尺寸里桌子中央挤不下浮动的下注筹码（要么压住自己的筹码数字，要么压住公共牌），
-           改成写在座位面板右下角；无障碍读法在 aria-label 里（见 spoken）。 -->
+      <!-- 本轮下注面板角标（在小屏无桌面浮动筹码时显示） -->
       <span v-if="seat.committedStreet > 0" class="panel-bet num" aria-hidden="true">
         {{ seat.committedStreet }}
       </span>
     </div>
 
-    <!-- 状态行：文本形式（不仅靠颜色）。
-         is-action-only 只说明「上一手做了什么」，矮屏/竖屏可以让位给公共牌；
-         已弃牌、全下、断线、轮到你这些状态永远不会被隐藏。 -->
-    <p
-      v-if="isActing || statusText || lastActionText"
-      class="status"
-      :class="{ 'is-action-only': !isActing && !statusText && Boolean(lastActionText) }"
-    >
-      <span v-if="isActing" class="turn">YOUR TURN</span>
-      <span v-else-if="statusText" class="state">{{ statusText }}</span>
-      <span v-else-if="lastActionText" class="state">{{ lastActionText }}</span>
-    </p>
-
-    <!-- 倒计时进度条：仅在轮到该玩家时出现。 -->
+    <!-- 倒计时进度条与时间一体化胶囊：轮到该玩家行动时出现 -->
     <div
       v-if="isActing"
-      class="timer"
+      class="seat-timer-capsule"
+      :class="{ 'is-urgent': remainingSeconds <= 5 }"
       role="progressbar"
       :aria-valuenow="remainingSeconds"
       aria-valuemin="0"
       :aria-valuemax="turnSeconds"
       :aria-label="`行动倒计时，剩余 ${String(remainingSeconds)} 秒`"
     >
-      <span class="timer-fill" :style="{ transform: `scaleX(${String(percent / 100)})` }" />
+      <span class="seat-timer-fill" :style="{ transform: `scaleX(${String(percent / 100)})` }" />
+      <span class="seat-timer-label num">
+        <i class="pi pi-clock seat-timer-icon" aria-hidden="true" />
+        <span>{{ isHero ? '轮到你' : '思考中' }} {{ remainingSeconds }}s</span>
+      </span>
     </div>
+
+    <!-- 非行动态的状态行（动作反馈） -->
+    <p
+      v-else-if="statusText || lastActionText"
+      class="status"
+      :class="{ 'is-action-only': !statusText && Boolean(lastActionText) }"
+    >
+      <span class="state">{{ statusText || lastActionText }}</span>
+    </p>
   </article>
 </template>
 
 <style scoped>
+/* 整个座位容器：尺寸随屏幕流式自适应，彻底告别死板过大尺寸 */
 .seat {
   display: grid;
   justify-items: center;
-  gap: 4px;
-  width: var(--seat-w, 144px);
-  transition: opacity 0.2s ease-out;
+  gap: 2px;
+  width: var(--seat-w, clamp(80px, 10vw, 122px));
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .cards {
   display: flex;
-  gap: 3px;
+  gap: 2px;
+  margin-bottom: -1px;
 }
 
+.cards :deep(.card--sm) {
+  --cw: clamp(19px, 2.2vw, 24px);
+}
+
+/* 核心面板：极其轻巧扁平的两行架构，内边距与圆角流式自适应 */
 .panel {
   position: relative;
   display: flex;
-  align-items: center;
-  /* 6px：头像没了以后，左侧角色槽位与昵称之间不需要原来 8px 的呼吸位。 */
-  gap: 6px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
   width: 100%;
-  /* min-width: 0 是必需的：窄屏（贴边座位 64px）下面板的 min-content 由角色胶囊 + 昵称决定，
-     不放开的话面板会顶出座位宽度（实测多出 5.6px），把两侧的净空吃掉。 */
   min-width: 0;
-  padding: 6px 8px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--line);
-  background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
+  padding: clamp(2px, 0.4vw, 4px) clamp(4px, 0.6vw, 7px);
+  border-radius: clamp(4px, 0.5vw, 6px);
+  border: 1px solid rgba(212, 177, 106, 0.22);
+  background: linear-gradient(180deg, rgba(24, 32, 42, 0.94) 0%, rgba(14, 19, 26, 0.97) 100%);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-sizing: border-box;
+}
+
+.is-acting .panel {
+  border-color: #ffd875;
+  box-shadow: 0 0 16px rgba(212, 177, 106, 0.65), inset 0 0 8px rgba(212, 177, 106, 0.35);
+  animation: seat-glow 1.8s ease-in-out infinite;
 }
 
 .is-hero .panel {
-  border-color: var(--gold-soft);
+  border-color: rgba(212, 177, 106, 0.65);
+  background: linear-gradient(180deg, rgba(28, 38, 50, 0.96) 0%, rgba(18, 24, 32, 0.98) 100%);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(212, 177, 106, 0.25);
 }
 
 .is-folded {
-  opacity: 0.55;
+  opacity: 0.42;
+  filter: grayscale(0.4);
 }
 
 .is-out .panel {
@@ -221,64 +260,156 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   border-color: var(--danger);
 }
 
-/* 离座保留的座位：虚线描边 + 状态文案「已离座」，与「断线」区分开颜色。 */
 .is-away .panel {
   border-style: dashed;
   border-color: var(--gold-soft);
-  background: color-mix(in srgb, var(--bg-elevated) 70%, transparent);
+  background: rgba(20, 26, 34, 0.75);
 }
 
 .is-winner .panel {
-  border-color: var(--gold);
+  border-color: #ffe394;
+  box-shadow: 0 0 20px rgba(255, 227, 148, 0.75), inset 0 0 8px rgba(255, 227, 148, 0.4);
+  animation: soft-pulse 1.3s ease-in-out infinite;
 }
 
-/*
- * 昵称 + 筹码：占据角色槽位以外的全部宽度，并且可以收缩到比内容更窄
- * （min-width: 0 才能让里面的 .name 触发省略号，而不是把面板撑宽）。
- */
-.meta {
-  display: grid;
-  flex: 1 1 auto;
-  gap: 1px;
+/* 行容器：左右对齐，利用率 100% */
+.seat-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
   min-width: 0;
+  gap: 3px;
+  line-height: 1.15;
+}
+
+/* 身份区域（座位号 + 昵称 + 你） */
+.seat-identity {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.seat-no {
+  flex: none;
+  min-width: 12px;
+  padding: 0 2px;
+  border-radius: 2px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 60%, transparent);
+  color: var(--muted);
+  font-size: clamp(0.50rem, 0.6vw, 0.58rem);
+  line-height: 1.25;
+  text-align: center;
+  font-weight: 700;
 }
 
 .name {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 0.82rem;
   color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: clamp(0.66rem, 0.8vw, 0.76rem);
+  font-weight: 600;
+  line-height: 1.15;
+  word-break: break-all;
+  white-space: normal;
+  overflow: visible;
+  letter-spacing: -0.01em;
+}
+
+.name--compact {
+  font-size: clamp(0.60rem, 0.72vw, 0.68rem);
+  letter-spacing: -0.02em;
+}
+
+.name--tight {
+  font-size: clamp(0.54rem, 0.65vw, 0.62rem);
+  letter-spacing: -0.03em;
 }
 
 .tag {
   flex: none;
-  padding: 0 4px;
-  border-radius: 4px;
-  font-size: 0.62rem;
-  line-height: 1.5;
+  padding: 0 2px;
+  border-radius: 2px;
+  font-size: clamp(0.48rem, 0.55vw, 0.54rem);
+  line-height: 1.2;
 }
 
 .tag--hero {
   background: var(--gold-dim);
   color: var(--gold);
+  font-weight: 700;
 }
 
+/* 角色徽标 */
+.roles {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.role-badge {
+  min-width: 11px;
+  padding: 0 2px;
+  border-radius: 2px;
+  font-size: clamp(0.48rem, 0.56vw, 0.54rem);
+  font-weight: 800;
+  line-height: 1.25;
+  text-align: center;
+}
+
+.role-badge--dealer {
+  background: linear-gradient(135deg, #ffd875 0%, #cb9b51 100%);
+  color: #0b0f14;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.role-badge--blind {
+  background: linear-gradient(135deg, #38bdf8 0%, #0284c7 100%);
+  color: #ffffff;
+}
+
+/* 筹码数字：金黄色鲜艳、等宽数字、100% 完整展示绝不截断 */
 .stack {
-  font-size: 0.78rem;
-  color: var(--muted);
-  /* 筹码是数字，宁可整段省略也不要把面板顶宽。 */
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: #ffd875;
+  font-size: clamp(0.70rem, 0.85vw, 0.80rem);
+  font-weight: 700;
+  white-space: nowrap;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  overflow: visible;
+  line-height: 1.15;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.stack--compact {
+  font-size: clamp(0.64rem, 0.76vw, 0.72rem);
+  letter-spacing: -0.03em;
+}
+
+.stack--tight {
+  font-size: clamp(0.58rem, 0.68vw, 0.64rem);
+  letter-spacing: -0.04em;
+}
+
+/* 状态标集 */
+.seat-flags {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
 }
 
 .flag {
-  margin-left: auto;
-  font-size: 0.6rem;
-  letter-spacing: 0.06em;
+  font-size: clamp(0.48rem, 0.56vw, 0.54rem);
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: 0.02em;
+  padding: 1px 3px;
+  border-radius: 2px;
 }
 
 .flag--off {
@@ -286,177 +417,109 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
 }
 
 .flag--allin {
-  color: var(--gold);
-  font-weight: 700;
+  color: #0b0f14;
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
 }
 
-/*
- * 座位号：面板最左侧的小徽标（第 4 项需求）。
- * 它与角色胶囊横排在同一行，面板因此只有一行高；数字用等宽字形，1 与 9 不会挤动版式。
- */
-.seat-no {
-  flex: none;
-  min-width: 15px;
-  padding: 0 3px;
-  border-radius: 4px;
-  border: 1px solid var(--line);
-  background: color-mix(in srgb, var(--bg) 55%, transparent);
+.flag--away {
+  color: var(--gold-soft);
+  border: 1px dashed var(--gold-soft);
+}
+
+.flag--folded {
   color: var(--muted);
-  font-size: 0.58rem;
-  line-height: 1.5;
-  text-align: center;
+  background: rgba(255, 255, 255, 0.1);
 }
 
-/* 座位号与昵称之间的间隔符：只是个视觉锚点，不参与无障碍。 */
-.seat-sep {
-  flex: none;
-  color: color-mix(in srgb, var(--muted) 60%, transparent);
-  font-size: 0.7rem;
-  line-height: 1;
-}
-
-/*
- * 牌局角色槽位：座位号右侧的一列胶囊，是面板内唯一的「非本人信息」元素。
- * 双人桌同一座位可能同时是庄家与小盲（D + SB），所以是一组而不是一个；
- * 面板高度由昵称+筹码（约 33px）决定，两个胶囊横排约 13px，不会把面板撑高。
- */
-.roles {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 3px;
-}
-
-.role-badge {
-  min-width: 13px;
-  padding: 0 3px;
-  border-radius: 5px;
-  font-size: 0.56rem;
-  font-weight: 700;
-  line-height: 1.5;
-  text-align: center;
-}
-
-.role-badge--dealer {
-  background: var(--gold);
-  color: var(--bg);
-}
-
-.role-badge--blind {
-  background: color-mix(in srgb, var(--action) 82%, black);
-  color: #ffffff;
-}
-
-/*
- * 本人座位不重复显示「YOUR TURN + 进度条」：底部操作区已经有更大的同一套提示
- *（文本 + 秒数 + 整条进度条），环上这块省下来给别人面板留净空——
- * 单挑（2 人桌）时本人的下注筹码正好落在这一行上（实测压住 YOUR TURN 约 14×41px）。
- * 头像光环与 aria-label 里的「正在行动」仍在，颜色不是唯一提示。
- */
+/* 本人座位不重复显示「行动倒计时」：底部操作区已有专属的大型倒计时舱 */
 .is-hero .status,
-.is-hero .timer {
+.is-hero .seat-timer-capsule {
   display: none;
 }
 
-/* 本轮下注角标：默认隐藏（桌面用桌面中央的下注筹码），只在矮屏与竖屏由各自规则打开。 */
 .panel-bet {
   display: none;
   position: absolute;
   right: 3px;
-  bottom: 1px;
+  bottom: 2px;
   color: var(--gold);
-  font-size: 0.62rem;
-  line-height: 1.4;
+  font-size: 0.58rem;
+  line-height: 1.2;
+  font-weight: 700;
 }
 
 .status {
   margin: 0;
-  font-size: 0.68rem;
-  line-height: 1.3;
+  font-size: clamp(0.58rem, 0.68vw, 0.66rem);
+  line-height: 1.2;
   text-align: center;
   color: var(--muted);
-}
-
-.turn {
-  color: var(--gold);
-  font-weight: 700;
-  letter-spacing: 0.08em;
 }
 
 .state {
   color: var(--muted);
 }
 
-.timer {
+.seat-timer-capsule {
   position: relative;
   width: 100%;
-  height: 3px;
+  max-width: var(--seat-w, 110px);
+  height: clamp(14px, 1.8vw, 17px);
+  border-radius: 999px;
   overflow: hidden;
-  border-radius: 2px;
-  background: rgba(0, 0, 0, 0.35);
+  background: rgba(10, 15, 22, 0.9);
+  border: 1px solid rgba(212, 177, 106, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
 }
 
-.timer-fill {
-  display: block;
+.seat-timer-capsule.is-urgent {
+  border-color: rgba(239, 68, 68, 0.7);
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
+}
+
+.seat-timer-fill {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   transform-origin: left center;
-  background: var(--gold);
+  background: linear-gradient(90deg, #10b981 0%, #f59e0b 60%, #ef4444 100%);
+  opacity: 0.85;
+  transition: transform 0.15s linear;
 }
 
-/* 横向空间不足时压缩座位宽度，保证 9 人桌不横向溢出。 */
-@media (max-width: 1100px) {
-  .seat {
-    width: 124px;
-  }
+.seat-timer-capsule.is-urgent .seat-timer-fill {
+  background: linear-gradient(90deg, #dc2626 0%, #ef4444 100%);
 }
 
-/* 竖屏窄屏：座位收窄到桌面内，避免横向溢出。 */
+.seat-timer-label {
+  position: relative;
+  z-index: 2;
+  font-size: clamp(0.56rem, 0.66vw, 0.62rem);
+  font-weight: 700;
+  color: #ffffff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  line-height: 1;
+}
+
+.seat-timer-icon {
+  font-size: 0.58rem;
+  color: #ffd875;
+}
+
+/* 竖屏窄屏自适应规则 */
 @media (max-width: 560px) and (orientation: portrait) {
-  .seat {
-    /* 走变量：牌桌会给「贴边座位」单独设一个更窄的 --seat-w（见 PokerTable 竖屏规则）。 */
-    width: var(--seat-w, 108px);
-  }
-
-  .name {
-    font-size: 0.74rem;
-  }
-
-  /*
-   * 竖屏最窄的座位（贴边位）只有 64px：昵称与筹码要留得下，
-   * 角色胶囊就竖排成一列并收到最小尺寸（约 11px 宽），省出来的一列全给昵称。
-   */
-  .roles {
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .role-badge {
-    min-width: 0;
-    padding: 0 2px;
-    font-size: 0.5rem;
-    line-height: 1.4;
-  }
-
-  /* 贴边座位只有 64px：间隔符让位给昵称。 */
-  .seat-sep {
-    display: none;
-  }
-
-  /*
-   * 竖屏只有 ~358px 宽、9 个座位环成一圈：座位面板每高 10px，公共牌就被吃掉 10px。
-   * 这里只保留「角色 + 昵称 + 筹码」，面板从 ~105px 收到 ~47px，公共牌区不再被压住：
-   *   - 底牌：本人底牌在下方操作区有大图；他人只画背面，弃牌/全下的状态由面板淡化与 ALL IN 标记给出；
-   *   - 「上一手动作」文本：下注筹码本身就在桌上显示金额；
-   *   - 行动提示：本人由底部 YOUR TURN + 进度条给出，他人由操作区的「等待 X 行动」给出；
-   *   - 已弃牌 / 全下 / 已断线 / 轮到你的文本状态一律保留（不靠颜色区分）。
-   */
   .seat .cards,
   .seat .status.is-action-only {
     display: none;
   }
 
-  /* 本轮下注改由面板角标给出（桌面中央浮动的下注筹码在竖屏会压住公共牌或筹码数字）。 */
   .panel-bet {
     display: inline-flex;
   }

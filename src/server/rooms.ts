@@ -791,8 +791,10 @@ export class RoomManager {
               room.table.seatOf(playerId)!.stack = buyIn
             }
           } else if (seated) {
-            // 已经在座（重复点座）：不改动任何状态，只有本人坐回自己座位这一条路已经处理。
-            throw new CommandError('bad_request', '你已经入座了')
+            if (seated.seat !== command.seat || seated.stack !== 0 || room.table.isHandRunning()) {
+              throw new CommandError('bad_request', '只有本手结束后筹码归零的玩家可以在原座位重新买入')
+            }
+            room.table.sit(playerId, member.nickname, command.seat, buyIn)
           } else if (!room.table.isSeatAvailable(command.seat)) {
             throw new CommandError('seat_taken', '这个座位已经有人了')
           } else {
@@ -803,7 +805,7 @@ export class RoomManager {
           this.clearAwayTimer(room, playerId)
           notice = wasAway
             ? `${member.nickname} 回到 ${command.seat + 1} 号位（筹码 ${String(room.table.seatOf(playerId)?.stack ?? 0)} 原样带走）`
-            : `${member.nickname} 买入 ${buyIn} 入座 ${command.seat + 1} 号位`
+            : seated ? `${member.nickname} 重新买入 ${buyIn} 筹码` : `${member.nickname} 买入 ${buyIn} 入座 ${command.seat + 1} 号位`
           eventType = 'room.player_joined'
           break
         }

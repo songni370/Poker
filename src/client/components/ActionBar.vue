@@ -1,9 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import Button from 'primevue/button'
 import Dialog from 'primevue/dialog'
-import InputNumber from 'primevue/inputnumber'
-import Slider from 'primevue/slider'
 import type { LegalAction } from '../../shared/protocol.ts'
 import { clampAmount, quickSizes, type QuickSize } from './action-bar-sizing.ts'
 
@@ -19,9 +17,15 @@ const props = withDefaults(
     myStack?: number
     /** 是否轮到本人；false 时按钮全部禁用。 */
     isMyTurn?: boolean
-    /** 剩余秒数与总秒数，用于倒计时进度条。 */
+    /** 剩余秒数与总秒数，用于倒计时进度条与文本。 */
     remainingSeconds?: number
     turnSeconds?: number
+    /** 剩余比例 0..1，用于平滑进度条。 */
+    remainingRatio?: number
+    /** 服务端截止时间戳（毫秒） */
+    turnDeadlineAt?: number | null
+    /** 本地与服务端时钟偏差（毫秒） */
+    clockOffsetMs?: number
     /** 无法行动时展示的原因，每个禁用按钮的 title 也会带上它。 */
     blockedReason?: string
     /** 链路异常时禁止提交。 */
@@ -40,6 +44,9 @@ const props = withDefaults(
     isMyTurn: false,
     remainingSeconds: 0,
     turnSeconds: 20,
+    remainingRatio: 1,
+    turnDeadlineAt: null,
+    clockOffsetMs: 0,
     blockedReason: '',
     enabled: true,
     canStartHand: false,
@@ -78,7 +85,7 @@ const sizingAction = computed<'bet' | 'raise' | null>(() => (betAction.value ? '
 
 const canAct = computed(() => props.isMyTurn && props.enabled)
 /** 无法行动时的统一说明，直接出现在按钮 title 上。 */
-const reason = computed(() => props.blockedReason || (props.isMyTurn ? '服务端未给出该动作' : '当前无法行动'))
+const reason = computed(() => props.blockedReason || (props.isMyTurn ? 'Action unavailable' : 'Waiting for turn'))
 const reasonFor = computed(() => (canAct.value ? '' : reason.value))
 
 const minAmount = computed(() => sizing.value?.min ?? 0)
@@ -98,16 +105,40 @@ watch(
 )
 
 /**
- * 唯一的取整 + 边界函数：数字输入、滑块、快捷额度与提交动作都走它。
- * 快捷额度不允许另起一套步进/夹取逻辑，否则同一个值会有两种算法。
+ * 唯一的取整 + 边界函数：数字输入、快捷额度与提交动作都走它。
  */
 function clamp(value: number): number {
   return clampAmount(value, minAmount.value, maxAmount.value)
 }
 
+/** 快捷步进变化量：优先按小盲/大盲步进 */
+const stepDelta = computed(() => {
+  const span = maxAmount.value - minAmount.value
+  if (span <= 50) return 5
+  if (span <= 500) return 10
+  return 20
+})
+
+function stepDown(): void {
+  if (!canAct.value) return
+  amount.value = clamp(amount.value - stepDelta.value)
+}
+
+function stepUp(): void {
+  if (!canAct.value) return
+  amount.value = clamp(amount.value + stepDelta.value)
+}
+
+function onAmountInput(event: Event): void {
+  const target = event.target as HTMLInputElement
+  const parsed = parseInt(target.value, 10)
+  if (!Number.isNaN(parsed)) {
+    amount.value = clamp(parsed)
+  }
+}
+
 /**
- * 快捷额度：1/2、2/3、满池、超池。换算与「越界即禁用」的判定在纯函数
- * `quickSizes()` 里（可单测），这里只把 props 喂进去。
+ * 快捷额度：1/2、2/3、满池、超池。
  */
 const quickAmounts = computed<QuickSize[]>(() => {
   const kind = sizingAction.value
@@ -126,21 +157,20 @@ function applyQuick(quick: QuickSize): void {
   amount.value = quick.value
 }
 
-const confirmAllIn = ref(false)
-
-/** 极矮屏（横屏手机）隐藏步进按钮：保留数字输入本体，高度更可控。 */
-const showStepper = ref(true)
-
-function syncDensity(): void {
-  showStepper.value = window.innerHeight > 430
+function applyMin(): void {
+  if (!canAct.value) return
+  amount.value = minAmount.value
 }
 
-onMounted(() => {
-  syncDensity()
-  window.addEventListener('resize', syncDensity)
-})
+function applyMax(): void {
+  if (!canAct.value) return
+  amount.value = maxAmount.value
+}
 
-onBeforeUnmount(() => window.removeEventListener('resize', syncDensity))
+const isAtMaxAmount = computed(() => amount.value >= maxAmount.value && maxAmount.value > 0)
+const isAtMinAmount = computed(() => amount.value <= minAmount.value)
+
+const confirmAllIn = ref(false)
 
 function sendAction(action: LegalAction['action'], value?: number): void {
   if (!canAct.value) return
@@ -162,507 +192,1088 @@ function confirmAllInAction(): void {
   sendAction('all_in')
 }
 
-const percent = computed(() =>
-  Math.round(Math.min(1, Math.max(0, props.remainingSeconds / Math.max(1, props.turnSeconds))) * 100),
+const timerFillRef = shallowRef<HTMLElement | null>(null)
+let timerRafId = 0
+
+function updateTimer(): void {
+  if (!props.isMyTurn) {
+    if (timerFillRef.value) {
+      timerFillRef.value.style.transform = 'scaleX(0)'
+    }
+    return
+  }
+
+  let ratio = props.remainingRatio ?? 1
+  if (props.turnDeadlineAt) {
+    const now = Date.now() + props.clockOffsetMs
+    const rem = Math.max(0, props.turnDeadlineAt - now)
+    const total = Math.max(1, props.turnSeconds * 1000)
+    ratio = Math.max(0, Math.min(1, rem / total))
+  }
+
+  if (timerFillRef.value) {
+    timerFillRef.value.style.transform = `scaleX(${ratio})`
+  }
+
+  if (props.isMyTurn && (ratio > 0 || (props.remainingSeconds ?? 0) > 0)) {
+    timerRafId = requestAnimationFrame(updateTimer)
+  }
+}
+
+watch(
+  () => [props.isMyTurn, props.turnDeadlineAt, props.turnSeconds],
+  async () => {
+    cancelAnimationFrame(timerRafId)
+    timerRafId = 0
+    if (props.isMyTurn) {
+      await nextTick()
+      updateTimer()
+    } else if (timerFillRef.value) {
+      timerFillRef.value.style.transform = 'scaleX(0)'
+    }
+  },
+  { immediate: true },
 )
 
-/** 只在轮到自己时播报，避免观战时反复打扰屏幕阅读器。 */
+onBeforeUnmount(() => {
+  cancelAnimationFrame(timerRafId)
+})
+
+const isUrgentTimer = computed(() => props.isMyTurn && props.remainingSeconds <= 5)
+
+/** 针对无障碍读屏的提示文本 */
 const liveText = computed(() => {
   if (!props.isMyTurn) return ''
-  const parts = ['轮到你行动']
-  if (callAction.value) parts.push(`需跟注 ${String(callAmount.value)}`)
-  if (allInAction.value) parts.push(`全下 ${String(allInAmount.value)}`)
-  return parts.join('，')
+  const parts = ['Your turn to act']
+  if (callAction.value) parts.push(`Call ${String(callAmount.value)}`)
+  if (allInAction.value) parts.push(`All in ${String(allInAmount.value)}`)
+  return parts.join(', ')
 })
 </script>
 
 <template>
-  <section class="action-bar" aria-label="下注操作区">
+  <section class="action-console" aria-label="Action Console">
     <p class="sr-only" aria-live="polite" aria-atomic="true">{{ liveText }}</p>
 
-    <div v-if="isMyTurn" class="turn-strip">
-      <span class="turn-flag">YOUR TURN</span>
-      <span class="turn-clock num">{{ remainingSeconds }}s</span>
-      <span
-        class="turn-bar"
-        role="progressbar"
-        :aria-valuenow="remainingSeconds"
-        aria-valuemin="0"
-        :aria-valuemax="turnSeconds"
-        aria-label="你的行动倒计时"
-      >
-        <span class="turn-fill" :style="{ transform: `scaleX(${String(percent / 100)})` }" />
-      </span>
+    <!-- 1. 一体化竞技倒计时舱（进度条与时间深度融铸在同一胶囊跑道内） -->
+    <div
+      v-if="isMyTurn"
+      class="turn-timer-integrated"
+      :class="{ 'is-urgent': isUrgentTimer }"
+      role="progressbar"
+      :aria-valuenow="remainingSeconds"
+      aria-valuemin="0"
+      :aria-valuemax="turnSeconds"
+      :aria-label="`行动倒计时，剩余 ${remainingSeconds} 秒`"
+    >
+      <!-- 进度条底槽与平滑硬件加速填充层 -->
+      <div class="timer-track-bar">
+        <div
+          ref="timerFillRef"
+          class="timer-progress-fill"
+          :style="{ transform: `scaleX(${remainingRatio ?? 1})` }"
+        />
+        <div class="timer-ambient-glow" />
+      </div>
+
+      <!-- 居中内嵌倒计时信息：行动提示与醒目时间数字 -->
+      <div class="timer-overlay-content">
+        <div class="timer-lead">
+          <i class="pi pi-clock timer-lead-icon" aria-hidden="true" />
+          <span class="timer-lead-title">轮到你行动</span>
+        </div>
+        <div class="timer-time-box num">
+          <span class="timer-digits">{{ remainingSeconds }}</span>
+          <span class="timer-unit">S</span>
+        </div>
+      </div>
     </div>
 
-    <div class="buttons">
-      <!--
-        动作按钮：英文是主文本（大号加粗），中文是小字辅助。
-        aria-label 必须同时带英文与中文——屏幕阅读器与 e2e 都按它取可访问名称，
-        只留英文会让中文用户（以及现有中文 e2e 选择器）找不到按钮。
-      -->
-      <Button
-        v-if="foldAction"
-        severity="danger"
-        outlined
-        :aria-label="'FOLD 弃牌'"
-        :title="reasonFor || 'FOLD 弃牌'"
-        :disabled="!canAct"
-        @click="sendAction('fold')"
-      >
-        <i class="pi pi-times" aria-hidden="true" />
-        <span class="act-text">
-          <span class="act-en">FOLD</span>
-          <span class="act-zh">弃牌</span>
-        </span>
-      </Button>
+    <!-- 2. 全新双舱协同布局 -->
+    <div class="actions-dock">
+      <!-- 轮到本人且存在可用动作 -->
+      <div v-if="canAct && legalActions.length > 0" class="dock-layout">
+        <!-- 【左舱：防守与跟随组 (CHECK / CALL 与 FOLD)】 -->
+        <div class="dock-panel panel--defend">
+          <!-- 动作 1A：CHECK 过牌（纯英文，翡翠透亮青绿） -->
+          <Button
+            v-if="checkAction"
+            class="action-btn action-btn--check"
+            aria-label="Check Hand"
+            :title="reasonFor || 'CHECK'"
+            :disabled="!canAct"
+            @click="sendAction('check')"
+          >
+            <div class="btn-content">
+              <i class="pi pi-check btn-icon" aria-hidden="true" />
+              <span class="btn-main-title">CHECK</span>
+            </div>
+          </Button>
 
-      <Button
-        v-if="checkAction"
-        :aria-label="'CHECK 过牌'"
-        :title="reasonFor || 'CHECK 过牌'"
-        :disabled="!canAct"
-        @click="sendAction('check')"
-      >
-        <i class="pi pi-check" aria-hidden="true" />
-        <span class="act-text">
-          <span class="act-en">CHECK</span>
-          <span class="act-zh">过牌</span>
-        </span>
-      </Button>
+          <!-- 动作 1B：CALL 跟注（纯英文，极光深海蔚蓝，大号标注跟注额） -->
+          <Button
+            v-else-if="callAction"
+            class="action-btn action-btn--call"
+            :aria-label="`Call ${String(callAmount)}`"
+            :title="reasonFor || `CALL ${String(callAmount)}`"
+            :disabled="!canAct"
+            @click="sendAction('call')"
+          >
+            <div class="btn-content">
+              <i class="pi pi-arrow-down-right btn-icon" aria-hidden="true" />
+              <div class="btn-title-group">
+                <span class="btn-main-title">CALL</span>
+                <span class="btn-chip-val num">{{ callAmount }}</span>
+              </div>
+            </div>
+          </Button>
 
-      <Button
-        v-if="callAction"
-        :aria-label="`CALL 跟注 ${String(callAmount)}`"
-        :title="reasonFor || `CALL 跟注 ${String(callAmount)}`"
-        :disabled="!canAct"
-        @click="sendAction('call')"
-      >
-        <i class="pi pi-arrow-down-right" aria-hidden="true" />
-        <span class="act-text">
-          <span class="act-en num">CALL {{ callAmount }}</span>
-          <span class="act-zh num">跟注 {{ callAmount }}</span>
-        </span>
-      </Button>
-
-      <Button
-        v-if="sizingAction"
-        severity="help"
-        :aria-label="`${sizingAction === 'bet' ? 'BET' : 'RAISE'} ${sizingAction === 'bet' ? '下注' : '加注'} ${String(amount)}`"
-        :title="`${reasonFor || '设置下注额'}（${String(minAmount)}–${String(maxAmount)}）`"
-        :disabled="!canAct"
-        @click="submitSizing"
-      >
-        <i class="pi pi-chart-line" aria-hidden="true" />
-        <span class="act-text">
-          <span class="act-en num">{{ sizingAction === 'bet' ? 'BET' : 'RAISE' }} {{ amount }}</span>
-          <span class="act-zh num">{{ sizingAction === 'bet' ? '下注' : '加注' }} {{ amount }}</span>
-        </span>
-      </Button>
-
-      <Button
-        v-if="allInAction"
-        severity="danger"
-        :aria-label="`ALL IN 全下 ${String(allInAmount)}`"
-        :title="reasonFor || `ALL IN 全下 ${String(allInAmount)}`"
-        :disabled="!canAct"
-        @click="askAllIn"
-      >
-        <i class="pi pi-bolt" aria-hidden="true" />
-        <span class="act-text">
-          <span class="act-en num">ALL IN {{ allInAmount }}</span>
-          <span class="act-zh num">全下 {{ allInAmount }}</span>
-        </span>
-      </Button>
-
-      <!-- 空态：解释当前为什么没有可执行动作。 -->
-      <p v-if="legalActions.length === 0" class="empty">{{ blockedReason || '当前没有可执行的动作' }}</p>
-    </div>
-
-    <!-- 下注额度台：左侧「金额输入 + 滑块」，右侧一排快捷额度（半池 / 2/3 池 / 满池 / 超池）。
-         三块共用同一个 amount，改动任何一处其余两块同步（数字输入、滑块、快捷额度）。 -->
-    <fieldset v-if="canAct && sizing" class="sizing">
-      <legend class="sr-only">下注金额</legend>
-
-      <div class="controls">
-        <!-- 数字输入：带可见标签；输入框本身另有 aria-label「下注金额」。 -->
-        <label class="field" for="bet-amount">
-          <span class="field-label">金额</span>
-          <InputNumber
-            v-model="amount"
-            input-id="bet-amount"
-            :min="minAmount"
-            :max="maxAmount"
-            :step="10"
-            :use-grouping="false"
-            :show-buttons="showStepper"
-            button-layout="horizontal"
-            :max-fraction-digits="0"
-            :pt="{
-              pcInputText: { root: { 'aria-label': '下注金额' } },
-              incrementButton: { 'aria-hidden': 'true', tabindex: '-1' },
-              decrementButton: { 'aria-hidden': 'true', tabindex: '-1' },
-            }"
-          />
-        </label>
-
-        <div class="slider">
-          <Slider
-            v-model="amount"
-            :min="minAmount"
-            :max="maxAmount"
-            :step="10"
-            aria-label="下注金额滑块"
-            :style="{ '--p-slider-handle-width': '28px', '--p-slider-handle-height': '28px' }"
-          />
+          <!-- 动作 2：FOLD 弃牌（纯英文，冷冽哑光宝石红） -->
+          <Button
+            v-if="foldAction"
+            class="action-btn action-btn--fold"
+            aria-label="Fold Hand"
+            :title="reasonFor || 'FOLD'"
+            :disabled="!canAct"
+            @click="sendAction('fold')"
+          >
+            <div class="btn-content">
+              <i class="pi pi-times btn-icon" aria-hidden="true" />
+              <span class="btn-main-title">FOLD</span>
+            </div>
+          </Button>
         </div>
 
-        <!-- 服务端给的本档合法区间（滑块被隐藏的窄屏上，这是唯一的区间来源）。 -->
-        <span class="range num">{{ minAmount }}–{{ maxAmount }}</span>
-      </div>
+        <!-- 【右舱：金额控制与进攻加注组 (金额调节、BET / RAISE 与 ALL IN 严格在一起)】 -->
+        <div v-if="sizing" class="dock-panel panel--attack">
+          <!-- 上排：快捷底池比例芯片 (MIN / 1/2 / 2/3 / POT / 1.5x) -->
+          <div class="quick-chips-strip" role="group" aria-label="Bet Sizing Presets">
+            <button
+              type="button"
+              class="chip-tag"
+              :class="{ 'is-selected': isAtMinAmount }"
+              :disabled="!canAct"
+              title="Minimum Bet"
+              @click="applyMin"
+            >
+              <span class="chip-label">MIN</span>
+              <span class="chip-val num">{{ minAmount }}</span>
+            </button>
 
-      <!-- 快捷额度：值来自真实底池并按 clampAmount() 夹进服务端区间；理想值越界的档位禁用，
-           title 说明是低于最小下注/加注还是超过上限，不会点出一个服务端必拒的数。
-           title 挂在外层 span 上：原生禁用按钮收不到 hover，浏览器不会弹它自己的 title。
-           英文在上、中文在下，与动作按钮同一套排版。 -->
-      <div class="quick" role="group" aria-label="快捷下注额度">
-        <span class="quick-caption" aria-hidden="true">快捷额度</span>
-        <span v-for="quick in quickAmounts" :key="quick.key" class="quick-slot" :title="quick.title">
+            <button
+              v-for="q in quickAmounts"
+              :key="q.key"
+              type="button"
+              class="chip-tag"
+              :class="{ 'is-selected': amount === q.value && !q.disabled }"
+              :disabled="!canAct || q.disabled"
+              :title="q.title"
+              :aria-label="q.desc"
+              @click="applyQuick(q)"
+            >
+              <span class="chip-label">{{ q.label === 'OVERBET' ? '1.5x' : q.label }}</span>
+              <span class="chip-val num">{{ q.value }}</span>
+            </button>
+          </div>
+
+          <!-- 下排：金额微调步进器 + BET/RAISE 主加注按钮 + ALL IN 爆发按钮 -->
+          <div class="attack-controls-row">
+            <!-- 1. 金额步进数显舱 -->
+            <div class="amount-stepper">
+              <button
+                type="button"
+                class="stepper-action-btn"
+                :disabled="!canAct || isAtMinAmount"
+                aria-label="Decrease Amount"
+                title="Decrease"
+                @click="stepDown"
+              >
+                <i class="pi pi-minus" aria-hidden="true" />
+              </button>
+
+              <div class="stepper-center-screen" title="Click to input amount">
+                <input
+                  type="number"
+                  class="stepper-digit-input num"
+                  :value="amount"
+                  :min="minAmount"
+                  :max="maxAmount"
+                  aria-label="Bet Amount"
+                  @change="onAmountInput"
+                />
+              </div>
+
+              <button
+                type="button"
+                class="stepper-action-btn"
+                :disabled="!canAct || isAtMaxAmount"
+                aria-label="Increase Amount"
+                title="Increase"
+                @click="stepUp"
+              >
+                <i class="pi pi-plus" aria-hidden="true" />
+              </button>
+            </div>
+
+            <!-- 2. BET / RAISE 主加注按键（拉丝黑金流光，纯英文大字与目标金额） -->
+            <Button
+              class="action-btn action-btn--primary"
+              :class="{ 'action-btn--glow-max': isAtMaxAmount }"
+              :aria-label="`${sizingAction === 'bet' ? 'BET' : 'RAISE'} ${String(amount)}`"
+              :title="`${reasonFor || 'Confirm and place bet'} (${String(minAmount)}–${String(maxAmount)})`"
+              :disabled="!canAct"
+              @click="submitSizing"
+            >
+              <div class="btn-content">
+                <i :class="isAtMaxAmount ? 'pi pi-bolt' : 'pi pi-arrow-up-right'" class="btn-icon" aria-hidden="true" />
+                <div class="btn-title-group">
+                  <span class="btn-main-title">{{ sizingAction === 'bet' ? 'BET' : 'RAISE' }}</span>
+                  <span class="btn-chip-val num">{{ amount }}</span>
+                </div>
+              </div>
+            </Button>
+
+            <!-- 3. ALL IN 战术爆发按钮（与金额和加注同舱共列，激光朱红，纯英文字样） -->
+            <Button
+              class="action-btn action-btn--allin"
+              :class="{ 'is-selected': isAtMaxAmount }"
+              :disabled="!canAct"
+              :title="canAct ? `ALL IN ${allInAmount}` : (reasonFor || 'ALL IN')"
+              :aria-label="`All In ${String(allInAmount)}`"
+              @click="askAllIn"
+            >
+              <div class="btn-content">
+                <i class="pi pi-bolt btn-icon" aria-hidden="true" />
+                <div class="btn-title-group">
+                  <span class="btn-main-title">ALL IN</span>
+                  <span class="btn-chip-val num">{{ allInAmount }}</span>
+                </div>
+              </div>
+            </Button>
+          </div>
+        </div>
+
+        <!-- 特殊备选：无常规加注阶梯，仅允许直接 ALL IN -->
+        <div v-else-if="allInAction" class="dock-panel panel--allin-only">
           <Button
-            size="small"
-            outlined
-            class="quick-btn"
-            :disabled="!canAct || quick.disabled"
-            :aria-label="`${quick.desc}，${quick.disabled ? `不可用：${quick.reason}` : `下注额 ${String(quick.value)}`}`"
-            @click="applyQuick(quick)"
+            class="action-btn action-btn--allin action-btn--allin-standalone"
+            :disabled="!canAct"
+            :title="canAct ? `ALL IN ${allInAmount}` : (reasonFor || 'ALL IN')"
+            :aria-label="`All In ${String(allInAmount)}`"
+            @click="askAllIn"
           >
-            <span class="quick-ratio">{{ quick.en }}</span>
-            <span class="quick-value num">{{ quick.value }}</span>
-            <span class="quick-zh">{{ quick.zh }}</span>
+            <div class="btn-content">
+              <i class="pi pi-bolt btn-icon" aria-hidden="true" />
+              <div class="btn-title-group">
+                <span class="btn-main-title">ALL IN</span>
+                <span class="btn-chip-val num">{{ allInAmount }}</span>
+              </div>
+            </div>
           </Button>
-        </span>
+        </div>
       </div>
-    </fieldset>
 
-    <!-- All-in 二次确认：误触防护，必须显式确认。 -->
+      <!-- 未轮到本人或等待态 -->
+      <div v-else class="standby-zone">
+        <div class="standby-inner">
+          <i class="pi pi-spin pi-spinner standby-spinner" aria-hidden="true" />
+          <span class="standby-message">{{ blockedReason || (isMyTurn ? 'Processing action...' : 'Waiting for opponents to act...') }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- All-in 确认弹窗 -->
     <Dialog
       v-model:visible="confirmAllIn"
       modal
-      :header="'确认全下'"
+      header="ALL IN CONFIRMATION"
       :style="{ width: 'min(92vw, 360px)' }"
       :draggable="false"
+      class="allin-dialog"
     >
-      <p class="confirm-text">
-        全下会投入你全部剩余筹码 <b class="num">{{ allInAmount }}</b
-        >。确认执行？
-      </p>
+      <div class="dialog-body">
+        <div class="dialog-crest">
+          <i class="pi pi-bolt dialog-crest-icon" aria-hidden="true" />
+        </div>
+        <div class="dialog-copy">
+          <h4 class="dialog-title">CONFIRM ALL IN</h4>
+          <p class="dialog-detail">
+            Commit your full remaining stack <b class="num text-gold">{{ allInAmount }}</b> into the pot.
+          </p>
+        </div>
+      </div>
       <template #footer>
-        <Button text :title="'取消全下'" @click="confirmAllIn = false">
-          <span>取消</span>
-        </Button>
-        <Button severity="danger" :title="'确认全下'" @click="confirmAllInAction">
-          <span>确认全下 {{ allInAmount }}</span>
-        </Button>
+        <div class="dialog-footer-actions">
+          <Button text class="dialog-btn-dismiss" title="Cancel" @click="confirmAllIn = false">
+            <span>CANCEL</span>
+          </Button>
+          <Button severity="danger" class="dialog-btn-submit" title="Confirm All In" @click="confirmAllInAction">
+            <i class="pi pi-bolt" aria-hidden="true" />
+            <span>ALL IN {{ allInAmount }}</span>
+          </Button>
+        </div>
       </template>
     </Dialog>
   </section>
 </template>
 
 <style scoped>
-.action-bar {
-  display: grid;
-  gap: var(--space-1);
+/* ───────────── 顶层容器 ───────────── */
+.action-console {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   width: 100%;
-  padding: var(--space-1) 0;
+  position: relative;
+  user-select: none;
+  box-sizing: border-box;
 }
 
-.turn-strip {
+/* ───────────── 1. 一体化竞技倒计时舱 (进度条与时间深度融铸) ───────────── */
+.turn-timer-integrated {
+  position: relative;
+  width: 100%;
+  height: 26px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(10, 15, 22, 0.92);
+  border: 1px solid rgba(212, 177, 106, 0.35);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.8), 0 2px 8px rgba(0, 0, 0, 0.5);
   display: flex;
   align-items: center;
-  gap: var(--space-1);
+  user-select: none;
+  box-sizing: border-box;
 }
 
-.turn-flag {
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  color: var(--gold);
+.turn-timer-integrated.is-urgent {
+  border-color: rgba(239, 68, 68, 0.85);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.8), 0 0 14px rgba(239, 68, 68, 0.65);
+  animation: timer-pulse-urgent 0.8s infinite alternate ease-in-out;
 }
 
-.turn-clock {
-  font-size: 0.78rem;
-  color: var(--text);
+@keyframes timer-pulse-urgent {
+  0% {
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.8), 0 0 6px rgba(239, 68, 68, 0.3);
+  }
+  100% {
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.8), 0 0 16px rgba(239, 68, 68, 0.85);
+  }
 }
 
-.turn-bar {
-  position: relative;
-  flex: 1;
-  height: 5px;
+.timer-track-bar {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   overflow: hidden;
-  border-radius: 3px;
-  background: rgba(0, 0, 0, 0.4);
+  border-radius: inherit;
+  pointer-events: none;
 }
 
-.turn-fill {
-  display: block;
+.timer-progress-fill {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   transform-origin: left center;
-  background: var(--gold);
+  background: linear-gradient(90deg, #059669 0%, #10b981 50%, #f59e0b 80%, #d97706 100%);
+  border-radius: inherit;
+  will-change: transform;
 }
 
-.buttons {
+.turn-timer-integrated.is-urgent .timer-progress-fill {
+  background: linear-gradient(90deg, #b91c1c 0%, #dc2626 40%, #ef4444 80%, #f97316 100%);
+}
+
+.timer-ambient-glow {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.08) 0%, transparent 80%);
+  pointer-events: none;
+}
+
+.timer-overlay-content {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
   display: flex;
   align-items: center;
-  gap: var(--space-1);
-  flex-wrap: wrap;
+  justify-content: space-between;
+  padding: 0 14px;
+  pointer-events: none;
+  box-sizing: border-box;
 }
 
-/*
- * 动作按钮的双行文本：英文主、中文辅。
- * 中文不用 var(--muted)：动作按钮有蓝（过牌/跟注）、绿（下注/加注）、红（弃牌/全下）
- * 三种填充底色，灰字在填充按钮上的对比度不够；改成继承按钮自身的前景色 + 降透明度，
- * 字号再收一档——层次感来自「更小 + 更淡」，可读性不受底色影响。
- * line-height 收到 1.05：矮屏（740×360）底部操作区每高 10px，牌桌就被挤掉 10px。
- */
-.act-text {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  line-height: 1.05;
-}
-
-.act-en {
-  font-size: 0.95rem;
-  font-weight: 700;
-  letter-spacing: 0.01em;
-}
-
-.act-zh {
-  font-size: 0.62rem;
-  font-weight: 400;
-  opacity: 0.72;
-}
-
-
-.empty {
-  margin: 0;
-  padding: 8px 16px;
-  color: var(--muted);
-  font-size: 0.84rem;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg-elevated) 60%, transparent);
-  border: 1px dashed var(--line);
-}
-
-/*
- * 额度台：一块带底色的控制台，左列「金额 + 滑块 + 区间」，右列快捷额度。
- * 用容器把两者框在一起，是因为它们操作的是同一个 amount——
- * 分散成两排会让滑块看起来像独立控件（旧版滑块就是单独一行、纵向与输入框对不齐）。
- */
-.sizing {
+.timer-lead {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-  margin: 0;
-  padding: 6px 10px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--bg-elevated) 80%, transparent);
+  gap: 6px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #f8fafc;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), 0 0 6px rgba(0, 0, 0, 0.9);
 }
 
-/* 左列：金额 + 滑块 + 区间。min-width: 0 让滑块在窄屏先被压缩，而不是把整行顶溢出。 */
-.controls {
+.timer-lead-icon {
+  font-size: 0.8rem;
+  color: #ffd875;
+  filter: drop-shadow(0 0 4px rgba(255, 216, 117, 0.6));
+}
+
+.is-urgent .timer-lead-icon {
+  color: #fca5a5;
+  animation: timer-spin 1.5s linear infinite;
+}
+
+@keyframes timer-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.timer-time-box {
   display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex: 1 1 300px;
-  min-width: 0;
-}
-
-.field {
-  display: grid;
+  align-items: baseline;
   gap: 2px;
-  flex: none;
+  font-weight: 900;
+  color: #ffffff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95), 0 0 8px rgba(0, 0, 0, 0.9);
+  font-variant-numeric: tabular-nums;
 }
 
-.field-label {
-  font-size: 0.72rem;
-  color: var(--muted);
-}
-
-.field :deep(.p-inputnumber) {
-  width: 132px;
-}
-
-/* 滑块纵向与输入框居中对齐；min-width 保底，避免被右列的快捷额度挤成一条线。 */
-.slider {
-  flex: 1 1 140px;
-  min-width: 120px;
-  padding: 6px 2px;
-}
-
-/*
- * 快捷额度：英文主文本 + 数值 + 中文小字，纵向三行。
- * 不用横向滚动容器：滚动容器会裁掉 :focus-visible 的焦点环（outline-offset: 2px），
- * 这里靠 flex-wrap 换行 + 2px 内边距，键盘焦点环始终完整可见。
- * 按钮间距 8px：相邻触控目标之间至少留 8px（否则手指容易点错到隔壁档位）。
- */
-.quick {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  flex-wrap: wrap;
-  padding: 2px;
-  /* 空间富余时整组靠右（用户要求「最右侧的按钮多几个」），
-     空间不足时它自己换到下一行，不会把金额挤窄。 */
-  margin-left: auto;
-}
-
-/* 分组标题：贴左侧竖排，不占按钮的宽度预算。 */
-.quick-caption {
-  font-size: 0.68rem;
-  color: var(--muted);
-}
-
-.quick-btn {
-  display: grid;
-  justify-items: center;
-  gap: 1px;
-  /* 触控目标不小于 40px：宁可整行换行，也不把按钮压小。 */
-  min-width: 54px;
-  min-height: 44px;
-  padding: 4px 8px;
-  line-height: 1.05;
-}
-
-/* title 的载体：禁用按钮本身收不到 hover，提示要挂在没被禁用的外层元素上。 */
-.quick-slot {
-  display: inline-flex;
-}
-
-.quick-ratio {
-  font-size: 0.6rem;
-  font-weight: 700;
+.timer-digits {
+  font-size: 0.98rem;
   letter-spacing: 0.02em;
-  color: var(--muted);
+  color: #ffe394;
 }
 
-.quick-value {
-  font-size: 0.86rem;
-  color: var(--gold);
+.is-urgent .timer-digits {
+  color: #fee2e2;
+  text-shadow: 0 0 8px rgba(239, 68, 68, 0.8);
 }
 
-.quick-zh {
-  font-size: 0.56rem;
-  color: var(--muted);
+.timer-unit {
+  font-size: 0.68rem;
+  font-weight: 700;
+  opacity: 0.9;
+  color: #f8fafc;
 }
 
-/* 禁用档位：靠 title 说明原因，视觉上用降透明度 + 常规禁用光标（不只靠颜色）。 */
-.quick-btn:disabled {
-  opacity: 0.55;
+/* ───────────── 2. 核心双舱协同布局 ───────────── */
+.actions-dock {
+  width: 100%;
 }
 
-.range {
-  flex: none;
-  font-size: 0.72rem;
-  color: var(--muted);
+.dock-layout {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
 }
 
-.confirm-text {
-  margin: 0;
-  line-height: 1.6;
+/* ───────────── 【左舱：防守与跟随组 (FOLD + CHECK / CALL)】 ───────────── */
+.panel--defend {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  flex: 0 0 26%;
+  min-width: 150px;
+  align-self: flex-end; /* 较窄视口下底部与金额行对齐 */
 }
 
-.confirm-text b {
-  color: var(--gold);
+.panel--defend .action-btn {
+  height: 50px !important;
+  min-height: 50px !important;
+  padding: 4px 6px !important;
 }
 
-/* 横屏手机：隐藏滑块（数字输入与快捷额度仍可用），保证操作区不被挤出屏幕。 */
+.panel--defend .btn-content {
+  flex-direction: row;
+  gap: 5px;
+}
 
-@media (max-width: 560px) {
-  /* 竖屏窄屏：滑块隐藏（数字输入与快捷额度仍可用），额度台分两行，
-     上行金额 + 区间、下行四个快捷档位，避免四个按钮把金额挤出屏幕。 */
-  .slider {
-    display: none;
-  }
+.panel--defend .btn-icon {
+  font-size: 0.95rem;
+}
 
-  /* 竖屏高度比宽度更值钱（390×844 实测）：额度台每少 10px，上方牌桌就多 10px。
-     做法：内边距 6→4px、快捷按钮 46→42px、档位间距 8→6px（触控目标仍 ≥40px）。 */
-  .sizing {
-    gap: 5px;
-    padding: 3px 8px;
-    align-items: center;
-  }
+.panel--defend .btn-main-title {
+  font-size: 0.88rem;
+}
 
-  /* 「YOUR TURN 倒计时」在竖屏收掉：把这一行的高度让给牌桌。
-     本人座位的倒计时进度条、底部按钮状态与 `.sr-only[aria-live]` 播报都还在，
-     信息不丢（动作按钮只在轮到自己时可用，本身就是状态提示）。 */
-  .turn-strip {
-    display: none;
-  }
-
-  .quick {
-    flex: 1 1 100%;
+/* 屏幕较宽时（>= 960px）：左侧这两个按钮呈两行展示，与右侧上下双层完美对齐 */
+@media (min-width: 960px) {
+  .panel--defend {
+    grid-template-columns: 1fr;
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+    flex: 0 0 160px;
+    min-width: 140px;
+    align-self: stretch;
+    height: 100%;
     gap: 6px;
   }
 
-  .controls {
-    flex: 1 1 100%;
-    justify-content: space-between;
+  .panel--defend .action-btn {
+    height: 100% !important;
+    min-height: 38px !important;
+    padding: 3px 8px !important;
   }
 
-  /* 额度台内部已经靠 gap 分行，动作按钮不能再带 auto 外边距（会多占一行）。 */
-  .buttons {
-    margin: 0;
+  .panel--defend .btn-content {
+    flex-direction: row;
+    gap: 6px;
+    justify-content: center;
   }
 
-  .quick-btn {
-    min-height: 42px;
-    flex: 1 1 0;
-    min-width: 0;
+  .panel--defend .btn-title-group {
+    flex-direction: row;
+    gap: 5px;
+    align-items: baseline;
   }
 
-  /* 区间文案不许换行：金额 201px + 区间约 66px 刚好放进 340px 的行宽，
-     一旦换行就会多占一行高度。 */
-  .range {
-    white-space: nowrap;
+  .panel--defend .btn-icon {
+    font-size: 0.88rem;
   }
 
-  .quick-caption {
-    display: none;
+  .panel--defend .btn-main-title {
+    font-size: 0.85rem;
   }
 
-  .act-text {
-    align-items: center;
+  .panel--defend .btn-chip-val {
+    font-size: 0.75rem;
+  }
+}
+
+/* ───────────── 【右舱：金额与进攻控制台】 ───────────── */
+.panel--attack {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 6px;
+  flex: 1 1 74%;
+  min-width: 0;
+  background: linear-gradient(180deg, rgba(16, 22, 32, 0.92) 0%, rgba(9, 14, 20, 0.98) 100%);
+  border: 1px solid rgba(212, 177, 106, 0.28);
+  border-radius: var(--radius-md);
+  padding: 6px 8px;
+  box-shadow:
+    0 4px 16px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* 上排：快捷底池比例芯片 */
+.quick-chips-strip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+  width: 100%;
+}
+
+.quick-chips-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.chip-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 1px 6px;
+  height: 22px;
+  flex: 1 1 auto;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  outline: none;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.chip-tag:hover:not(:disabled) {
+  background: rgba(212, 177, 106, 0.16);
+  border-color: rgba(212, 177, 106, 0.45);
+}
+
+.chip-tag.is-selected {
+  background: linear-gradient(135deg, rgba(212, 177, 106, 0.3) 0%, rgba(184, 134, 46, 0.4) 100%);
+  border-color: #ffd875;
+  box-shadow: 0 0 8px rgba(212, 177, 106, 0.35);
+}
+
+.chip-tag:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.chip-label {
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: #94a3b8;
+}
+
+.chip-tag.is-selected .chip-label {
+  color: #ffffff;
+}
+
+.chip-val {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #ffd875;
+}
+
+.chip-tag--max .chip-label {
+  color: #fca5a5;
+}
+
+.chip-tag--max.is-selected .chip-label {
+  color: #ffffff;
+}
+
+/* 下排：大幅强化的金额控制行 (数显步进器 + BET/RAISE + ALL IN) */
+.attack-controls-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+/* 数显微调步进器：全面放大突出金额视觉焦点 */
+.amount-stepper {
+  display: inline-flex;
+  align-items: center;
+  background: rgba(6, 9, 14, 0.96);
+  border: 1.5px solid rgba(212, 177, 106, 0.45);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  box-shadow:
+    inset 0 2px 6px rgba(0, 0, 0, 0.7),
+    0 0 8px rgba(212, 177, 106, 0.12);
+  flex: 0 0 auto;
+  height: 50px;
+  box-sizing: border-box;
+}
+
+.stepper-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 100%;
+  border: none;
+  background: rgba(255, 255, 255, 0.05);
+  color: #ffd875;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 700;
+  transition: all 0.15s ease;
+}
+
+.stepper-action-btn:hover:not(:disabled) {
+  background: rgba(212, 177, 106, 0.25);
+  color: #ffffff;
+}
+
+.stepper-action-btn:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.stepper-action-btn:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+.stepper-center-screen {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 5px;
+}
+
+.stepper-digit-input {
+  width: clamp(54px, 6vw, 70px);
+  background: transparent;
+  border: none;
+  color: #ffd875;
+  font-size: 1.12rem;
+  font-weight: 900;
+  text-align: center;
+  outline: none;
+  letter-spacing: 0.01em;
+  text-shadow: 0 0 6px rgba(255, 216, 117, 0.4);
+  -moz-appearance: textfield;
+}
+
+.stepper-digit-input::-webkit-outer-spin-button,
+.stepper-digit-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* ───────────── 3. 按钮统一高级样式规范 ───────────── */
+.action-btn {
+  min-height: 50px;
+  height: 50px;
+  border-radius: var(--radius-md) !important;
+  padding: 4px 6px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  position: relative !important;
+  overflow: hidden !important;
+  min-width: 0 !important;
+  box-sizing: border-box !important;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  border-width: 1px !important;
+  border-style: solid !important;
+}
+
+.action-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+}
+
+.action-btn:active:not(:disabled) {
+  transform: translateY(1px) scale(0.98);
+}
+
+.action-btn:disabled {
+  opacity: 0.35 !important;
+  cursor: not-allowed !important;
+  filter: grayscale(0.4);
+}
+
+.btn-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: 100%;
+  min-width: 0;
+}
+
+.btn-icon {
+  font-size: 0.92rem;
+  flex-shrink: 0;
+}
+
+.btn-title-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.1;
+  min-width: 0;
+}
+
+.btn-main-title {
+  font-size: 0.88rem;
+  font-weight: 900;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  text-transform: uppercase;
+}
+
+.btn-chip-val {
+  font-size: 0.75rem;
+  font-weight: 700;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+
+/* ───────────── 【各动作色彩与材质定制】 ───────────── */
+
+/* FOLD：石榴深红哑光 */
+.action-btn--fold {
+  background: linear-gradient(180deg, rgba(46, 16, 20, 0.92) 0%, rgba(25, 9, 12, 0.98) 100%) !important;
+  border-color: rgba(239, 68, 68, 0.35) !important;
+  color: #fca5a5 !important;
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+}
+
+.action-btn--fold:hover:not(:disabled) {
+  background: linear-gradient(180deg, rgba(68, 22, 28, 0.95) 0%, rgba(38, 12, 16, 1) 100%) !important;
+  border-color: rgba(239, 68, 68, 0.65) !important;
+  color: #ffffff !important;
+  box-shadow: 0 6px 18px rgba(239, 68, 68, 0.25) !important;
+}
+
+.action-btn--fold .btn-icon {
+  color: #ef4444;
+}
+
+/* CHECK：翡翠宝石青绿 */
+.action-btn--check {
+  background: linear-gradient(180deg, rgba(14, 45, 34, 0.92) 0%, rgba(8, 28, 21, 0.98) 100%) !important;
+  border-color: rgba(16, 185, 129, 0.45) !important;
+  color: #6ee7b7 !important;
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
+}
+
+.action-btn--check:hover:not(:disabled) {
+  background: linear-gradient(180deg, rgba(20, 64, 48, 0.95) 0%, rgba(12, 40, 30, 1) 100%) !important;
+  border-color: rgba(16, 185, 129, 0.8) !important;
+  color: #ffffff !important;
+  box-shadow: 0 6px 20px rgba(16, 185, 129, 0.3) !important;
+}
+
+.action-btn--check .btn-icon {
+  color: #10b981;
+}
+
+/* CALL：极光蔚蓝 */
+.action-btn--call {
+  background: linear-gradient(180deg, rgba(14, 36, 56, 0.92) 0%, rgba(8, 22, 36, 0.98) 100%) !important;
+  border-color: rgba(56, 189, 248, 0.45) !important;
+  color: #7dd3fc !important;
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
+}
+
+.action-btn--call:hover:not(:disabled) {
+  background: linear-gradient(180deg, rgba(18, 50, 78, 0.95) 0%, rgba(12, 32, 52, 1) 100%) !important;
+  border-color: rgba(56, 189, 248, 0.8) !important;
+  color: #ffffff !important;
+  box-shadow: 0 6px 20px rgba(56, 189, 248, 0.28) !important;
+}
+
+.action-btn--call .btn-icon {
+  color: #38bdf8;
+}
+
+.action-btn--call .btn-chip-val {
+  color: #ffffff;
+}
+
+/* BET / RAISE：黑金尊贵流光主角按键 */
+.action-btn--primary {
+  flex: 1 1 auto;
+  min-width: 90px;
+  background: linear-gradient(135deg, #ffd875 0%, #cb9b51 50%, #9a6d25 100%) !important;
+  border-color: #ffe89e !important;
+  color: #111827 !important;
+  box-shadow:
+    0 4px 16px rgba(212, 177, 106, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4) !important;
+}
+
+.action-btn--primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #ffe28a 0%, #d8a85e 50%, #ad7c2d 100%) !important;
+  box-shadow: 0 6px 22px rgba(212, 177, 106, 0.65) !important;
+}
+
+.action-btn--primary .btn-main-title,
+.action-btn--primary .btn-chip-val {
+  color: #0b0f14;
+}
+
+.action-btn--primary .btn-icon {
+  color: #1f1402;
+}
+
+.action-btn--glow-max {
+  border-color: #ffffff !important;
+  box-shadow:
+    0 0 18px rgba(255, 216, 117, 0.8),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6) !important;
+}
+
+/* ALL IN：激光朱红战术爆发按键（在进攻行右侧并排） */
+.action-btn--allin {
+  flex: 0 0 auto;
+  min-width: 82px;
+  background: linear-gradient(135deg, #dc2626 0%, #991b1b 50%, #580d0d 100%) !important;
+  border-color: #f87171 !important;
+  color: #ffffff !important;
+  box-shadow:
+    0 4px 14px rgba(220, 38, 38, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3) !important;
+}
+
+.action-btn--allin:hover:not(:disabled) {
+  background: linear-gradient(135deg, #ef4444 0%, #b91c1c 50%, #701010 100%) !important;
+  box-shadow: 0 6px 20px rgba(239, 68, 68, 0.6) !important;
+}
+
+.action-btn--allin .btn-icon {
+  color: #ffd875;
+}
+
+.action-btn--allin .btn-chip-val {
+  color: #ffea9f;
+}
+
+.action-btn--allin.is-selected {
+  border-color: #ffd875 !important;
+  box-shadow: 0 0 16px rgba(239, 68, 68, 0.7) !important;
+}
+
+.action-btn--allin-standalone {
+  flex: 1 1 auto;
+}
+
+.panel--allin-only {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+}
+
+/* ───────────── 4. 等待态 / 待机舱 ───────────── */
+.standby-zone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  border-radius: var(--radius-md);
+  background: rgba(13, 18, 25, 0.7);
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  padding: 8px 16px;
+}
+
+.standby-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #94a3b8;
+  font-size: 0.85rem;
+}
+
+.standby-spinner {
+  color: #64748b;
+  font-size: 0.9rem;
+}
+
+/* ───────────── 5. 全下确认弹窗 ───────────── */
+.allin-dialog :deep(.p-dialog-header) {
+  background: #0f172a;
+  color: #ffd875;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.allin-dialog :deep(.p-dialog-content) {
+  background: #0b1120;
+}
+
+.allin-dialog :deep(.p-dialog-footer) {
+  background: #0b1120;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.dialog-body {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 0;
+}
+
+.dialog-crest {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #ef4444 0%, #b91c1c 70%, #450a0a 100%);
+  border: 2px solid #ffd875;
+  box-shadow: 0 0 14px rgba(239, 68, 68, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.dialog-crest-icon {
+  font-size: 1.3rem;
+  color: #ffd875;
+  filter: drop-shadow(0 0 3px rgba(255, 216, 117, 0.9));
+}
+
+.dialog-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dialog-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 800;
+  color: #ffd875;
+  letter-spacing: 0.04em;
+}
+
+.dialog-detail {
+  margin: 0;
+  line-height: 1.45;
+  font-size: 0.85rem;
+  color: #cbd5e1;
+}
+
+.text-gold {
+  color: #ffd875;
+}
+
+.dialog-footer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  width: 100%;
+}
+
+.dialog-btn-dismiss {
+  color: #94a3b8 !important;
+  font-weight: 700 !important;
+}
+
+.dialog-btn-submit {
+  background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%) !important;
+  border-color: #f87171 !important;
+  font-weight: 800 !important;
+  letter-spacing: 0.02em !important;
+  box-shadow: 0 4px 14px rgba(239, 68, 68, 0.4) !important;
+}
+
+/* ───────────── 响应式布局自适应 ───────────── */
+@media (max-width: 820px) {
+  .dock-layout {
+    flex-direction: column;
+    gap: 8px;
   }
 
-  .act-en {
-    font-size: 0.8rem;
-    letter-spacing: 0;
+  .panel--defend,
+  .panel--attack {
+    flex: 1 1 auto;
+    width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .attack-controls-row {
+    gap: 4px;
   }
 
-  /* 竖屏把动作按钮里的中文小字从**视觉**上收掉：宽度让给按钮本体
-     （四个按钮合计省约 39px，390px 宽时 FOLD / CALL / RAISE 能排进同一行）。
-     中文仍是按钮的 title 提示，也仍在这个按钮的可访问名称里（aria-label 中英双全），
-     读屏与悬停拿到的信息不变；大屏（≥561px）依旧显示中文小字。 */
-  .act-zh {
-    display: none;
+  .stepper-digit-input {
+    width: 46px;
+    font-size: 0.85rem;
   }
 
-
-  /* 竖屏动作按钮收一档内边距与字号：仍 ≥40px 触控高度，但更矮更窄。 */
-  .buttons :deep(.p-button) {
-    padding-block: 5px;
-    padding-inline: 8px;
-    font-size: 0.8rem;
+  .action-btn {
+    min-height: 44px;
+    height: 44px;
+    padding: 2px 4px !important;
   }
 
-  .buttons :deep(.p-button-icon) {
-    width: 1rem;
-    font-size: 0.9rem;
-    margin-inline-end: 4px;
+  .action-btn--allin {
+    flex: 0 0 80px;
   }
 }
 </style>
+

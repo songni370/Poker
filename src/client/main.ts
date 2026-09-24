@@ -7,7 +7,12 @@ import './styles/theme.css'
 import App from './App.vue'
 import router from './router.ts'
 
-createApp(App)
+const app = createApp(App)
+app.config.errorHandler = (err, instance, info) => {
+  console.error('*** VUE ERROR HANDLER ***', err, info, (instance as any)?.$options?.__name || (instance as any)?.$options?.name, instance)
+}
+
+app
   .use(createPinia())
   .use(router)
   .use(PrimeVue, {

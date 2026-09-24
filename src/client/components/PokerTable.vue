@@ -290,18 +290,23 @@ const tableStatus = computed(() => {
 }
 
 .table {
+  --seat-w: clamp(86px, 11vw, 126px);
   position: relative;
   width: var(--table-w);
   height: var(--table-h);
   margin-inline: auto;
   border-radius: 50% / 50%;
-  background: radial-gradient(ellipse at 50% 34%, #1b5a4c 0%, var(--felt) 46%, var(--felt-deep) 100%);
-  /* 内圈亮边 + 外侧深色台边，不用厚阴影制造浮起感。 */
+  background: radial-gradient(ellipse 76% 66% at 50% 40%, #1c6858 0%, #124d41 42%, #0b3129 78%, #061e19 100%);
+  /* 顶级赛道牌桌：内凹呢绒光影 + 黄铜精铸饰边 + 加厚软包真皮扶手环 + 舞台深远投射 */
   box-shadow:
-    inset 0 0 0 1px rgba(242, 241, 234, 0.08),
-    inset 0 0 46px rgba(0, 0, 0, 0.34),
-    0 0 0 9px #16232c,
-    0 0 0 10px var(--line);
+    inset 0 0 0 1px rgba(212, 177, 106, 0.35),
+    inset 0 0 50px rgba(0, 0, 0, 0.65),
+    0 0 0 3px #181614,
+    0 0 0 5px rgba(212, 177, 106, 0.45),
+    0 0 0 13px #192027,
+    0 0 0 15px #0d1217,
+    0 20px 48px rgba(0, 0, 0, 0.8),
+    0 6px 20px rgba(0, 0, 0, 0.5);
 }
 
 .felt-texture {
@@ -309,42 +314,37 @@ const tableStatus = computed(() => {
   inset: 0;
   border-radius: inherit;
   overflow: hidden;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28'%3E%3Cg fill='none' stroke='%23ffffff' stroke-opacity='.035'%3E%3Cpath d='M0 14h28M14 0v28'/%3E%3C/g%3E%3C/svg%3E");
+  /* 德州皇家呢绒暗纹：四色扑克花色浮印微光 */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'%3E%3Cg fill='%23ffffff' fill-opacity='0.025'%3E%3Cpath d='M16 10c-2 0-4 2-4 4 0 3 4 7 4 7s4-4 4-7c0-2-2-4-4-4zm32 0c0 2-2 4-4 4s-4-2-4-4 2-4 4-4 4 2 4 4zm-16 28c-3 0-5 2.5-5 5 0 3.5 5 7 5 7s5-3.5 5-7c0-2.5-2-5-5-5zm0-18l3 5-3 5-3-5 3-5z'/%3E%3C/g%3E%3C/svg%3E");
   pointer-events: none;
 }
 
-/* 下注线：把公共牌区与座位区分开的结构线，不是装饰。 */
+/* 下注线：把公共牌区与座位区分开的结构线，带内敛柔和金色微光 */
 .betting-line {
   position: absolute;
   inset: 16% 13%;
   border-radius: 50% / 50%;
-  border: 1px solid rgba(212, 177, 106, 0.2);
+  border: 1px solid rgba(212, 177, 106, 0.22);
+  box-shadow: inset 0 0 16px rgba(212, 177, 106, 0.06), 0 0 14px rgba(212, 177, 106, 0.08);
   pointer-events: none;
 }
 
 /*
  * 中央信息区：两行（底池+边池 / 公共牌），整体居中。
- *   - 竖排而不是 grid 堆叠：`.center` 的宽度必须是「两行里较宽的那一行」，
- *     否则块会比内容宽（曾用 `.board { flex-basis: 100% }` 强行独占一行，
- *     结果容器的 max-content 把两行宽度相加，块变宽 87px 还会压到侧边座位面板）。
- *   - 边池与底池同一行：边池另起一行会让中心块高 20px，桌面高度不变时就会顶到
- *     上沿的座位面板（实测 1280×720 出现底池压住本人座位面板）。
  */
 .center {
   position: absolute;
   left: 50%;
-  /* 45%（而非正中）：本人座位固定在环的下沿中央，其面板比别的座位高一截
-     （昵称 + 筹码 + 底牌 + 行动提示），中心块略微下移才不会顶到它。 */
   top: 45%;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: max-content;
   transform: translate(-50%, -50%);
 }
 
-/* 底池与边池同行。 */
+/* 底池与边池同行 */
 .center-pot {
   display: flex;
   align-items: center;
@@ -354,42 +354,59 @@ const tableStatus = computed(() => {
 
 .pot {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
   margin: 0;
-  padding: 3px 12px;
+  padding: 5px 18px;
   border-radius: 999px;
-  background: rgba(0, 0, 0, 0.28);
-  border: 1px solid var(--gold-dim);
+  background: linear-gradient(180deg, rgba(26, 35, 45, 0.9) 0%, rgba(13, 18, 24, 0.95) 100%);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(212, 177, 106, 0.45);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
 .pot-label {
-  font-size: 0.7rem;
-  letter-spacing: 0.08em;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
   color: var(--muted);
+  text-transform: uppercase;
 }
 
 .pot b {
-  font-size: 1.02rem;
-  color: var(--gold);
+  font-size: 1.18rem;
+  font-weight: 700;
+  color: #ffe394;
+  text-shadow: 0 0 12px rgba(212, 177, 106, 0.5);
+  letter-spacing: 0.04em;
 }
 
 .empty-state {
   margin: 0;
-  padding: 4px 14px;
+  padding: 6px 16px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--gold-dim);
-  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(212, 177, 106, 0.25);
+  background: rgba(14, 20, 27, 0.75);
   color: var(--text);
-  font-size: 0.82rem;
+  font-size: 0.84rem;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
 }
 
 .pots {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   margin: 0;
-  font-size: 0.68rem;
+  font-size: 0.7rem;
   color: var(--muted);
+}
+
+.pots .num {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(16, 22, 28, 0.7);
+  border: 1px solid rgba(212, 177, 106, 0.2);
+  color: var(--gold);
 }
 
 .seat-slot {
@@ -399,54 +416,70 @@ const tableStatus = computed(() => {
 }
 
 /*
- * 空位：可点的座位槽。描边虚线 + 「座位号 入座」，键盘可达（是真正的 button）。
- * 第 2 项需求：座位号与「入座」并排一行（原来是「+ / 号码 / 入座」三行），
- * 卡片整体也收小一圈——空位只是入口，不需要占一张玩家卡的体量。
+ * 空位：可点的座位槽。微金细线 + 「座位号 入座」，键盘可达
  */
 .seat-empty {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  width: var(--seat-w, 144px);
-  /* 5px 内边距 + 0.82rem 字号 ≈ 32px：一小再小也守住 e2e 里 32px 的触控下限。 */
-  padding: 5px 8px;
+  gap: 4px;
+  width: var(--seat-w);
+  padding: clamp(2px, 0.4vw, 4px) clamp(4px, 0.6vw, 8px);
   border: 1px dashed rgba(212, 177, 106, 0.45);
-  border-radius: var(--radius-sm);
-  background: rgba(0, 0, 0, 0.24);
+  border-radius: clamp(4px, 0.5vw, 6px);
+  background: rgba(14, 20, 27, 0.65);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   color: var(--muted);
   font: inherit;
-  font-size: 0.76rem;
-  line-height: 1.5;
+  font-size: clamp(0.66rem, 0.78vw, 0.74rem);
+  line-height: 1.35;
   cursor: pointer;
-  transition: border-color 0.15s ease-out, color 0.15s ease-out, background 0.15s ease-out;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
+  box-sizing: border-box;
 }
 
-/* 座位号：比自己那一枚「座位徽标」稍大一点，因为这里是唯一的操作对象。 */
+.seat-empty:hover {
+  border-color: var(--gold);
+  border-style: solid;
+  color: #ffffff;
+  background: rgba(212, 177, 106, 0.16);
+  box-shadow: 0 0 16px rgba(212, 177, 106, 0.35);
+  transform: scale(1.03);
+}
+
+.seat-empty.is-reserved {
+  border: 1px solid var(--gold);
+  background: rgba(212, 177, 106, 0.2);
+  box-shadow: 0 0 14px rgba(212, 177, 106, 0.35);
+}
+
+/* 座位号 */
 .seat-empty-no {
-  font-size: 0.82rem;
+  font-size: clamp(0.72rem, 0.85vw, 0.82rem);
   font-weight: 700;
   color: var(--gold);
 }
 
 /*
- * 别人离座保留的座位：一行小胶囊「N 已离座」。
- * 比完整玩家卡矮一半以上，同时明确「这个位子有人、只是暂时不在」。
+ * 别人离座保留的座位：一行小胶囊「N 已离座」
  */
 .away-pill {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  width: var(--seat-w, 144px);
+  gap: 4px;
+  width: var(--seat-w);
   margin: 0;
-  padding: 3px 8px;
-  border: 1px dashed var(--gold-soft);
-  border-radius: var(--radius-sm);
-  background: rgba(0, 0, 0, 0.2);
+  padding: clamp(2px, 0.4vw, 3px) clamp(4px, 0.6vw, 7px);
+  border: 1px dashed rgba(212, 177, 106, 0.3);
+  border-radius: clamp(4px, 0.5vw, 6px);
+  background: rgba(14, 20, 27, 0.45);
   color: var(--muted);
-  font-size: 0.74rem;
-  line-height: 1.5;
+  font-size: clamp(0.62rem, 0.74vw, 0.70rem);
+  line-height: 1.35;
+  box-sizing: border-box;
 }
 
 .away-no {
@@ -546,8 +579,8 @@ const tableStatus = computed(() => {
     --seat-anchor-y: 45%;
     /* 椭圆横向半径收窄，座位面板不越出屏幕（无横向滚动）。 */
     --seat-anchor-x: 43%;
-    /* 座位面板同时收窄，9 人桌在竖屏下才不会互相压住。 */
-    --seat-w: 108px;
+    /* 座位面板自适应收窄，9 人桌在竖屏下小巧精致、不互相压住。 */
+    --seat-w: clamp(82px, 20vw, 96px);
   }
 }
 
@@ -555,7 +588,7 @@ const tableStatus = computed(() => {
  * 竖屏（≤560px 宽）：桌面高度跟着视口走（390×844 时 310px），公共牌缩到 34px 上下，
  * 贴边座位单独收窄——三件事一起做，公共牌区才真正空出来。
  * 竖屏是 9 人桌最紧张的一档：`|sin|` 最小的两个座位（9 人桌的 ±10° 位）与公共牌同高，
- * 只能在宽度上让路（108px → 64px）；收窄后中央 222px 全部留给公共牌。
+ * 只能在宽度上让路；收窄后中央 222px 全部留给公共牌。
  * 实测 390×844：6 人桌与 9 人桌的公共牌与任何座位面板都零重叠。
  */
 @media (max-width: 560px) and (orientation: portrait) {
@@ -597,21 +630,17 @@ const tableStatus = computed(() => {
     top: 50%;
   }
 
-  /* 贴边座位：只留「角色 + 昵称 + 筹码」，头像圆已整体删除（见 PlayerSeat）。 */
+  /* 贴边座位与常规座位自适应宽度：保证昵称与筹码信息全部完整展示且卡片不笨重 */
   .seat-slot {
-    /* 非贴边座位 96px：9 人桌上相邻面板（本人↔两侧 ±50° 位、下沿的两个 sin 0.94 位）
-       才不会互相压住；再宽一点就要靠截断昵称来换，没必要。 */
-    --seat-w: 88px;
+    --seat-w: clamp(80px, 22vw, 94px);
   }
 
   .seat-slot.is-side-seat {
-    --seat-w: 64px;
+    --seat-w: clamp(74px, 19vw, 84px);
   }
 
-  /* 贴边座位只有 64px：面板内边距从 8px 收到 5px，把 6px 让给「昵称 + 筹码」。
-     不这么做的话，同时挂着 BB 胶囊的座位会把筹码「2640」省略成「264…」（实测 24/30px）。 */
   .seat-slot.is-side-seat :deep(.panel) {
-    padding-inline: 5px;
+    padding-inline: 3px;
   }
 
   /*

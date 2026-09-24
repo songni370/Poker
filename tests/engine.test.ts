@@ -135,6 +135,44 @@ test('双人桌：庄家即小盲，翻牌前先行动、翻牌后最后行动',
   assert.equal(flop.actingSeat, 1, '翻牌后由非庄家（大盲）先行动')
 })
 
+test('跟注后的流程：翻牌前保留大盲选择权，翻牌后下注被跟注即进入下一街', () => {
+  const table = makeTable([['sb', 0, 1000], ['bb', 1, 1000]])
+  table.startHand({ handId: 'h-call-flow', rng: seededRng(17), buttonSeat: 0 })
+  table.act('sb', 'call')
+  assert.equal(table.publicState().actingSeat, 1, '小盲跟注不能跳过大盲的加注选择权')
+  assert.ok(table.legalActions('bb').some((action) => action.action === 'check'))
+  assert.ok(table.legalActions('bb').some((action) => action.action === 'raise'))
+
+  table.act('bb', 'check')
+  for (const [street, nextStreet] of [['flop', 'turn'], ['turn', 'river']] as const) {
+    assert.equal(table.publicState().street, street)
+    assert.equal(table.publicState().actingSeat, 1)
+    table.act('bb', 'bet', 20)
+    table.act('sb', 'call')
+    assert.equal(table.publicState().street, nextStreet, '跟注后当前街应直接结束')
+    assert.equal(table.publicState().actingSeat, 1, '新街才重新轮到大盲行动')
+  }
+  table.act('bb', 'bet', 20)
+  table.act('sb', 'call')
+  assert.equal(table.publicState().phase, 'settlement', '河牌跟注后直接摊牌结算')
+  assert.equal(table.publicState().actingSeat, null)
+})
+
+test('筹码不足最小加注时只能全下，不能伪装为普通加注', () => {
+  const table = makeTable([['short', 0, 55], ['deep', 1, 1000]])
+  table.startHand({ handId: 'h-short-raise', rng: seededRng(19), buttonSeat: 0 })
+  table.act('short', 'call')
+  table.act('deep', 'check')
+  table.act('deep', 'bet', 20)
+  const actions = table.legalActions('short')
+  assert.ok(actions.some((action) => action.action === 'call' && action.amount === 20))
+  assert.ok(actions.some((action) => action.action === 'all_in' && action.amount === 35))
+  assert.ok(!actions.some((action) => action.action === 'raise'))
+  assert.throws(() => table.act('short', 'raise', 35), /当前不合法操作/)
+  table.act('short', 'all_in')
+  assert.equal(table.publicState().currentBet, 35)
+})
+
 test('三人桌：翻牌前由大盲左手第一位（庄家）先行动', () => {
   const table = makeTable([
     ['p1', 0, 2000],
@@ -146,6 +184,23 @@ test('三人桌：翻牌前由大盲左手第一位（庄家）先行动', () =>
   assert.equal(table.seatOf('p2')!.committedStreet, 10, '小盲在庄家左手')
   assert.equal(table.seatOf('p3')!.committedStreet, 20, '大盲在小盲左手')
   assert.equal(table.publicState().actingSeat, 0)
+})
+
+test('三人桌：每位玩家对下注表态后结束当前街，不再要求额外过牌', () => {
+  const table = makeTable([['button', 0, 1000], ['sb', 1, 1000], ['bb', 2, 1000]])
+  table.startHand({ handId: 'h-three-call-flow', rng: seededRng(23), buttonSeat: 0 })
+  table.act('button', 'call')
+  table.act('sb', 'call')
+  assert.equal(table.publicState().actingSeat, 2, '大盲保留翻牌前选择权')
+  table.act('bb', 'check')
+  assert.equal(table.publicState().street, 'flop')
+  assert.equal(table.publicState().actingSeat, 1)
+  table.act('sb', 'bet', 40)
+  table.act('bb', 'call')
+  assert.equal(table.publicState().street, 'flop', '还有一名玩家未回应下注')
+  table.act('button', 'call')
+  assert.equal(table.publicState().street, 'turn')
+  assert.equal(table.publicState().actingSeat, 1)
 })
 
 test('最小加注与未满额 All-in：不重新开放已行动玩家的加注权', () => {

@@ -90,8 +90,8 @@ const isTen = computed(() => rank.value === 'T')
         <span class="suit">{{ suitSymbol }}</span>
       </span>
 
-      <!-- 右下角标：桌上的牌朝向桌心（rotate 180），操作区的牌保持正向。 -->
-      <span class="corner corner--br" :class="{ 'corner--br-flat': upright }" aria-hidden="true">
+      <!-- 右下角标：缩小且倒置展示 -->
+      <span class="corner corner--br" aria-hidden="true">
         <span class="rank">{{ rankText }}</span>
         <span class="suit">{{ suitSymbol }}</span>
       </span>
@@ -155,9 +155,6 @@ const isTen = computed(() => rank.value === 'T')
 /*
  * 角标：点在上、花色在下，紧贴左上角；字号按牌宽等比缩放。
  * 10 是两位数，字号略收一点并压紧字距，避免在 26px 的牌上顶出边界。
- * 放大后的上限由「两个角标互不接触」定死：角标块高 (点数 + 花色) × 0.92 ≈ 0.72 牌宽，
- * 相比之下牌高 1.4 牌宽，上下两个角标在纵向必然有重叠带，靠横向错开（左 8% / 右 8%）分开；
- * 点数最大 0.46 时「10」的角标宽约 0.38 牌宽，左右角标之间还有 0.08 牌宽的净空。
  */
 .corner {
   position: absolute;
@@ -173,15 +170,25 @@ const isTen = computed(() => rank.value === 'T')
   left: 8%;
 }
 
+/* 右下角标：缩小并始终保持 180 度倒置 */
 .corner--br {
-  right: 8%;
+  right: 7%;
   bottom: 5%;
   transform: rotate(180deg);
 }
 
-/* 操作区（本人底牌、结算最佳五张）里的牌整张正向摆放，角标也要正向。 */
-.corner--br-flat {
-  transform: none;
+.corner--br .rank {
+  font-size: calc(var(--cw) * 0.3);
+  letter-spacing: -0.04em;
+}
+
+.is-ten .corner--br .rank {
+  font-size: calc(var(--cw) * 0.26);
+  letter-spacing: -0.06em;
+}
+
+.corner--br .suit {
+  font-size: calc(var(--cw) * 0.21);
 }
 
 .rank {
@@ -197,13 +204,6 @@ const isTen = computed(() => rank.value === 'T')
 
 .suit {
   font-size: calc(var(--cw) * 0.32);
-}
-
-/* 牌桌上朝向桌心的牌：小尺寸下右下角标不旋转，字形更清楚。 */
-@media (max-width: 1100px) {
-  .corner--br {
-    transform: none;
-  }
 }
 
 /* 背面。 */

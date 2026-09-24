@@ -298,7 +298,7 @@ export const TakeSeatCommandSchema = z.object({
   type: z.literal('seat.take'),
   requestId,
   seat: z.number().int().min(0).max(TABLE_RULES.maxSeats - 1),
-  /** 买入额：首次入座用；坐回保留座位时忽略（筹码照旧，只有 0 筹码时按新的买入补充）。 */
+  /** 首次入座或结算后 0 筹码重新买入；坐回有筹码的保留座位时忽略。 */
   buyIn: z.number().int().positive().max(TABLE_RULES.maxBuyInLimit).optional(),
 })
 

@@ -3,13 +3,9 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Button from 'primevue/button'
 import Dialog from 'primevue/dialog'
-import Drawer from 'primevue/drawer'
 import InputNumber from 'primevue/inputnumber'
 import InputText from 'primevue/inputtext'
-import Menu from 'primevue/menu'
 import Password from 'primevue/password'
-import type { MenuItem } from 'primevue/menuitem'
-import Select from 'primevue/select'
 import type { ActionType, Card } from '../../shared/poker.ts'
 import { ROOM_PASSWORD_DIGITS, STREET_NAMES, TABLE_RULES, formatCard } from '../../shared/poker.ts'
 import { describeHand } from '../../engine/evaluate.ts'
@@ -83,7 +79,6 @@ const isDev = import.meta.env.DEV
  */
 
 const scenario = ref(isDev && typeof route.query.mock === 'string' ? route.query.mock : 'flop')
-const scenarioOptions = ref<{ label: string; value: string }[]>([])
 const noticeText = ref('')
 watch(
   () => session.notice,
@@ -96,7 +91,6 @@ const unavailable = ref(false)
 async function applyScenario(name: string): Promise<void> {
   if (!isDev) return
   const mock = await import('../dev/mock.ts')
-  scenarioOptions.value = mock.MOCK_SCENARIO_NAMES.map((item) => ({ label: item, value: item }))
   const result = mock.devScenario(name)
 
   if (result.kind === 'redirect') {
@@ -127,6 +121,9 @@ async function applyScenario(name: string): Promise<void> {
  * 这里给出「填昵称加入」面板，加入后先是旁观者，再自己选座买入。
  */
 onMounted(() => {
+  if (isMobileScreen()) {
+    hudHistoryCollapsed.value = true
+  }
   const credentials = room.credentials?.roomId === props.roomId ? room.credentials : loadCredentials(props.roomId)
   if (credentials) {
     room.setCredentials(credentials)
@@ -185,19 +182,50 @@ async function submitJoin(): Promise<void> {
   }
 }
 
-// 开发模式下切换场景时仍然可以预览；连上真实房间后不再干预。
-watch(scenario, (name) => {
-  if (isDev && !room.hasCredentials) void applyScenario(name)
-})
 
-/* ───────────── 倒计时（以服务端时间为准） ───────────── */
+/* ───────────── 倒计时（以服务端时间为准，高性能低负载时钟） ───────────── */
 
-const nowMs = ref(Date.now())
+const remainingSeconds = ref(0)
+const remainingRatio = ref(1)
+const turnSeconds = computed(() => game.state?.turnSeconds ?? TABLE_RULES.turnSeconds)
+
 let rafId = 0
+let lastUpdateSec = -1
+let lastUpdateRatioBucket = -1
 
 function tick(): void {
-  nowMs.value = Date.now()
-  rafId = requestAnimationFrame(tick)
+  const deadline = game.state?.turnDeadlineAt
+  if (!deadline) {
+    if (remainingSeconds.value !== 0) remainingSeconds.value = 0
+    if (remainingRatio.value !== 0) remainingRatio.value = 0
+    rafId = 0
+    return
+  }
+
+  const now = Date.now() + connection.clockOffsetMs
+  const remMs = Math.max(0, deadline - now)
+  const sec = Math.ceil(remMs / 1000)
+  const totalMs = Math.max(1, turnSeconds.value * 1000)
+  const ratio = Math.max(0, Math.min(1, remMs / totalMs))
+
+  if (sec !== lastUpdateSec) {
+    lastUpdateSec = sec
+    remainingSeconds.value = sec
+  }
+
+  const bucket = Math.round(ratio * 200)
+  if (bucket !== lastUpdateRatioBucket) {
+    lastUpdateRatioBucket = bucket
+    remainingRatio.value = ratio
+  }
+
+  if (remMs > 0) {
+    rafId = requestAnimationFrame(tick)
+  } else {
+    rafId = 0
+    remainingSeconds.value = 0
+    remainingRatio.value = 0
+  }
 }
 
 watch(
@@ -205,22 +233,19 @@ watch(
   (deadline) => {
     cancelAnimationFrame(rafId)
     rafId = 0
-    if (deadline !== null) rafId = requestAnimationFrame(tick)
+    lastUpdateSec = -1
+    lastUpdateRatioBucket = -1
+    if (deadline !== null) {
+      tick()
+    } else {
+      remainingSeconds.value = 0
+      remainingRatio.value = 0
+    }
   },
   { immediate: true },
 )
 
 onBeforeUnmount(() => cancelAnimationFrame(rafId))
-
-const serverNow = computed(() => nowMs.value + connection.clockOffsetMs)
-const remainingMs = computed(() => {
-  const deadline = game.state?.turnDeadlineAt
-  if (deadline === null || deadline === undefined) return 0
-  return Math.max(0, deadline - serverNow.value)
-})
-const remainingSeconds = computed(() => Math.ceil(remainingMs.value / 1000))
-const turnSeconds = computed(() => game.state?.turnSeconds ?? TABLE_RULES.turnSeconds)
-const remainingRatio = computed(() => Math.min(1, remainingMs.value / (turnSeconds.value * 1000)))
 
 /* ───────────── 视图数据 ───────────── */
 
@@ -228,24 +253,82 @@ const remainingRatio = computed(() => Math.min(1, remainingMs.value / (turnSecon
 const myCards = computed<readonly Card[]>(() => game.myHoleCards)
 const myStack = computed(() => game.mySeat?.stack ?? 0)
 
+/** 结算叠层手牌保底：即使局末快照重置也能稳定回溯本人本手底牌 */
+const savedHeroCards = ref<readonly Card[]>([])
+watch(
+  () => game.myHoleCards,
+  (cards) => {
+    if (cards && cards.length > 0) savedHeroCards.value = [...cards]
+  },
+  { immediate: true },
+)
+watch(
+  () => game.state?.handNo,
+  () => {
+    if (game.state?.phase === 'betting' && game.state?.street === 'preflop') {
+      savedHeroCards.value = []
+    }
+  },
+)
+const activeHeroCards = computed<readonly Card[]>(() =>
+  myCards.value.length > 0 ? myCards.value : savedHeroCards.value,
+)
+
+/**
+ * 一手牌是否处于进行中活跃状态（非 waiting 且非 settlement）。
+ * 一手结束后，手牌区域和公牌都不展示上一手的牌，干净等待下一手发牌。
+ */
+const isHandActive = computed(() => {
+  const phase = game.state?.phase
+  return phase !== undefined && phase !== null && phase !== 'waiting' && phase !== 'settlement'
+})
+
+/** 本人手牌展示：一手结束后不展示上一手手牌，等待下一手发牌。 */
+const displayHeroCards = computed<readonly Card[]>(() => {
+  if (!isHandActive.value) return []
+  return myCards.value
+})
+
+/** 牌桌公共牌展示：一手结束后清空上一手公共牌，呈现空牌槽。 */
+const displayBoard = computed<readonly Card[]>(() => {
+  if (!isHandActive.value) return []
+  return game.board
+})
+
+/** 牌桌当前轮次：一手结束后置空。 */
+const displayStreet = computed(() => {
+  if (!isHandActive.value) return null
+  return game.state?.street ?? null
+})
+
+/** 牌桌座位手牌/亮牌展示：一手结束后清空各席位上一手的摊牌与牌背。 */
+const displaySeats = computed(() => {
+  if (!isHandActive.value) {
+    return game.seats.map((seat) => {
+      if (!seat) return null
+      return {
+        ...seat,
+        holeCardCount: 0,
+        revealedCards: null,
+      }
+    })
+  }
+  return game.seats
+})
+
 /**
  * 当前最大牌型文案（「你的底牌」区，紧挨筹码）。
- *
- * 判定完全走引擎的纯函数 `describeHand`（`src/engine/evaluate.ts`，只依赖 `src/shared/poker.ts`，
- * 没有任何 node 内置模块，所以客户端可以直接 import，不需要把规则复制一份到 shared）。
- * 同一份判定也用在结算叠层里（`HandResultPublic.handName` 来自 `evaluateHand().name`），
- * 因此两处对同一种牌型的叫法必然一致。
- *
- * 只有「本人手上确实有 2 张底牌」时才给结论：本手结束后引擎会把底牌清空，
- * 那时公共牌仍是 5 张，若继续算下去会把「公共牌的最大牌型」当成「你的牌型」显示。
- * 公共牌 0 → 3 → 4 → 5 张时分别算 2 / 5 / 6 / 7 张，翻牌前也给结论。
+ * 只有手牌活跃且本人手上确实有 2 张底牌时才给出结论，结算后隐藏。
  */
 const currentHandName = computed(() =>
-  myCards.value.length === 2 ? describeHand([...myCards.value, ...game.board]) : '',
+  isHandActive.value && displayHeroCards.value.length === 2
+    ? describeHand([...displayHeroCards.value, ...displayBoard.value])
+    : '',
 )
 
 const winnerPlayerIds = computed(() => game.state?.lastResult?.winners.map((winner) => winner.playerId) ?? [])
 const highlightCards = computed<readonly Card[]>(() => {
+  if (!isHandActive.value) return []
   const result = game.state?.lastResult
   if (!result || !result.showdown) return []
   return result.winners.flatMap((winner) => winner.bestFive)
@@ -268,8 +351,9 @@ const blockedReason = computed(() => {
 })
 
 const streetText = computed(() => {
+  if (!isHandActive.value) return game.state?.status === 'waiting' ? '等待开局' : '等待下一手发牌'
   const street = game.state?.street
-  if (!street) return game.state?.status === 'waiting' ? '等待开局' : '本手已结束'
+  if (!street) return '等待发牌'
   return STREET_NAMES[street]
 })
 
@@ -347,9 +431,10 @@ watch(
 
 /* ───────────── 交互 ───────────── */
 
-const drawerOpen = ref(false)
-type DrawerSection = 'invite' | 'rules' | 'history' | 'chat'
-const drawerSection = ref<DrawerSection>('rules')
+/** 独立邀请朋友弹窗显隐 */
+const inviteDialogOpen = ref(false)
+/** 桌面右上角 HUD 历史面板折叠状态（参考左上角 HUD 聊天） */
+const hudHistoryCollapsed = ref(false)
 
 /* ── 邀请朋友：房间号是 6 位纯数字（见 §6.8），这里把它和邀请链接摆出来给朋友。 ── */
 /** 房间号：以凭证为准；没有凭证（理论上进不了牌桌）时回落到路由里那串。 */
@@ -390,54 +475,21 @@ function selectLinkValue(event: Event): void {
   input.select()
 }
 
-/** 换分节就清掉上一次的复制反馈，免得回来看到过期的「已复制」。 */
-watch(drawerSection, () => {
+/** 关闭或再次打开邀请时清掉上一次的复制反馈，免得回来看到过期的「已复制」。 */
+watch(inviteDialogOpen, () => {
   copyStatus.value = ''
 })
 
-/* ── 中等宽度收纳：顶栏按钮太多会折行（实测 ≤1000px 时顶栏从 61px 变 121px），
- * 把「规则 / 历史 / 聊天 / 提示音」收进「更多」菜单，退出与开始下一手始终露在外面。 ── */
-const moreMenu = ref<InstanceType<typeof Menu> | null>(null)
-
-const moreItems = computed<MenuItem[]>(() => [
-  { label: '邀请朋友', icon: 'pi pi-share-alt', command: () => openDrawer('invite') },
-  { label: '规则摘要', icon: 'pi pi-book', command: () => openDrawer('rules') },
-  {
-    label: game.history.length > 0 ? `手牌历史（${String(game.history.length)} 手）` : '手牌历史',
-    icon: 'pi pi-list',
-    command: () => openDrawer('history'),
-  },
-  {
-    label: chat.unread > 0 ? `聊天（${String(chat.unread)} 条未读）` : '聊天',
-    icon: 'pi pi-comments',
-    command: () => openDrawer('chat'),
-  },
-  {
-    label: `提示音：${soundEnabled.value ? '开' : '关'}`,
-    icon: soundEnabled.value ? 'pi pi-volume-up' : 'pi pi-volume-off',
-    command: () => toggleSound(),
-  },
-  // 只有主持人能移除玩家：这一项本身就不该出现在其他人的菜单里。
-  ...(room.isHost
-    ? [{ label: '移除玩家…', icon: 'pi pi-user-minus', command: () => openKick() }]
-    : []),
-])
-
-/** 「更多」按钮的无障碍名称要带上未读与手数，折叠后信息不能丢。 */
-const moreAria = computed(() => {
-  const parts = ['更多操作']
-  if (game.history.length > 0) parts.push(`${String(game.history.length)} 手历史`)
-  if (chat.unread > 0) parts.push(`${String(chat.unread)} 条未读聊天`)
-  return parts.join('，')
-})
-
-function toggleMore(event: Event): void {
-  moreMenu.value?.toggle(event)
+function openInviteDialog(): void {
+  inviteDialogOpen.value = true
 }
 
-function openDrawer(section: DrawerSection): void {
-  drawerSection.value = section
-  drawerOpen.value = true
+function toggleHistory(): void {
+  hudHistoryCollapsed.value = !hudHistoryCollapsed.value
+}
+
+function openHistory(): void {
+  hudHistoryCollapsed.value = false
 }
 
 /* ───────────── 聊天（抽屉内的 chat 分节） ─────────────
@@ -471,14 +523,46 @@ function chatIso(at: number): string | undefined {
   return Number.isFinite(at) ? new Date(at).toISOString() : undefined
 }
 
-/** 抽屉是否正停在聊天分节：决定未读是否清零、消息是否即时标记已读。 */
-const chatPanelVisible = computed(() => drawerOpen.value && drawerSection.value === 'chat')
-/** 打开面板那一刻的第一条未读消息 id：用于「以下为新消息」分隔线（记住后不再随未读清零而消失）。 */
-const unreadBoundaryId = ref<string | null>(null)
+/* ───────────── 聊天（桌面左上角 HUD 浮层） ─────────────
+ * 消息流常驻在牌桌左上角，半透明黑晶背景，支持实时滚屏与快捷打字。 */
+const hudChatCollapsed = ref(false)
+const hudChatInputRef = ref<HTMLInputElement | null>(null)
+
+function isMobileScreen(): boolean {
+  return typeof window !== 'undefined' && window.innerWidth <= 768
+}
+
+/**
+ * 历史展开时，聊天按钮缩小只展示图标；手机端互斥联动。
+ */
+watch(hudHistoryCollapsed, (collapsed) => {
+  if (!collapsed) {
+    hudChatCollapsed.value = true
+  }
+})
+
+watch(hudChatCollapsed, (collapsed) => {
+  if (!collapsed && isMobileScreen()) {
+    hudHistoryCollapsed.value = true
+  }
+})
+
+function openChat(): void {
+  hudChatCollapsed.value = false
+  if (isMobileScreen()) {
+    hudHistoryCollapsed.value = true
+  }
+  nextTick(() => {
+    hudChatInputRef.value?.focus()
+  })
+}
+
+function onSenderClick(nickname: string): void {
+  insertMention(nickname)
+  hudChatInputRef.value?.focus()
+}
 
 const chatText = ref('')
-/** 聊天搜索关键词：只过滤展示，不改动消息本身。 */
-const chatQuery = ref('')
 const mentionMenu = ref<InstanceType<typeof Menu> | null>(null)
 const chatError = ref('')
 /** 中文输入法组合期间的回车只用于确认候选词，不能当成发送。 */
@@ -589,126 +673,30 @@ const chatAria = computed(() => {
 })
 const chatTitle = computed(() => (chat.unread > 0 ? `聊天（${String(chat.unread)} 条未读）` : '聊天'))
 
-/**
- * 打开面板时把「第一条未读」记下来，用于渲染「以下为新消息」分隔线。
- * 必须在 markRead 之前取，否则未读数已被清零。
- */
+/** 监听新消息：在展开状态下自动滚到底部并标记已读 */
 watch(
-  chatPanelVisible,
-  (visible) => {
-    if (!visible) {
-      unreadBoundaryId.value = null
-      return
-    }
-    const boundary = chat.messages[chat.messages.length - chat.unread]
-    unreadBoundaryId.value = chat.unread > 0 && boundary ? boundary.id : null
-    chat.markRead()
-    void scrollChatToBottom()
-  },
-  { immediate: true },
-)
-
-/** 相邻消息间隔超过这个值就补一个时间分隔。 */
-const CHAT_GAP_MS = 5 * 60 * 1000
-
-type ChatRow =
-  | { kind: 'day'; key: string; label: string }
-  | { kind: 'gap'; key: string; label: string }
-  | { kind: 'unread'; key: string }
-  /** groupStart=false：与上一条同人消息同组，只显示正文（昵称/时间由组首给出）。 */
-  | { kind: 'message'; key: string; message: ChatMessage; groupStart: boolean }
-
-function chatDayKey(at: number): string {
-  const date = new Date(at)
-  return `${String(date.getFullYear())}-${String(date.getMonth() + 1)}-${String(date.getDate())}`
-}
-
-function chatDayLabel(at: number): string {
-  const date = new Date(at)
-  const today = new Date()
-  const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000)
-  if (chatDayKey(at) === chatDayKey(today.getTime())) return '今天'
-  if (chatDayKey(at) === chatDayKey(yesterday.getTime())) return '昨天'
-  return chatDayFormat.format(date)
-}
-
-/**
- * 聊天渲染行：日期分隔 + 间隔较久时的时间分隔 + 未读分隔线 + 消息本身。
- * 分组只影响展示，消息数组仍是服务端下发的原始顺序。
- *
- * 同一个人连续发言会折叠成一组：只有组首显示昵称与时间，后续只显示正文。
- * 连续发言的判定必须够保守——日期分隔、时间分隔、未读分隔线、系统消息、
- * @ 提醒、搜索过滤后的相邻关系都会打断分组，否则会把不相干的话并成一组。
- */
-const chatRows = computed<ChatRow[]>(() => {
-  const query = chatQuery.value.trim().toLowerCase()
-  const source = query
-    ? chat.messages.filter(
-        (message) =>
-          message.text.toLowerCase().includes(query) || message.nickname.toLowerCase().includes(query),
-      )
-    : chat.messages
-  const rows: ChatRow[] = []
-  let previous: ChatMessage | null = null
-  let previousDay = ''
-  /** 当前分组的组首消息；为 null 表示下一条必须重新起组。 */
-  let groupAnchor: ChatMessage | null = null
-  for (const message of source) {
-    // 搜索时不再插入日期/间隔/未读分隔，也不做分组：过滤后的相邻关系是假象，
-    // 每条结果都带上昵称更好读。
-    if (query) {
-      rows.push({ kind: 'message', key: message.id, message, groupStart: true })
-      previous = message
-      groupAnchor = null
-      continue
-    }
-    const day = chatDayKey(message.at)
-    if (day !== previousDay) {
-      rows.push({ kind: 'day', key: `day-${day}`, label: chatDayLabel(message.at) })
-      previousDay = day
-      groupAnchor = null
-    } else if (previous && message.at - previous.at > CHAT_GAP_MS) {
-      rows.push({ kind: 'gap', key: `gap-${message.id}`, label: chatTime(message.at) })
-      groupAnchor = null
-    }
-    if (unreadBoundaryId.value === message.id) {
-      rows.push({ kind: 'unread', key: 'unread-divider' })
-      groupAnchor = null
-    }
-
-    const grouped =
-      groupAnchor !== null &&
-      groupAnchor.kind === 'user' &&
-      message.kind === 'user' &&
-      groupAnchor.playerId === message.playerId &&
-      !hasMention(groupAnchor) &&
-      !hasMention(message)
-
-    rows.push({ kind: 'message', key: message.id, message, groupStart: !grouped })
-    if (message.kind !== 'user') groupAnchor = null
-    else if (!grouped) groupAnchor = message
-    // grouped 为真时保持原组首，继续把后续同人消息并进同一组。
-    previous = message
-  }
-  return rows
-})
-
-watch(
-  () => chat.count,
+  () => chat.messages.length,
   () => {
-    if (chatPanelVisible.value) chat.markRead()
-    if (chatAtBottom.value) void scrollChatToBottom()
-    else chatHasNews.value = true
+    if (!hudChatCollapsed.value) {
+      chat.markRead()
+      nextTick(() => {
+        void scrollChatToBottom()
+      })
+    }
   },
+  { flush: 'post' },
 )
 
-/** 搜索结果提示：仅在有查询词时显示。 */
-const chatSearchText = computed(() => {
-  const query = chatQuery.value.trim()
-  if (!query) return ''
-  const shown = chatRows.value.filter((row) => row.kind === 'message').length
-  return `匹配 ${String(shown)} 条`
+watch(hudChatCollapsed, (collapsed) => {
+  if (!collapsed) {
+    chat.markRead()
+    nextTick(() => {
+      void scrollChatToBottom()
+    })
+  }
 })
+
+
 
 /* ───────────── 手牌历史（抽屉内的 history 分节） ───────────── */
 
@@ -717,28 +705,65 @@ function nicknameOf(playerId: string): string {
   return game.seats.find((seat) => seat?.playerId === playerId)?.nickname ?? '已离座玩家'
 }
 
-function boardText(cards: readonly Card[]): string {
-  return cards.map((card) => formatCard(card)).join(' ')
+interface HistoryRevealedPlayer {
+  playerId: string
+  nickname: string
+  isHero: boolean
+  isWinner: boolean
+  winAmount: number
+  cards: Card[]
+  handName: string
 }
 
 /** 旧→新的服务端历史，展示时反转为最新在最上面。 */
-const historyRows = computed(() =>
-  [...game.history].reverse().map((entry) => ({
-    ...entry,
-    boardLabel: boardText(entry.board),
-    winners: entry.winners.map((winner) => ({
+const historyRows = computed(() => {
+  const myId = game.self?.playerId
+  return [...game.history].reverse().map((entry) => {
+    const winners = entry.winners.map((winner) => ({
       ...winner,
       nickname: nicknameOf(winner.playerId),
-      isHero: winner.playerId === game.self?.playerId,
-    })),
-  })),
-)
+      isHero: winner.playerId === myId,
+    }))
 
-const historyAria = computed(() =>
-  game.history.length > 0
-    ? `手牌历史，已记录 ${String(game.history.length)} 手`
-    : '手牌历史，暂无记录',
-)
+    const heroWinner = winners.find((w) => w.isHero)
+    const heroWon = Boolean(heroWinner && heroWinner.amount > 0)
+    const heroWonAmount = heroWinner ? heroWinner.amount : 0
+
+    // 整合所有在摊牌阶段亮牌的玩家（包含自己和对手）
+    const revealedPlayers: HistoryRevealedPlayer[] = (entry.revealed || []).map((rev) => {
+      const winnerMatch = winners.find((w) => w.playerId === rev.playerId)
+      return {
+        playerId: rev.playerId,
+        nickname: nicknameOf(rev.playerId),
+        isHero: rev.playerId === myId,
+        isWinner: Boolean(winnerMatch && winnerMatch.amount > 0),
+        winAmount: winnerMatch ? winnerMatch.amount : 0,
+        cards: rev.cards || [],
+        handName: rev.handName,
+      }
+    })
+
+    // 排序：赢家排在最前，其次是本人（若参与了比牌），随后是其他比牌选手
+    revealedPlayers.sort((a, b) => {
+      if (a.isWinner !== b.isWinner) return a.isWinner ? -1 : 1
+      if (a.isHero !== b.isHero) return a.isHero ? -1 : 1
+      return 0
+    })
+
+    const heroShowdown = revealedPlayers.some((p) => p.isHero)
+
+    return {
+      ...entry,
+      board: entry.board || [],
+      heroWon,
+      heroWonAmount,
+      heroShowdown,
+      winners,
+      revealedPlayers,
+    }
+  })
+})
+
 
 /* ───────────── 提示音开关 ─────────────
  * soundEnabled 已持久化；打开时必须由用户手势解锁音频上下文。 */
@@ -759,6 +784,21 @@ function toggleSound(): void {
 
 const occupiedCount = computed(() => game.seats.filter(Boolean).length)
 const maxSeats = computed(() => game.state?.maxSeats ?? 0)
+const emptyCount = computed(() => Math.max(0, maxSeats.value - occupiedCount.value))
+const isTableFull = computed(() => maxSeats.value > 0 && occupiedCount.value >= maxSeats.value)
+
+/** 找到牌桌上的第一个空席位号（0-indexed）；满员或无数据时为 null */
+const firstAvailableSeat = computed<number | null>(() => {
+  const max = maxSeats.value
+  if (max <= 0) return null
+  for (let i = 0; i < max; i++) {
+    if (!game.seats[i]) return i
+  }
+  return null
+})
+
+/** 观战者是否可以入座：未在座、有空位且已连接到房间 */
+const canSitDown = computed(() => !game.isSeated && !isTableFull.value && Boolean(game.self) && firstAvailableSeat.value !== null)
 
 
 /* 落座前先确认买入额：房主定上限，下限 10 个大盲，步进 = 小盲（服务端同样校验）。 */
@@ -769,6 +809,14 @@ const buyInAmount = ref(0)
 const buyInMin = computed(() => game.state?.buyInMin ?? 0)
 const buyInMax = computed(() => game.state?.buyInMax ?? 0)
 const buyInStep = computed(() => game.state?.buyInStep ?? TABLE_RULES.smallBlind)
+const canRebuy = computed(() =>
+  game.mySeat?.stack === 0 && !game.mySeat.away &&
+  (game.state?.phase === 'waiting' || game.state?.phase === 'settlement') && connection.isOnline,
+)
+const isRebuyDialog = computed(() =>
+  buyInSeat.value !== null && buyInSeat.value === game.self?.seat &&
+  game.mySeat?.stack === 0 && !game.mySeat.away,
+)
 
 /** 打开买入弹窗：默认给满上限（最少点击），下限/上限/步进都来自服务端。 */
 function openBuyIn(seat: number): void {
@@ -777,15 +825,23 @@ function openBuyIn(seat: number): void {
   buyInOpen.value = true
 }
 
+function openRebuy(): void {
+  const seat = game.self?.seat
+  if (seat !== null && seat !== undefined && canRebuy.value) openBuyIn(seat)
+}
+
 function confirmBuyIn(): void {
   const seat = buyInSeat.value
   if (seat === null) return
+  const rebuy = isRebuyDialog.value
   const amount = Math.round(Number(buyInAmount.value) / buyInStep.value) * buyInStep.value
   if (!sendCommand({ type: 'seat.take', requestId: nextRequestId(), seat, buyIn: amount })) {
     announcement.value = '尚未连接到服务器，入座请求未发送。'
     return
   }
-  announcement.value = `正在坐到 ${String(seat + 1)} 号座位，买入 ${String(amount)} 筹码。`
+  announcement.value = rebuy
+    ? `正在重新买入 ${String(amount)} 筹码。`
+    : `正在坐到 ${String(seat + 1)} 号座位，买入 ${String(amount)} 筹码。`
   buyInOpen.value = false
   buyInSeat.value = null
 }
@@ -1054,93 +1110,55 @@ onBeforeUnmount(() => onFatalRoomError(null))
     <ConnectionBanner />
 
     <!-- 顶部：房间名、盲注、连接状态、设置与退出（规格书 §3.3）。 -->
-    <header class="bar">
-      <h1 class="bar-title">{{ game.state?.roomName || '牌桌' }}</h1>
-      <span class="stat"><span>盲注</span><b class="num">{{ game.state?.smallBlind ?? TABLE_RULES.smallBlind }}/{{ game.state?.bigBlind ?? TABLE_RULES.bigBlind }}</b></span>
-      <span class="stat stat--hand"><span>第</span><b class="num">{{ game.state?.handNo ?? 0 }}</b><span>手</span></span>
-      <span class="stat stat--stage"><span>阶段</span><b>{{ streetText }}</b></span>
-      <span
-        class="link-state"
-        :class="connection.isOnline ? 'is-online' : 'is-offline'"
-        role="status"
-      >
-        <i :class="connection.isOnline ? 'pi pi-wifi' : 'pi pi-exclamation-triangle'" aria-hidden="true" />
-        <span>{{ connection.isOnline ? '已连接' : '连接异常' }}</span>
-      </span>
+    <header class="bar hud-header">
+      <div class="hud-left">
+        <div class="room-badge">
+          <i class="pi pi-shield room-badge-icon" aria-hidden="true" />
+          <h1 class="bar-title">{{ game.state?.roomName || '牌桌' }}</h1>
+        </div>
+        <div class="meta-capsules">
+          <span class="stat meta-pill meta-pill--blind">
+            <span class="meta-label">盲注</span>
+            <b class="num">{{ game.state?.smallBlind ?? TABLE_RULES.smallBlind }}/{{ game.state?.bigBlind ?? TABLE_RULES.bigBlind }}</b>
+          </span>
+          <span class="stat stat--hand meta-pill meta-pill--hand">
+            <span class="meta-label">第</span>
+            <b class="num">{{ game.state?.handNo ?? 0 }}</b>
+            <span>手</span>
+          </span>
+          <span class="stat stat--stage meta-pill meta-pill--stage" :class="`stage--${game.state?.street ?? 'wait'}`">
+            <span class="meta-label">阶段</span>
+            <b class="stage-name">{{ streetText }}</b>
+          </span>
+        </div>
+        <span
+          class="link-state"
+          :class="connection.isOnline ? 'is-online' : 'is-offline'"
+          role="status"
+        >
+          <i :class="connection.isOnline ? 'pi pi-wifi' : 'pi pi-exclamation-triangle'" aria-hidden="true" />
+          <span>{{ connection.isOnline ? '已连接' : '连接异常' }}</span>
+        </span>
+      </div>
 
       <span class="bar-spacer" />
 
-      <!-- 开发期场景切换：生产构建不渲染。 -->
-      <label v-if="isDev" class="scenario">
-        <span class="sr-only">切换模拟场景</span>
-        <Select v-model="scenario" :options="scenarioOptions" option-label="label" option-value="value" size="small" />
-      </label>
 
-      <!-- 顶栏右侧操作区：突出核心高频功能（手牌历史、聊天），兼顾邀请与收纳菜单 -->
+      <!-- 顶栏右侧操作区：只保留分享按钮 -->
       <div class="bar-right" role="toolbar" aria-label="牌桌快捷工具栏">
-        <!-- 1. 手牌历史：突出展示，带扑克历史图标与手数徽标 -->
-        <Button
-          size="small"
-          text
-          class="bar-btn bar-btn--history"
-          :aria-label="historyAria"
-          :title="'查看手牌历史'"
-          @click="openDrawer('history')"
-        >
-          <i class="pi pi-history" aria-hidden="true" />
-          <span class="bar-btn-text">历史</span>
-          <span v-if="game.history.length > 0" class="count-chip count-chip--history num" aria-hidden="true">{{ game.history.length }}</span>
-        </Button>
-
-        <!-- 2. 聊天：突出展示，带气泡图标与未读数徽标，有 @ 时视觉强化 -->
-        <Button
-          size="small"
-          text
-          class="bar-btn bar-btn--chat"
-          :class="{ 'has-unread': chat.unread > 0, 'has-mention': mentionCount > 0 }"
-          :aria-label="chatAria"
-          :title="chatTitle"
-          @click="openDrawer('chat')"
-        >
-          <i class="pi pi-comments" aria-hidden="true" />
-          <span class="bar-btn-text">聊天</span>
-          <span v-if="chat.unread > 0" class="count-chip count-chip--unread num" aria-hidden="true">{{ unreadText }}</span>
-        </Button>
-
-        <!-- 3. 邀请朋友：快捷桌牌与复制入口 -->
+        <!-- 分享按钮：快捷桌牌与复制入口 -->
         <Button
           size="small"
           text
           class="bar-btn bar-btn--invite"
-          aria-label="邀请朋友"
-          :title="'邀请朋友：房间号与邀请链接'"
-          @click="openDrawer('invite')"
+          aria-label="分享房间"
+          :title="'分享房间：房间号与邀请链接'"
+          @click="openInviteDialog"
         >
           <i class="pi pi-share-alt" aria-hidden="true" />
-          <span class="bar-btn-text">邀请</span>
+          <span class="bar-btn-text">分享</span>
         </Button>
-
-        <!-- 4. 更多设置菜单：收纳规则摘要、提示音与主持人管理操作 -->
-        <Button
-          size="small"
-          text
-          class="bar-btn bar-btn--more bar-more"
-          :aria-label="moreAria"
-          :title="room.isHost ? '更多操作（邀请 / 规则 / 历史 / 聊天 / 提示音 / 移除玩家）' : '更多操作（邀请 / 规则 / 历史 / 聊天 / 提示音）'"
-          aria-haspopup="true"
-          aria-controls="bar-more-menu"
-          @click="toggleMore"
-        >
-          <i class="pi pi-ellipsis-h" aria-hidden="true" />
-          <span class="bar-btn-text">更多</span>
-        </Button>
-        <Menu id="bar-more-menu" ref="moreMenu" :model="moreItems" :popup="true" />
       </div>
-
-      <!--
-        「开始下一手」与「退出房间」已按第 3 项需求搬到底部操作栏（见下方 ActionBar 的 secondary 行）：
-        顶栏只留信息与二级入口，操作统一在触手可及的底部。
-      -->
     </header>
 
     <!-- 屏幕阅读器公告区：超时、断线、轮到自己。 -->
@@ -1151,10 +1169,6 @@ onBeforeUnmount(() => onFatalRoomError(null))
       通知条本身按内容增高（0～2 行），若不预留，它一出现就把牌桌往下推、
       竖屏立刻开始整页滚动（实测 360×740 溢出 43px）。预留成本只有 32px，
       换来「有没有通知，牌桌位置都不变」。
-
-      顶栏与牌桌之间的细通知条：别人重新连接、断线、超时、每手结算等事件在这里播报，
-      最多两条、8 秒自动消失、没有通知时整块不渲染（见 NoticeStrip.vue）。
-      version 用于区分「快照里的历史 notice」与「进桌后真实发生的事件」。
     -->
     <div class="notice-slot">
       <NoticeStrip
@@ -1165,11 +1179,241 @@ onBeforeUnmount(() => onFatalRoomError(null))
     </div>
 
     <main id="main" class="stage">
+      <!-- 桌面左上角透明 HUD 聊天（历史展开时缩小为仅图标） -->
+      <aside
+        class="hud-chat"
+        :class="{
+          'is-collapsed': hudChatCollapsed,
+          'is-icon-only': !hudHistoryCollapsed,
+        }"
+        aria-label="牌桌快捷聊天"
+      >
+        <header
+          class="hud-chat-header"
+          :title="hudChatCollapsed ? '展开聊天' : '收起聊天'"
+          @click="hudChatCollapsed = !hudChatCollapsed"
+        >
+          <div class="hud-chat-title">
+            <i class="pi pi-comments" aria-hidden="true" />
+            <span class="hud-chat-label">聊天</span>
+            <span v-if="chat.unread > 0 && hudChatCollapsed" class="hud-chat-badge num">{{ unreadText }}</span>
+          </div>
+          <button
+            type="button"
+            class="hud-chat-toggle-btn"
+            :title="hudChatCollapsed ? '展开聊天' : '收起聊天'"
+            :aria-label="hudChatCollapsed ? '展开聊天' : '收起聊天'"
+            @click.stop="hudChatCollapsed = !hudChatCollapsed"
+          >
+            <i :class="hudChatCollapsed ? 'pi pi-chevron-down' : 'pi pi-minus'" aria-hidden="true" />
+          </button>
+        </header>
+
+        <Transition name="hud-slide">
+          <div v-show="!hudChatCollapsed" class="hud-chat-body">
+          <div
+            ref="chatListRef"
+            class="hud-chat-list thin-scroll"
+            role="log"
+            aria-live="polite"
+            aria-label="聊天消息"
+            @scroll.passive="onChatScroll"
+          >
+            <div v-if="chat.messages.length === 0" class="hud-chat-empty">
+              <span>暂无消息，打个招呼吧~</span>
+            </div>
+            <div
+              v-for="msg in chat.messages"
+              :key="msg.id"
+              class="hud-chat-item"
+              :class="{
+                'is-own': msg.playerId === myPlayerId,
+                'is-system': msg.kind === 'system',
+                'is-mention': mentionsMe(msg),
+              }"
+              :title="chatTime(msg.at)"
+            >
+              <template v-if="msg.kind === 'system'">
+                <span class="hud-msg-system">📢 {{ msg.text }}</span>
+              </template>
+              <template v-else>
+                <span
+                  class="hud-msg-sender"
+                  :title="`点击 @${msg.nickname}`"
+                  @click="onSenderClick(msg.nickname)"
+                >
+                  {{ msg.playerId === myPlayerId ? '你' : msg.nickname }}:
+                </span>
+                <span class="hud-msg-text">{{ msg.text }}</span>
+              </template>
+            </div>
+          </div>
+
+          <form class="hud-chat-form" @submit.prevent="submitChat">
+            <input
+              ref="hudChatInputRef"
+              v-model="chatText"
+              type="text"
+              class="hud-chat-input"
+              :maxlength="CHAT_MAX_LENGTH"
+              placeholder="说点什么… (Enter)"
+              autocomplete="off"
+              @keydown="onChatKeydown"
+              @compositionstart="composing = true"
+              @compositionend="composing = false"
+              @input="chatError = ''"
+            />
+            <button
+              type="submit"
+              class="hud-chat-send"
+              :disabled="!canSendChat"
+              :title="canSendChat ? '发送消息' : '请输入消息'"
+            >
+              <i class="pi pi-send" aria-hidden="true" />
+            </button>
+          </form>
+          <p v-if="chatError" class="hud-chat-error" role="alert">{{ chatError }}</p>
+          </div>
+        </Transition>
+      </aside>
+
+      <!-- 桌面右上角透明 HUD 历史（参考左上角快捷聊天设计） -->
+      <aside class="hud-history" :class="{ 'is-collapsed': hudHistoryCollapsed }" aria-label="牌局手牌历史">
+        <header class="hud-history-header" @click="hudHistoryCollapsed = !hudHistoryCollapsed">
+          <div class="hud-history-title">
+            <i class="pi pi-history" aria-hidden="true" />
+            <span class="hud-history-label">手牌历史</span>
+            <span v-if="game.history.length > 0" class="hud-history-badge num">{{ game.history.length }}</span>
+          </div>
+          <button
+            type="button"
+            class="hud-history-toggle-btn"
+            :title="hudHistoryCollapsed ? '展开历史' : '收起历史'"
+            :aria-label="hudHistoryCollapsed ? '展开历史' : '收起历史'"
+            @click.stop="hudHistoryCollapsed = !hudHistoryCollapsed"
+          >
+            <i :class="hudHistoryCollapsed ? 'pi pi-chevron-down' : 'pi pi-minus'" aria-hidden="true" />
+          </button>
+        </header>
+
+        <div v-show="!hudHistoryCollapsed" class="hud-history-body">
+          <div class="hud-history-list thin-scroll">
+            <div v-if="historyRows.length === 0" class="history-empty">
+              <i class="pi pi-folder-open history-empty-icon" aria-hidden="true" />
+              <p>暂无已结算的手牌记录</p>
+            </div>
+
+            <article
+              v-for="entry in historyRows"
+              :key="entry.handId || entry.handNo"
+              class="history-card"
+              :class="{ 'is-hero-won': entry.heroWon, 'is-hero-showdown': entry.heroShowdown && !entry.heroWon }"
+            >
+              <!-- 卡片顶栏：局号、状态勋章、总底池 -->
+              <header class="history-card-header">
+                <div class="history-header-left">
+                  <span class="history-hand-tag num">#{{ entry.handNo }}</span>
+                  <span v-if="entry.heroWon" class="history-result-badge badge-win">
+                    <i class="pi pi-trophy" aria-hidden="true" />
+                    <span>你赢得 +{{ entry.heroWonAmount }}</span>
+                  </span>
+                  <span v-else-if="entry.heroShowdown" class="history-result-badge badge-showdown">
+                    跟注到底
+                  </span>
+                  <span v-else-if="entry.showdown" class="history-result-badge badge-neutral">
+                    摊牌对决
+                  </span>
+                  <span v-else class="history-result-badge badge-fold">
+                    弃牌结算
+                  </span>
+                </div>
+                <div class="history-header-right">
+                  <span class="history-pot-label">总底池</span>
+                  <b class="history-pot-value num">{{ entry.potTotal }}</b>
+                </div>
+              </header>
+
+              <!-- 公共牌区域（真实卡牌组件渲染） -->
+              <div class="history-board-row">
+                <span class="history-section-title">公共牌</span>
+                <div v-if="entry.board.length > 0" class="history-cards-line">
+                  <PlayingCard
+                    v-for="card in entry.board"
+                    :key="card"
+                    size="sm"
+                    upright
+                    :card="card"
+                    class="history-card-item"
+                  />
+                </div>
+                <span v-else class="history-empty-board">翻牌前弃牌（无公共牌）</span>
+              </div>
+
+              <!-- 摊牌明细（若有人跟到底开牌） -->
+              <div v-if="entry.showdown && entry.revealedPlayers.length > 0" class="history-showdown-section">
+                <div class="history-section-header">
+                  <span class="history-section-title">摊牌开牌（{{ entry.revealedPlayers.length }} 人亮牌比牌）</span>
+                </div>
+                <div class="history-revealed-list">
+                  <div
+                    v-for="p in entry.revealedPlayers"
+                    :key="p.playerId"
+                    class="history-revealed-row"
+                    :class="{ 'is-hero': p.isHero, 'is-winner': p.isWinner }"
+                  >
+                    <!-- 玩家身份与牌型 -->
+                    <div class="revealed-player-info">
+                      <div class="revealed-player-name-row">
+                        <span v-if="p.isWinner" class="revealed-crown" title="获胜者">🏆</span>
+                        <span class="revealed-nickname" :class="{ 'hero-name': p.isHero }">
+                          {{ p.isHero ? '你' : p.nickname }}
+                        </span>
+                        <span v-if="p.isWinner" class="revealed-win-num num">
+                          +{{ p.winAmount }}
+                        </span>
+                      </div>
+                      <div class="revealed-hand-badge" :class="{ 'badge-winner': p.isWinner }">
+                        {{ p.handName }}
+                      </div>
+                    </div>
+
+                    <!-- 玩家亮出的 2 张底牌（物理卡牌） -->
+                    <div class="revealed-cards-box">
+                      <PlayingCard
+                        v-for="c in p.cards"
+                        :key="c"
+                        size="sm"
+                        upright
+                        :card="c"
+                        :class="['revealed-card', { 'winner-card': p.isWinner }]"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 未摊牌获胜展示（对手全弃牌） -->
+              <div v-else class="history-uncontested-section">
+                <div v-for="w in entry.winners" :key="w.playerId" class="history-uncontested-winner">
+                  <span class="uncontested-crown">🏆</span>
+                  <span class="uncontested-name" :class="{ 'hero-name': w.isHero }">
+                    {{ w.isHero ? '你' : w.nickname }}
+                  </span>
+                  <span class="uncontested-text">拿下底池</span>
+                  <b class="uncontested-amount num">+{{ w.amount }}</b>
+                  <span class="uncontested-note">（其他玩家弃牌，底牌未公开）</span>
+                </div>
+              </div>
+            </article>
+          </div>
+        </div>
+      </aside>
+
       <PokerTable
         v-if="game.state && !unavailable"
-        :seats="game.seats"
+        :seats="displaySeats"
         :max-seats="game.state.maxSeats"
-        :board="game.board"
+        :board="displayBoard"
         :pot-total="potTotal"
         :pots="game.state.pots"
         :current-bet="game.state.currentBet"
@@ -1181,7 +1425,7 @@ onBeforeUnmount(() => onFatalRoomError(null))
         :turn-seconds="turnSeconds"
         :winner-player-ids="winnerPlayerIds"
         :highlight-cards="highlightCards"
-        :street="game.state.street"
+        :street="displayStreet"
         :can-pick-seat="canPickSeat"
         :reserved-seat="myReservedSeat"
         @pick-seat="onPickSeat"
@@ -1197,396 +1441,269 @@ onBeforeUnmount(() => onFatalRoomError(null))
       </p>
     </main>
 
-    <!-- 底部：本人底牌、剩余筹码、倒计时、下注控件与动作区。 -->
+    <!-- 底部：一体化沉浸式玩家座舱（Hero Cockpit） -->
     <footer v-if="!unavailable" class="hero">
-      <div v-if="game.isSeated && !mySeatAway" class="hero-cards">
-        <span class="hero-label">你的底牌</span>
-        <div class="cards">
-          <PlayingCard v-for="card in myCards" :key="card" size="lg" upright :card="card" />
-          <span v-if="myCards.length === 0" class="muted hint">本手没有底牌</span>
+      <!-- 1. 玩家在座状态（Hero Cockpit） -->
+      <div v-if="game.isSeated && !mySeatAway" class="hero-cards hero-cockpit">
+        <!-- 左翼：玩家底牌展示与状态资产面板 -->
+        <div class="cockpit-wing cockpit-wing--hero">
+          <div class="cockpit-cards-group">
+            <span class="hero-label sr-only">你的底牌</span>
+            <div
+              class="cards fan-cards"
+              :title="currentHandName ? `你的手牌（${currentHandName}）` : isHandActive ? '你的底牌' : '等待发牌…'"
+            >
+              <div
+                v-for="cardIdx in [0, 1]"
+                :key="`hero-flipper-${cardIdx}`"
+                class="hero-card-flipper"
+                :class="[
+                  `fan-card--${cardIdx}`,
+                  {
+                    'is-flipped': isHandActive && Boolean(displayHeroCards[cardIdx]),
+                    'is-dim': Boolean(game.mySeat?.folded),
+                  },
+                ]"
+              >
+                <div class="hero-card-inner">
+                  <!-- 背面（等待下一手发牌时朝向玩家） -->
+                  <div class="hero-card-face hero-card-face--back">
+                    <PlayingCard size="lg" upright hidden />
+                  </div>
+                  <!-- 正面（新一手发牌后 3D 翻转朝向玩家） -->
+                  <div class="hero-card-face hero-card-face--front">
+                    <PlayingCard
+                      size="lg"
+                      upright
+                      :card="displayHeroCards[cardIdx] ?? myCards[cardIdx] ?? null"
+                      :dimmed="Boolean(game.mySeat?.folded)"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="cockpit-meta-group">
+            <div class="cockpit-badge-row">
+              <!-- 当前牌型勋章 -->
+              <div v-if="currentHandName" class="hero-hand" :title="currentHandName">
+                <span class="hand-icon" aria-hidden="true">♦</span>
+                <b class="hand-name">{{ currentHandName }}</b>
+              </div>
+
+              <!-- 筹码资产胶囊 -->
+              <div class="hero-stack" :title="`可用筹码：${myStack}`">
+                <span class="stack-label">筹码</span>
+                <b class="num stack-num">{{ myStack }}</b>
+                <Button
+                  v-if="game.mySeat && myStack === 0 && !mySeatAway"
+                  size="small"
+                  outlined
+                  class="rebuy-btn"
+                  :disabled="!canRebuy"
+                  :title="canRebuy ? '按本桌买入范围重新买入' : '本手结束并连接后可以重新买入'"
+                  @click="openRebuy"
+                >
+                  <i class="pi pi-plus" aria-hidden="true" />
+                  <span>重新买入</span>
+                </Button>
+              </div>
+            </div>
+
+            <!-- 房主开局控制与席位操作 -->
+            <div class="hero-seat-actions">
+              <Button
+                v-if="canStartNextHand"
+                severity="success"
+                class="hero-start-btn"
+                :title="hasPlayedHand ? '开始下一手牌' : '开始第一手牌'"
+                :aria-label="hasPlayedHand ? '开始下一手' : '开始牌局'"
+                @click="startNextHand"
+              >
+                <i class="pi pi-play" aria-hidden="true" />
+                <span>{{ hasPlayedHand ? '开始下一手' : '开始牌局' }}</span>
+              </Button>
+              <Button size="small" class="sub-action-btn sub-action-btn--leave" :title="'离座（座位与筹码为你保留）'" @click="requestLeaveSeat">
+                <svg class="btn-action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="13" cy="4" r="1.8" />
+                  <line x1="7" y1="21" x2="10" y2="17" />
+                  <path d="M16 21l-2-4-3-3 1-6" />
+                  <path d="M6 12l2-3 4-1 3 3 3 1" />
+                </svg>
+                <span class="sub-btn-text">离座</span>
+              </Button>
+              <Button size="small" class="sub-action-btn sub-action-btn--exit" :title="'退出房间（释放座位）'" @click="exitRoomOpen = true">
+                <svg class="btn-action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                  <polyline points="16 17 21 12 16 7" />
+                  <line x1="21" y1="12" x2="9" y2="12" />
+                </svg>
+                <span class="sub-btn-text">退出房间</span>
+              </Button>
+            </div>
+          </div>
         </div>
-        <!-- 当前牌型与筹码紧挨着放在右下角：牌型由引擎纯函数实时算出（见 currentHandName），
-             公共牌每翻出一段就跟着变；翻牌前只有两张底牌时也给「一对 Q / 高牌 A」这样的结论。 -->
-        <span class="hero-meta">
-          <span v-if="currentHandName" class="hero-hand">
-            <span class="muted">当前牌型</span>
-            <b class="hand-name" :title="currentHandName">{{ currentHandName }}</b>
-          </span>
-          <span class="hero-stack">
-            <span class="muted">筹码</span>
-            <b class="num">{{ myStack }}</b>
-          </span>
-        </span>
-        <span class="hero-seat-actions">
-          <!-- 房主开始对局按钮：置于手牌与资产区域，一目了然 -->
-          <Button
-            v-if="canStartNextHand"
-            severity="success"
-            class="hero-start-btn"
-            :title="hasPlayedHand ? '开始下一手牌' : '开始第一手牌'"
-            :aria-label="hasPlayedHand ? '开始下一手' : '开始牌局'"
-            @click="startNextHand"
-          >
-            <i class="pi pi-play" aria-hidden="true" />
-            <span>{{ hasPlayedHand ? '开始下一手' : '开始牌局' }}</span>
-          </Button>
-          <Button size="small" text :title="'离座（座位与筹码为你保留）'" @click="requestLeaveSeat">
-            <i class="pi pi-user-minus" aria-hidden="true" />
-            <span>离座</span>
-          </Button>
-          <Button size="small" text :title="'退出房间（释放座位）'" @click="exitRoomOpen = true">
-            <i class="pi pi-power-off" aria-hidden="true" />
-            <span>退出房间</span>
-          </Button>
-        </span>
+
+        <!-- 纵向微晶金线分隔器（宽屏展示） -->
+        <div class="cockpit-divider" aria-hidden="true" />
+
+        <!-- 右翼：战术行动与下注控制台（ActionBar 深度熔铸） -->
+        <div class="cockpit-wing cockpit-wing--action">
+          <ActionBar
+            :legal-actions="game.myLegalActions"
+            :pot-total="potTotal"
+            :current-bet="game.state?.currentBet ?? 0"
+            :my-stack="myStack"
+            :is-my-turn="game.isMyTurn"
+            :remaining-seconds="remainingSeconds"
+            :turn-seconds="turnSeconds"
+            :remaining-ratio="remainingRatio"
+            :turn-deadline-at="game.state?.turnDeadlineAt ?? null"
+            :clock-offset-ms="connection.clockOffsetMs"
+            :blocked-reason="blockedReason"
+            :enabled="connection.isOnline"
+            :can-start-hand="canStartNextHand"
+            :has-played-hand="hasPlayedHand"
+            :seated="game.isSeated"
+            @action="submitAction"
+            @start="startNextHand"
+            @leave="requestLeaveSeat"
+            @exit="exitRoomOpen = true"
+          />
+        </div>
       </div>
 
-      <!-- 观战者：只显示公开状态与退出入口，绝不渲染底牌与下注操作栏。 -->
-      <section v-else-if="game.self" class="spectator" aria-labelledby="spectator-state">
-        <p id="spectator-state" class="spectator-state">
-          <i :class="mySeatAway ? 'pi pi-user-minus' : 'pi pi-eye'" aria-hidden="true" />
-          <b>{{ mySeatAway ? '已离座' : '观战中' }}</b>
-          <span v-if="mySeatAway" class="muted">
-            {{ `座位保留在 ${String((game.self.seat ?? 0) + 1)} 号位` }}
-          </span>
-        </p>
-
-        <p class="spectator-seats">
-          <span class="muted">已入座</span>
-          <b class="num">{{ occupiedCount }}/{{ maxSeats }}</b>
-        </p>
-
-        <div class="spectator-actions">
-          <!-- 观战中的房主也可开始对局 -->
-          <Button
-            v-if="canStartNextHand"
-            severity="success"
-            :title="hasPlayedHand ? '开始下一手牌' : '开始第一手牌'"
-            :aria-label="hasPlayedHand ? '开始下一手' : '开始牌局'"
-            @click="startNextHand"
-          >
-            <i class="pi pi-play" aria-hidden="true" />
-            <span>{{ hasPlayedHand ? '开始下一手' : '开始牌局' }}</span>
-          </Button>
-          <Button
-            v-if="mySeatAway"
-            :title="`坐回 ${String((game.self.seat ?? 0) + 1)} 号座位`"
-            @click="resit"
-          >
-            <i class="pi pi-user-plus" aria-hidden="true" />
-            <span>坐回 {{ (game.self.seat ?? 0) + 1 }} 号位</span>
-          </Button>
-          <Button outlined :title="'退出房间（释放座位）'" @click="exitRoomOpen = true">
-            <i class="pi pi-times" aria-hidden="true" />
-            <span>退出房间</span>
-          </Button>
+      <!-- 2. 离座中状态 -->
+      <div v-else-if="game.isSeated && mySeatAway" class="hero-spectator hero-spectator--away">
+        <div class="spectator-card">
+          <div class="spectator-info">
+            <i class="pi pi-pause-circle spectator-icon" aria-hidden="true" />
+            <div class="spectator-texts">
+              <h3 class="spectator-title">你当前处于离座托管状态</h3>
+              <p class="spectator-desc">
+                你的位置与 <span class="num">{{ myStack }}</span> 筹码已为你妥善锁定
+              </p>
+            </div>
+          </div>
+          <div class="spectator-actions">
+            <Button severity="success" class="return-seat-btn" :title="'坐回牌桌继续行动'" @click="resit">
+              <svg class="btn-action-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M19 9V6a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v3" />
+                <path d="M3 16a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5a2 2 0 0 0-4 0v1.5a.5.5 0 0 1-.5.5h-9a.5.5 0 0 1-.5-.5V11a2 2 0 0 0-4 0z" />
+                <path d="M5 18v2" />
+                <path d="M19 18v2" />
+              </svg>
+              <span>坐回牌桌</span>
+            </Button>
+            <Button severity="secondary" outlined :title="'退出房间'" @click="exitRoomOpen = true">
+              <svg class="btn-action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+              <span>退出房间</span>
+            </Button>
+          </div>
         </div>
-      </section>
+      </div>
 
-      <p v-else class="hint">正在载入你的座位信息…</p>
-
-      <!--
-        底部操作栏：仅入座且未离座的玩家才渲染操作栏；观战中不展示操作栏。
-      -->
-      <ActionBar
-        v-if="game.isSeated && !mySeatAway"
-        class="hero-actions"
-        :legal-actions="game.myLegalActions"
-        :pot-total="potTotal"
-        :current-bet="game.state?.currentBet ?? 0"
-        :my-stack="myStack"
-        :is-my-turn="game.isMyTurn"
-        :remaining-seconds="remainingSeconds"
-        :turn-seconds="turnSeconds"
-        :blocked-reason="blockedReason"
-        :enabled="connection.isOnline"
-        :seated="true"
-        @action="submitAction"
-      />
+      <!-- 3. 贵宾观战状态（未入座） -->
+      <div v-else class="hero-spectator">
+        <div class="spectator-card">
+          <div class="spectator-info">
+            <i class="pi pi-eye spectator-icon" aria-hidden="true" />
+            <div class="spectator-texts">
+              <h3 class="spectator-title">贵宾观战席</h3>
+              <p class="spectator-desc">
+                <template v-if="canSitDown">
+                  牌桌尚有 <b class="num empty-num">{{ emptyCount }}</b> 个空席（共 {{ maxSeats }} 席），轻触桌上空位或点击右侧快速入座
+                </template>
+                <template v-else-if="isTableFull">
+                  当前牌桌已满员（{{ occupiedCount }}/{{ maxSeats }} 席），你正在观战中，席位空出后即可入座
+                </template>
+                <template v-else>
+                  你正在观战中，请稍候…
+                </template>
+              </p>
+            </div>
+          </div>
+          <div class="spectator-actions">
+            <Button
+              v-if="canSitDown && firstAvailableSeat !== null"
+              severity="help"
+              class="quick-sit-btn"
+              :title="'快速入座'"
+              @click="openBuyIn(firstAvailableSeat)"
+            >
+              <i class="pi pi-user-plus" aria-hidden="true" />
+              <span>入座 {{ firstAvailableSeat + 1 }} 号席</span>
+            </Button>
+            <Button severity="secondary" outlined :title="'退出房间'" @click="exitRoomOpen = true">
+              <svg class="btn-action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+              <span>返回大厅</span>
+            </Button>
+          </div>
+        </div>
+      </div>
     </footer>
-
-    <!-- 侧边抽屉：聊天 / 手牌历史 / 邀请 / 规则；默认收起，不抢占桌面宽度。 -->
-    <Drawer v-model:visible="drawerOpen" position="right" :header="'牌桌信息'" :style="{ width: 'min(92vw, 360px)' }">
-      <div class="drawer-inner">
-        <div class="drawer-tabs" role="tablist" aria-label="牌桌信息分类">
-          <!-- 优先展示最重要的核心模块：聊天与手牌历史 -->
-          <Button
-            size="small"
-            :severity="drawerSection === 'chat' ? 'help' : 'secondary'"
-            :outlined="drawerSection !== 'chat'"
-            role="tab"
-            :aria-selected="drawerSection === 'chat'"
-            :title="'聊天'"
-            @click="drawerSection = 'chat'"
-          >
-            <span>聊天</span>
-            <span v-if="chat.unread > 0" class="count-chip count-chip--unread num" aria-hidden="true">{{ unreadText }}</span>
-          </Button>
-          <Button
-            size="small"
-            :severity="drawerSection === 'history' ? 'help' : 'secondary'"
-            :outlined="drawerSection !== 'history'"
-            role="tab"
-            :aria-selected="drawerSection === 'history'"
-            :title="'手牌历史'"
-            @click="drawerSection = 'history'"
-          >
-            <span>历史</span>
-            <span v-if="game.history.length > 0" class="count-chip count-chip--history num" aria-hidden="true">{{ game.history.length }}</span>
-          </Button>
-          <Button
-            size="small"
-            :severity="drawerSection === 'invite' ? 'help' : 'secondary'"
-            :outlined="drawerSection !== 'invite'"
-            role="tab"
-            :aria-selected="drawerSection === 'invite'"
-            :title="'邀请朋友'"
-            @click="drawerSection = 'invite'"
-          >
-            <span>邀请</span>
-          </Button>
-          <Button
-            size="small"
-            :severity="drawerSection === 'rules' ? 'help' : 'secondary'"
-            :outlined="drawerSection !== 'rules'"
-            role="tab"
-            :aria-selected="drawerSection === 'rules'"
-            :title="'规则摘要'"
-            @click="drawerSection = 'rules'"
-          >
-            <span>规则</span>
-          </Button>
+    <!-- 专属邀请朋友弹窗 -->
+    <Dialog
+      v-model:visible="inviteDialogOpen"
+      modal
+      :dismissable-mask="true"
+      class="vip-dialog vip-hub-dialog"
+      :style="{ width: 'min(92vw, 560px)' }"
+      header="邀请朋友"
+    >
+      <div class="drawer-pane invite-pane">
+        <div class="invite-banner">
+          <i class="pi pi-sparkles invite-icon" aria-hidden="true" />
+          <div class="invite-banner-texts">
+            <h4 class="invite-title">邀请好友同桌竞技</h4>
+            <p class="invite-desc">支持局域网或内网直连，分享房间号或链接即可快速加入</p>
+          </div>
         </div>
 
-        <section v-if="drawerSection === 'invite'" class="drawer-body" aria-label="邀请朋友">
-          <h3>邀请朋友</h3>
-          <!-- 房间号是这块的主角：6 位纯数字，能直接念给对面听、也能单独复制走。 -->
-          <p class="invite-plate">
-            <span class="invite-label">房间号</span>
-            <b ref="codeText" class="invite-code num" translate="no">{{ roomCode }}</b>
-          </p>
-          <div class="invite-field">
-            <label class="invite-field-label" for="invite-link">邀请链接</label>
+        <div class="invite-card">
+          <span class="invite-label">房间号</span>
+          <div class="invite-code-box">
+            <b ref="codeText" class="invite-code num">{{ roomCode }}</b>
+            <Button size="small" outlined class="copy-btn" :title="'复制房间号'" @click="copyInvite('code')">
+              <i class="pi pi-copy" aria-hidden="true" />
+              <span>复制</span>
+            </Button>
+          </div>
+        </div>
+
+        <div class="invite-card">
+          <span class="invite-label">专属邀请直链</span>
+          <div class="invite-input-row">
             <InputText
-              id="invite-link"
               ref="linkField"
-              :model-value="inviteLink"
+              :value="inviteLink"
               readonly
-              fluid
-              autocomplete="off"
-              translate="no"
+              class="invite-link-input"
+              aria-label="房间直链"
               @focus="selectLinkValue"
             />
-          </div>
-          <div class="invite-actions">
-            <Button :title="'复制邀请链接'" @click="copyInvite('link')">
+            <Button severity="help" class="copy-btn" :title="'复制完整链接'" @click="copyInvite('link')">
               <i class="pi pi-copy" aria-hidden="true" />
-              <span>复制邀请链接</span>
-            </Button>
-            <Button severity="secondary" text :title="'只复制房间号'" @click="copyInvite('code')">
-              <i class="pi pi-copy" aria-hidden="true" />
-              <span>复制房间号</span>
+              <span>复制链接</span>
             </Button>
           </div>
-          <p class="invite-status" role="status">{{ copyStatus }}</p>
-          <ul class="invite-hints hint">
-            <li>打开链接，或在大厅输入这 6 位房间号，都能进桌。</li>
-            <li>进桌后先当旁观者，点桌面空位、确认买入才算落座。</li>
-            <li>别人看不到未公开的底牌；离座只是暂时离开，退出房间才释放座位。</li>
-          </ul>
-        </section>
+        </div>
 
-        <section v-else-if="drawerSection === 'rules'" class="drawer-body" aria-label="规则摘要">
-          <h3>本桌规则</h3>
-          <dl>
-            <div><dt>游戏</dt><dd>无限注德州扑克，52 张牌</dd></div>
-            <div><dt>盲注</dt><dd class="num">{{ game.state?.smallBlind ?? TABLE_RULES.smallBlind }}/{{ game.state?.bigBlind ?? TABLE_RULES.bigBlind }}</dd></div>
-            <div>
-              <dt>买入范围</dt>
-              <dd class="num">
-                {{ game.state?.buyInMin ?? TABLE_RULES.startingStack }}–{{
-                  game.state?.buyInMax ?? TABLE_RULES.startingStack
-                }}（步进 {{ game.state?.buyInStep ?? TABLE_RULES.smallBlind }}，上限由主持人设定）
-              </dd>
-            </div>
-            <div><dt>行动时间</dt><dd>{{ turnSeconds }} 秒，超时自动过牌或弃牌</dd></div>
-            <div><dt>离座</dt><dd>离座保留座位与筹码，随时可以坐回；退出房间才释放座位</dd></div>
-            <div><dt>牌型大小</dt><dd>同花顺 &gt; 四条 &gt; 葫芦 &gt; 同花 &gt; 顺子 &gt; 三条 &gt; 两对 &gt; 一对 &gt; 高牌</dd></div>
-            <div><dt>边池</dt><dd>每个边池只由该池合格玩家争夺</dd></div>
-            <div><dt>筹码性质</dt><dd>虚拟分数，不可充值、不可兑换、不可转让</dd></div>
-          </dl>
-        </section>
-
-        <section v-else-if="drawerSection === 'history'" class="drawer-body" aria-label="手牌历史">
-          <h3>手牌历史</h3>
-          <template v-if="historyRows.length > 0">
-            <p class="hint">已记录 {{ historyRows.length }} 手，最新的在最上面。</p>
-            <ul class="history">
-              <li v-for="entry in historyRows" :key="entry.handId" class="history-item">
-                <p class="history-head">
-                  <b class="history-no">第 {{ entry.handNo }} 手</b>
-                  <span class="history-pot">
-                    <span class="muted">底池</span>
-                    <b class="num">{{ entry.potTotal }}</b>
-                  </span>
-                </p>
-
-                <p class="history-board">
-                  <span class="history-board-label">公共牌</span>
-                  <span v-if="entry.board.length > 0" class="num board-cards">{{ entry.boardLabel }}</span>
-                  <span v-else class="muted">翻牌前结束，未发公共牌</span>
-                </p>
-
-                <ul class="history-winners">
-                  <li v-for="row in entry.winners" :key="`${row.playerId}-${String(row.potIndex)}`">
-                    <span class="winner-name" :class="{ 'is-hero': row.isHero }">{{ row.nickname }}</span>
-                    <span class="num winner-amount">+{{ row.amount }}</span>
-                    <span class="winner-hand">{{ row.handName ?? (entry.showdown ? '未亮牌' : '未摊牌') }}</span>
-                    <span class="winner-pot muted">
-                      {{ row.potIndex === 0 ? '主池' : `边池 ${String(row.potIndex)}` }}
-                    </span>
-                  </li>
-                </ul>
-
-                <p v-if="entry.winners.length > 1" class="hint">
-                  本手 {{ entry.winners.length }} 位玩家平分底池。
-                </p>
-                <p v-else-if="!entry.showdown" class="hint">其余玩家弃牌，底牌未公开。</p>
-              </li>
-            </ul>
-          </template>
-          <p v-else class="hint">还没有打完的手牌</p>
-        </section>
-
-        <section v-else class="drawer-body drawer-body--chat" aria-label="聊天">
-          <h3>聊天</h3>
-
-          <!-- 搜索：只过滤展示，不改动消息本身；有关键词时不再插入日期/未读分隔。 -->
-          <div class="chat-search">
-            <label class="sr-only" for="chat-search">搜索聊天记录</label>
-            <InputText
-              id="chat-search"
-              v-model="chatQuery"
-              size="small"
-              class="chat-search-input"
-              type="search"
-              autocomplete="off"
-              placeholder="搜索消息…"
-            />
-            <Button v-if="chatQuery" size="small" text :title="'清除搜索'" @click="chatQuery = ''">
-              <i class="pi pi-times" aria-hidden="true" />
-              <span>清除</span>
-            </Button>
-            <span v-if="chatSearchText" class="muted num" role="status">{{ chatSearchText }}</span>
-          </div>
-
-          <div
-            ref="chatListRef"
-            class="chat-list thin-scroll"
-            role="log"
-            aria-live="polite"
-            aria-label="聊天消息"
-            @scroll.passive="onChatScroll"
-          >
-            <!-- 用「有没有可渲染的行」判断，这样搜索无结果也能给出空态 -->
-            <ol v-if="chatRows.length > 0" class="chat-msgs">
-              <template v-for="row in chatRows" :key="row.key">
-                <li v-if="row.kind === 'day'" class="chat-day">
-                  <span>{{ row.label }}</span>
-                </li>
-                <li v-else-if="row.kind === 'gap'" class="chat-gap">
-                  <span class="num">{{ row.label }}</span>
-                </li>
-                <li v-else-if="row.kind === 'unread'" class="chat-unread" role="separator">
-                  <span>以下为新消息</span>
-                </li>
-                <li v-else-if="row.message.kind === 'system'" class="chat-system">
-                  <span>{{ row.message.text }}</span>
-                  <time class="num" :datetime="chatIso(row.message.at)">{{ chatTime(row.message.at) }}</time>
-                </li>
-                <li
-                  v-else
-                  class="chat-msg"
-                  :class="{
-                    'is-own': isOwnMessage(row.message),
-                    'is-mention': mentionsMe(row.message),
-                    'is-continuation': !row.groupStart,
-                  }"
-                >
-                  <!-- 组首：昵称 + 提及标记 + 时间。 -->
-                  <p v-if="row.groupStart" class="chat-meta">
-                    <span class="chat-who">{{ isOwnMessage(row.message) ? '你' : row.message.nickname }}</span>
-                    <span v-if="mentionsMe(row.message)" class="chat-mention-tag">提到了你</span>
-                    <time
-                      class="chat-time num"
-                      :datetime="chatIso(row.message.at)"
-                      :title="chatFullTime(row.message.at)"
-                    >
-                      {{ chatTime(row.message.at) }}
-                    </time>
-                  </p>
-                  <!-- 组内后续消息：视觉上共用组首的昵称，但屏幕阅读器仍要听到是谁说的。 -->
-                  <p v-else class="sr-only">
-                    {{ isOwnMessage(row.message) ? '你' : row.message.nickname }}，{{ chatFullTime(row.message.at) }}
-                  </p>
-                  <p class="chat-text">{{ row.message.text }}</p>
-                </li>
-              </template>
-            </ol>
-            <p v-else class="hint chat-empty">{{ chatQuery ? '没有匹配的消息' : '还没有人说话' }}</p>
-          </div>
-
-          <!-- 用户往上翻时出现：跳到底部由用户自己决定，不抢滚动位置。 -->
-          <Button v-if="chatHasNews" size="small" text class="chat-jump" :title="'跳到最新消息'" @click="scrollChatToBottom">
-            <i class="pi pi-arrow-down" aria-hidden="true" />
-            <span>有新消息，跳到最新</span>
-          </Button>
-
-          <form class="chat-form" @submit.prevent="submitChat">
-            <Button
-              type="button"
-              size="small"
-              text
-              :aria-label="'插入 @ 提及'"
-              :title="'插入 @ 提及'"
-              aria-haspopup="true"
-              aria-controls="mention-menu"
-              :disabled="mentionItems.length === 0"
-              @click="toggleMentionMenu"
-            >
-              <i class="pi pi-at" aria-hidden="true" />
-            </Button>
-            <Menu id="mention-menu" ref="mentionMenu" :model="mentionItems" :popup="true" />
-
-            <label class="sr-only" for="chat-input">聊天输入框</label>
-            <InputText
-              id="chat-input"
-              v-model="chatText"
-              class="chat-input"
-              type="text"
-              autocomplete="off"
-              :maxlength="CHAT_MAX_LENGTH"
-              :placeholder="'说点什么…'"
-              aria-describedby="chat-counter"
-              @keydown="onChatKeydown"
-              @compositionstart="composing = true"
-              @compositionend="composing = false"
-              @input="chatError = ''"
-            />
-            <Button type="submit" :disabled="!canSendChat" :title="canSendChat ? '发送消息（Enter）' : '请先输入内容'">
-              <i class="pi pi-send" aria-hidden="true" />
-              <span>发送</span>
-            </Button>
-          </form>
-
-          <p id="chat-counter" class="chat-counter muted num">
-            还可输入 {{ chatRemaining }} 字（上限 {{ CHAT_MAX_LENGTH }}）
-          </p>
-          <p v-if="chatError" class="chat-error" role="alert">{{ chatError }}</p>
-          <p class="hint">Enter 发送，Shift+Enter 不发送；消息仅本房间可见。</p>
-        </section>
+        <p v-if="copyStatus" class="copy-status" role="status">
+          <i class="pi pi-check" aria-hidden="true" />
+          <span>{{ copyStatus }}</span>
+        </p>
       </div>
-    </Drawer>
+    </Dialog>
 
     <!-- 结算叠层：赢家、牌型与各边池分配。 -->
     <HandResultOverlay
@@ -1594,16 +1711,17 @@ onBeforeUnmount(() => onFatalRoomError(null))
       :result="result"
       :seats="game.seats"
       :hero-player-id="game.self?.playerId ?? null"
+      :my-cards="activeHeroCards"
       :visible="overlayVisible"
       @close="closeResult"
-      @history="openDrawer('history')"
+      @history="openHistory"
     />
 
     <!-- 买入确认：房主定的上限 + 服务端校验的下限/步进 -->
     <Dialog
       v-model:visible="buyInOpen"
       modal
-      :header="buyInSeat === null ? '确认买入' : `买入并入座 ${String(buyInSeat + 1)} 号位`"
+      :header="isRebuyDialog ? '重新买入' : buyInSeat === null ? '确认买入' : `买入并入座 ${String(buyInSeat + 1)} 号位`"
       :style="{ width: 'min(92vw, 380px)' }"
       @hide="buyInSeat = null"
     >
@@ -1666,7 +1784,12 @@ onBeforeUnmount(() => onFatalRoomError(null))
       <template #footer>
         <Button text :title="'继续打这一手'" @click="leaveSeatOpen = false"><span>继续打</span></Button>
         <Button severity="danger" :title="'离座并弃牌'" @click="leaveSeat">
-          <i class="pi pi-sign-out" aria-hidden="true" />
+          <svg class="btn-action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="13" cy="4" r="1.8" />
+            <line x1="7" y1="21" x2="10" y2="17" />
+            <path d="M16 21l-2-4-3-3 1-6" />
+            <path d="M6 12l2-3 4-1 3 3 3 1" />
+          </svg>
           <span>离座并弃牌</span>
         </Button>
       </template>
@@ -1686,7 +1809,11 @@ onBeforeUnmount(() => onFatalRoomError(null))
       <template #footer>
         <Button text :title="'取消'" @click="exitRoomOpen = false"><span>取消</span></Button>
         <Button severity="danger" :title="'退出房间'" @click="exitRoom">
-          <i class="pi pi-times" aria-hidden="true" />
+          <svg class="btn-action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+            <polyline points="16 17 21 12 16 7" />
+            <line x1="21" y1="12" x2="9" y2="12" />
+          </svg>
           <span>退出房间</span>
         </Button>
       </template>
@@ -1745,8 +1872,8 @@ onBeforeUnmount(() => onFatalRoomError(null))
         <Button text :title="'关闭'" @click="closeKick"><span>关闭</span></Button>
       </template>
     </Dialog>
-    </template>
-  </div>
+  </template>
+</div>
 </template>
 
 <style scoped>
@@ -1754,241 +1881,1000 @@ onBeforeUnmount(() => onFatalRoomError(null))
   flex: 1;
   display: flex;
   flex-direction: column;
+  height: 100dvh;
+  max-height: 100dvh;
   min-height: 0;
+  /* 德州扑克赛级舞台：深黑曜石渐变 + 顶灯向心聚光漫射 */
+  background: radial-gradient(circle at 50% 25%, #151d27 0%, #0d1218 65%, #080b0f 100%);
+  position: relative;
+  overflow: hidden;
 }
 
+/* ═══════════════ 顶栏 HUD 贵宾指挥区 ═══════════════ */
+.hud-header {
+  background: rgba(12, 17, 24, 0.88);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid rgba(212, 177, 106, 0.2);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.55);
+  padding: 8px var(--space-2);
+  display: flex;
+  align-items: center;
+  z-index: 10;
+}
+
+.hud-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* 房间名贵宾勋章 */
+.room-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  background: linear-gradient(135deg, rgba(212, 177, 106, 0.16) 0%, rgba(212, 177, 106, 0.05) 100%);
+  border: 1px solid rgba(212, 177, 106, 0.4);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.room-badge-icon {
+  font-size: 0.88rem;
+  color: #ffd875;
+  filter: drop-shadow(0 0 6px rgba(212, 177, 106, 0.5));
+}
+
+.bar-title {
+  font-size: 0.98rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #ffffff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+
+/* 盲注 / 手数 / 阶段钛金微晶胶囊 */
+.meta-capsules {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.meta-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 3px 10px;
+  background: rgba(22, 29, 38, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  font-size: 0.82rem;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.meta-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+.meta-pill--blind .num {
+  color: #ffd875;
+  font-weight: 700;
+}
+
+.meta-pill--hand .num {
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.stage-name {
+  color: var(--gold);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.stage--flop .stage-name {
+  color: #38bdf8;
+  text-shadow: 0 0 8px rgba(56, 189, 248, 0.4);
+}
+
+.stage--turn .stage-name {
+  color: #c084fc;
+  text-shadow: 0 0 8px rgba(192, 132, 252, 0.4);
+}
+
+.stage--river .stage-name {
+  color: #fb7185;
+  text-shadow: 0 0 8px rgba(251, 113, 133, 0.4);
+}
+
+.stage--showdown .stage-name {
+  color: #facc15;
+  text-shadow: 0 0 8px rgba(250, 204, 21, 0.4);
+}
+
+/* 网络连接状态 */
 .link-state {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   font-size: 0.76rem;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .link-state.is-online {
-  color: var(--positive);
+  color: #34d399;
+}
+
+.link-state.is-online i {
+  filter: drop-shadow(0 0 4px #34d399);
 }
 
 .link-state.is-offline {
   color: var(--danger);
 }
 
-.scenario {
-  min-width: 132px;
+.bar-spacer {
+  flex: 1;
+}
+
+
+/* 顶栏快捷金标按钮栏 */
+.bar-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(22, 29, 38, 0.75);
+  border: 1px solid rgba(212, 177, 106, 0.22);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 500;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+}
+
+.bar-btn:hover {
+  background: rgba(212, 177, 106, 0.16);
+  border-color: var(--gold);
+  color: #ffffff;
+  box-shadow: 0 0 12px rgba(212, 177, 106, 0.25);
+  transform: translateY(-1px);
+}
+
+.bar-btn--chat.has-unread {
+  border-color: #38bdf8;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.35);
+}
+
+.bar-btn--chat.has-mention {
+  border-color: #ffd875;
+  box-shadow: 0 0 14px rgba(212, 177, 106, 0.5);
+}
+
+.bar-btn-text {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.count-chip {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: rgba(212, 177, 106, 0.2);
+  color: #ffd875;
+  font-size: 0.68rem;
+  line-height: 1;
+  font-weight: 700;
+}
+
+.count-chip--unread {
+  background: #2563eb;
+  color: #ffffff;
+  box-shadow: 0 0 6px rgba(37, 99, 235, 0.6);
+}
+
+/* ═══════════════ 中央牌桌舞台 ═══════════════ */
+.notice-slot {
+  height: 32px;
+  overflow: visible;
+  z-index: 5;
 }
 
 .stage {
-  flex: 1;
+  flex: 1 1 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: var(--space-2) var(--space-2) 0;
+  padding: 4px var(--space-2) 0;
   min-height: 0;
+  position: relative;
 }
 
 .loading {
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  color: var(--muted);
+  color: var(--gold);
+  font-size: 0.95rem;
+  text-shadow: 0 0 10px rgba(212, 177, 106, 0.3);
 }
 
-/*
- * 通知条槽位：固定一行高（32px）。通知条最多两条时会向上溢出一点，
- * 但槽位不参与高度累积——牌桌位置因此始终不变。
- */
-.notice-slot {
-  height: 32px;
-  overflow: visible;
-}
-
+/* ═══════════════ 一体化玩家座舱（Hero Cockpit） ═══════════════ */
 .hero {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 6px var(--space-2) 10px;
+  background: linear-gradient(180deg, rgba(14, 19, 26, 0.88) 0%, rgba(8, 11, 15, 0.98) 100%);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-top: 1px solid rgba(212, 177, 106, 0.25);
+  box-shadow: 0 -10px 32px rgba(0, 0, 0, 0.6);
+  z-index: 8;
+}
+
+/* 核心座舱外壳（继承原 .hero-cards 保证 E2E 选择器完全兼容） */
+.hero-cockpit {
+  display: flex;
+  align-items: stretch;
+  gap: 20px;
+  width: 100%;
+  max-width: 1080px;
+  margin-inline: auto;
+  padding: 10px 18px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, rgba(22, 30, 40, 0.92) 0%, rgba(13, 18, 24, 0.98) 100%);
+  border: 1px solid rgba(212, 177, 106, 0.28);
+  box-shadow:
+    0 12px 36px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 0 20px rgba(0, 0, 0, 0.4);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* 座舱左翼：底牌展示与牌力资产 */
+.cockpit-wing--hero {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 0 0 auto;
+}
+
+.cockpit-cards-group {
+  display: flex;
+  align-items: center;
+}
+
+/* 扇形交叠底牌容器 */
+.fan-cards {
+  display: flex;
+  align-items: center;
+  padding: 4px 6px;
+}
+
+/* 3D 翻转底牌卡槽 */
+.hero-card-flipper {
+  position: relative;
+  width: var(--cw, 58px);
+  height: calc(var(--cw, 58px) * 1.4);
+  perspective: 1000px;
+  flex: none;
+}
+
+.hero-card-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  transition: transform 0.65s cubic-bezier(0.34, 1.45, 0.64, 1);
+}
+
+.hero-card-flipper.is-flipped .hero-card-inner {
+  transform: rotateY(180deg);
+}
+
+/* 左右两张底牌依次翻开的真实发牌时差（左牌先翻，右牌随后） */
+.hero-card-flipper.fan-card--0 .hero-card-inner {
+  transition-delay: 0ms;
+}
+
+.hero-card-flipper.fan-card--1 .hero-card-inner {
+  transition-delay: 140ms;
+}
+
+.hero-card-face {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  border-radius: calc(var(--cw, 58px) * 0.11);
+}
+
+.hero-card-face :deep(.card) {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.hero-card-face--back {
+  transform: rotateY(0deg);
+  z-index: 1;
+}
+
+.hero-card-flipper.is-flipped .hero-card-face--back {
+  z-index: 0;
+}
+
+.hero-card-face--front {
+  transform: rotateY(180deg);
+  z-index: 2;
+  overflow: hidden;
+}
+
+.hero-card-flipper:not(.is-flipped) .hero-card-face--front {
+  z-index: 0;
+}
+
+/* 翻牌瞬间金色微光掠过动效 */
+.hero-card-face--front::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(105deg, transparent 20%, rgba(255, 255, 255, 0.35) 45%, rgba(212, 177, 106, 0.45) 55%, transparent 75%);
+  background-size: 200% 200%;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.hero-card-flipper.is-flipped .hero-card-face--front::after {
+  animation: card-gleam 0.75s 0.2s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+}
+
+@keyframes card-gleam {
+  0% {
+    opacity: 0;
+    background-position: 200% 0;
+  }
+  35% {
+    opacity: 0.85;
+  }
+  100% {
+    opacity: 0;
+    background-position: -200% 0;
+  }
+}
+
+.hero-card-flipper.is-dim {
+  opacity: 0.45;
+  filter: grayscale(0.5) drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5));
+}
+
+.fan-card--0 {
+  transform: rotate(-4.5deg) translateY(-2px);
+  transform-origin: bottom center;
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  filter: drop-shadow(-2px 6px 12px rgba(0, 0, 0, 0.7));
+}
+
+.fan-card--1 {
+  transform: rotate(4.5deg) translateX(-18px) translateY(-2px);
+  transform-origin: bottom center;
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  filter: drop-shadow(4px 6px 14px rgba(0, 0, 0, 0.75));
+}
+
+.hero-cockpit:hover .fan-card--0 {
+  transform: rotate(-7deg) translateX(-4px) translateY(-5px);
+}
+
+.hero-cockpit:hover .fan-card--1 {
+  transform: rotate(7deg) translateX(-10px) translateY(-5px);
+}
+
+/* 左翼状态与徽章 */
+.cockpit-meta-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 170px;
+}
+
+.cockpit-badge-row {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 8px var(--space-2) 10px;
-  background: color-mix(in srgb, var(--bg-elevated) 88%, transparent);
-  border-top: 1px solid var(--line);
-  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.2);
 }
 
-.hero-cards {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: 4px 10px;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg) 45%, transparent);
-  border: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
-}
-
-.hero-label {
-  font-size: 0.76rem;
-  font-weight: 600;
-  color: var(--muted);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
-.cards {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-/* 「当前牌型 + 筹码」：整体靠右，质感胶囊展示 */
-.hero-meta {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-  margin-left: auto;
-}
-
+/* 牌型勋章高亮 */
 .hero-hand {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 10px;
+  padding: 4px 12px;
   border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--felt) 35%, transparent);
-  border: 1px solid color-mix(in srgb, var(--felt) 65%, transparent);
-  font-size: 0.84rem;
+  background: linear-gradient(135deg, rgba(27, 78, 67, 0.75) 0%, rgba(13, 46, 39, 0.85) 100%);
+  border: 1px solid rgba(212, 177, 106, 0.45);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+
+.hand-icon {
+  color: #ffd875;
+  font-size: 0.82rem;
+  filter: drop-shadow(0 0 4px rgba(212, 177, 106, 0.6));
 }
 
 .hand-name {
-  color: var(--gold);
-  font-size: 0.92rem;
+  color: #ffe394;
+  font-size: 0.94rem;
   font-weight: 700;
-  min-width: 0;
-  overflow: hidden;
   white-space: nowrap;
-  text-overflow: ellipsis;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.8);
+  letter-spacing: 0.02em;
 }
 
+/* 筹码资产槽位 */
 .hero-stack {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 10px;
+  padding: 4px 12px;
   border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg-elevated) 80%, transparent);
-  border: 1px solid var(--line);
-  font-size: 0.84rem;
+  background: rgba(12, 17, 23, 0.85);
+  border: 1px solid rgba(212, 177, 106, 0.3);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5);
 }
 
-.hero-stack b {
-  color: var(--gold);
-  font-size: 1.05rem;
+.stack-label {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.stack-num {
+  color: #ffd875;
+  font-size: 1.12rem;
   font-weight: 700;
+  letter-spacing: 0.03em;
 }
 
+.rebuy-btn {
+  min-height: 32px;
+  margin-left: 4px;
+  padding: 4px 8px !important;
+  white-space: nowrap;
+}
+
+/* 席位动作（开局、离座、退出） */
 .hero-seat-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  margin-top: 2px;
 }
 
-.hero-seat-actions :deep(.hero-start-btn) {
-  padding: 4px 12px;
-  font-size: 0.82rem;
-  font-weight: 600;
-  color: #ffffff;
-  background: var(--positive);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 2px 8px rgba(23, 108, 83, 0.4);
+.hero-start-btn {
+  padding: 5px 16px !important;
+  font-size: 0.86rem !important;
+  font-weight: 700 !important;
+  color: #ffffff !important;
+  background: linear-gradient(135deg, #1f8d72 0%, #115745 100%) !important;
+  border: 1px solid #2bc9a3 !important;
+  border-radius: var(--radius-sm) !important;
+  box-shadow: 0 2px 12px rgba(27, 141, 114, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.25) !important;
+  transition: all 0.2s ease !important;
 }
 
-.hero-seat-actions :deep(.hero-start-btn:hover) {
-  background: color-mix(in srgb, var(--positive) 85%, #ffffff);
-  color: #ffffff;
+.hero-start-btn:hover {
+  background: linear-gradient(135deg, #26a989 0%, #156d57 100%) !important;
+  box-shadow: 0 4px 18px rgba(27, 141, 114, 0.7) !important;
+  transform: translateY(-1px);
 }
 
-.hero-seat-actions :deep(.p-button:not(.hero-start-btn)) {
-  padding: 3px 8px;
+.sub-action-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+  padding: 4px 10px !important;
+  font-size: 0.8rem !important;
+  font-weight: 600 !important;
+  color: #cbd5e1 !important;
+  background: rgba(15, 23, 42, 0.7) !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  border-radius: var(--radius-sm) !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+  transition: all 0.18s ease !important;
+  white-space: nowrap !important;
+}
+
+.sub-action-btn:hover {
+  color: #ffffff !important;
+  background: rgba(30, 41, 59, 0.9) !important;
+  border-color: rgba(212, 177, 106, 0.45) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.12) !important;
+  transform: translateY(-1px);
+}
+
+.sub-action-btn:active {
+  transform: translateY(0);
+}
+
+.sub-action-btn .btn-action-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  stroke: currentColor;
+}
+
+.sub-btn-text {
   font-size: 0.78rem;
-  color: var(--muted);
+  letter-spacing: 0.02em;
+  line-height: 1;
 }
 
-.hero-seat-actions :deep(.p-button:not(.hero-start-btn):hover) {
-  color: var(--text);
-  background: color-mix(in srgb, var(--text) 10%, transparent);
+/* 纵向微金拉线 */
+.cockpit-divider {
+  width: 1px;
+  background: linear-gradient(180deg, transparent, rgba(212, 177, 106, 0.35) 20%, rgba(212, 177, 106, 0.35) 80%, transparent);
+  margin-block: 4px;
+}
+
+/* 座舱右翼：战术操作融入台 */
+.cockpit-wing--action {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
 }
 
 .hero-actions {
   width: 100%;
-  max-width: 760px;
+}
+
+/* ═══════════════ 贵宾观战与离座座舱 ═══════════════ */
+.hero-spectator {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  max-width: 820px;
   margin-inline: auto;
 }
 
-.drawer-inner {
+.spectator-card {
   display: flex;
-  flex-direction: column;
-  /* 不少于抽屉可视高度：内容少时输入区仍贴底，内容多时整段可滚动。 */
-  min-height: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  width: 100%;
+  padding: 14px 24px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, rgba(22, 30, 40, 0.94) 0%, rgba(13, 18, 24, 0.98) 100%);
+  border: 1px solid rgba(212, 177, 106, 0.32);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 0 16px rgba(0, 0, 0, 0.4);
 }
 
-.drawer-tabs {
+.hero-spectator--away .spectator-card {
+  border-color: rgba(255, 215, 0, 0.45);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.6),
+    0 0 20px rgba(212, 177, 106, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.spectator-info {
   display: flex;
-  gap: var(--space-1);
-  margin-bottom: var(--space-2);
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.spectator-icon {
+  font-size: 1.8rem;
+  color: var(--gold);
+  filter: drop-shadow(0 0 8px rgba(212, 177, 106, 0.5));
+}
+
+.spectator-texts {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.spectator-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.02em;
+}
+
+.spectator-desc {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.spectator-desc .num {
+  color: var(--gold);
+  font-weight: 700;
+}
+
+.spectator-desc .empty-num {
+  color: #34d399;
+  font-size: 0.95rem;
+}
+
+.spectator-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.return-seat-btn {
+  background: linear-gradient(135deg, #10b981, #059669) !important;
+  border-color: #10b981 !important;
+  color: #fff !important;
+  font-weight: 600 !important;
+  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.35) !important;
+}
+
+.return-seat-btn .btn-action-icon {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  stroke: currentColor;
+  margin-right: 2px;
+}
+
+.quick-sit-btn {
+  background: linear-gradient(135deg, #8b5cf6, #6d28d9) !important;
+  border-color: #8b5cf6 !important;
+  color: #fff !important;
+  font-weight: 600 !important;
+  box-shadow: 0 4px 14px rgba(139, 92, 246, 0.35) !important;
+}
+
+.spectator-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.resit-btn {
+  background: rgba(212, 177, 106, 0.2) !important;
+  color: #ffd875 !important;
+  border: 1px solid var(--gold) !important;
+}
+
+.resit-btn:hover {
+  background: rgba(212, 177, 106, 0.35) !important;
+}
+
+.exit-btn {
+  border-color: rgba(255, 255, 255, 0.2) !important;
+  color: var(--muted) !important;
+}
+
+.exit-btn:hover {
+  color: var(--text) !important;
+  border-color: var(--danger) !important;
+}
+
+/* ═══════════════ 全功能信息弹窗与不透明黑金面板 ═══════════════ */
+:deep(.vip-dialog) {
+  background: #141a23 !important;
+  background-color: #141a23 !important;
+  border: 1px solid rgba(212, 177, 106, 0.35) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.95), 0 0 30px rgba(0, 0, 0, 0.8) !important;
+  opacity: 1 !important;
+}
+
+/* ═══════════════ 桌面右上角 HUD 快捷手牌历史 ═══════════════ */
+.hud-history {
+  position: absolute;
+  top: 14px;
+  right: 18px;
+  z-index: 22;
+  width: clamp(280px, 25vw, 360px);
+  max-width: calc(100% - 36px);
+  display: flex;
+  flex-direction: column;
+  background: rgba(10, 16, 26, 0.42);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.3);
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+.hud-history:hover,
+.hud-history:focus-within {
+  background: rgba(10, 16, 26, 0.82);
+  border-color: rgba(212, 177, 106, 0.45);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+}
+
+.hud-history.is-collapsed {
+  width: auto;
+  min-width: 86px;
+  background: rgba(10, 16, 26, 0.55);
+}
+
+.hud-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  user-select: none;
+}
+
+.hud-history.is-collapsed .hud-history-header {
+  border-bottom: none;
+}
+
+.hud-history-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.hud-history-title i {
+  color: #ffd875;
+  font-size: 0.82rem;
+}
+
+.hud-history-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(212, 177, 106, 0.25);
+  color: #ffd875;
+  border: 1px solid rgba(212, 177, 106, 0.4);
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.hud-history-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.72rem;
+  display: inline-flex;
+  align-items: center;
+  transition: color 0.15s ease;
+}
+
+.hud-history-toggle-btn:hover {
+  color: #fff;
+}
+
+.hud-history-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.hud-history-list {
+  max-height: clamp(240px, 45vh, 480px);
+  overflow-y: auto;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+:deep(.vip-hub-dialog) {
+  max-width: 640px;
+  width: min(92vw, 640px);
+}
+
+:deep(.vip-hub-dialog .p-dialog-content) {
+  padding: 16px 20px 20px !important;
+  max-height: min(80vh, 680px) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  background: #141a23 !important;
+  background-color: #141a23 !important;
+}
+
+.drawer-nav {
+  display: flex;
+  gap: 6px;
+  padding: 5px;
+  background: #0f141b;
+  border: 1px solid #232c38;
+  border-radius: var(--radius-md);
+  margin-bottom: 16px;
+  flex-shrink: 0;
+}
+
+.drawer-nav-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 12px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.drawer-nav-btn:hover {
+  color: var(--text);
+  background: #19222d;
+}
+
+.drawer-nav-btn.active {
+  color: #ffd875;
+  background: #1d2735;
+  border-color: rgba(212, 177, 106, 0.45);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.drawer-badge {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(212, 177, 106, 0.2);
+  color: #ffd875;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.drawer-badge--alert {
+  background: #dc2626;
+  color: #ffffff;
+}
+
+.drawer-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.drawer-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .drawer-body h3 {
-  margin: 0 0 var(--space-1);
-  font-size: 0.95rem;
+  margin: 0 0 var(--space-2);
+  font-size: 1rem;
+  font-weight: 700;
+  color: #ffd875;
+  letter-spacing: 0.02em;
+}
+
+/* 邀请卡立牌 */
+.invite-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: #19222e;
+  border: 1px solid #283648;
+  border-radius: var(--radius-md);
+}
+
+.invite-icon {
+  font-size: 1.4rem;
   color: var(--gold);
 }
 
-.drawer-body dl {
-  display: grid;
-  gap: 6px;
-  margin: 0;
-}
-
-.drawer-body dl div {
+.invite-banner-texts {
   display: flex;
-  gap: var(--space-1);
-  font-size: 0.84rem;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.drawer-body dt {
-  min-width: 76px;
+.invite-title {
+  margin: 0;
+  font-size: 0.96rem;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.invite-desc {
+  margin: 0;
+  font-size: 0.8rem;
   color: var(--muted);
 }
 
-.drawer-body dd {
-  margin: 0;
+.invite-card {
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+  border: 1px solid #283648;
+  border-radius: var(--radius-md);
+  background: #18212c;
 }
-
-/* ───────────── 邀请朋友（抽屉内的 invite 分节） ─────────────
- * 这块只做一件事：把 6 位房间号念给朋友 / 发出去。
- * 所以全块只有「数字」是响的（等宽 + 字距，像桌上的桌号牌），
- * 其余（标签、链接、说明）一律压到抽屉既有正文尺度，不加渐变、不加动效。 */
 
 .invite-plate {
   display: grid;
-  gap: 2px;
+  gap: 4px;
   margin: 0 0 var(--space-2);
-  padding: var(--space-2) var(--space-2) calc(var(--space-2) - 2px);
-  border: 1px solid var(--line);
+  padding: 16px 14px;
+  border: 1px solid rgba(212, 177, 106, 0.45);
   border-radius: var(--radius-md);
-  background: var(--felt-deep);
+  background: linear-gradient(180deg, #164038 0%, #0d2822 100%);
   text-align: center;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.15);
 }
 
 .invite-label {
-  font-size: 0.78rem;
-  letter-spacing: 0.08em;
-  color: var(--muted);
+  font-size: 0.76rem;
+  letter-spacing: 0.12em;
+  color: #9fe2d4;
+  text-transform: uppercase;
+  font-weight: 600;
 }
 
 .invite-code {
-  font-size: 1.9rem;
-  line-height: 1.2;
-  letter-spacing: 0.14em;
-  /* 字距会在最后一个字后面也留一份，居中时看起来偏左；用同样的缩进补回来。 */
-  text-indent: 0.14em;
-  color: var(--gold);
+  font-size: 2.2rem;
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: 0.16em;
+  text-indent: 0.16em;
+  color: #ffe394;
+  text-shadow: 0 0 16px rgba(212, 177, 106, 0.6);
+}
+
+.invite-code-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: #0f141b;
+  border: 1px solid #283648;
+  border-radius: var(--radius-sm);
 }
 
 .invite-field {
@@ -2005,372 +2891,815 @@ onBeforeUnmount(() => onFatalRoomError(null))
 .invite-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-1);
-  margin-top: var(--space-1);
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .invite-status {
-  /* 预留一行：出现「已复制…」时不推动下面的说明。 */
   min-height: 1.2em;
-  margin: var(--space-1) 0 0;
+  margin: 8px 0 0;
   font-size: 0.82rem;
-  color: var(--text);
+  color: #34d399;
+  font-weight: 600;
 }
 
 .invite-hints {
   margin: var(--space-2) 0 0;
   padding-left: 1.1em;
   display: grid;
-  gap: 4px;
-}
-
-/* ───────────── 顶栏右侧重构：主次分明的操作工具栏 ───────────── */
-
-.bar-right {
-  display: inline-flex;
-  align-items: center;
   gap: 6px;
-}
-
-.bar-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 32px;
-  padding: 4px 10px;
-  border-radius: var(--radius-sm);
-  transition: background-color 0.15s ease, border-color 0.15s ease;
-}
-
-/* 核心焦点：手牌历史 */
-.bar-btn--history {
-  background: color-mix(in srgb, var(--felt) 25%, transparent);
-  border: 1px solid color-mix(in srgb, var(--felt) 50%, transparent);
-  color: var(--text);
-}
-
-.bar-btn--history:hover {
-  background: color-mix(in srgb, var(--felt) 40%, transparent);
-}
-
-/* 核心焦点：聊天 */
-.bar-btn--chat {
-  background: color-mix(in srgb, var(--action) 18%, transparent);
-  border: 1px solid color-mix(in srgb, var(--action) 40%, transparent);
-  color: var(--text);
-}
-
-.bar-btn--chat:hover {
-  background: color-mix(in srgb, var(--action) 30%, transparent);
-}
-
-.bar-btn--chat.has-unread {
-  border-color: var(--action);
-}
-
-.bar-btn--chat.has-mention {
-  border-color: var(--gold);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--gold) 40%, transparent);
-}
-
-.bar-btn-text {
-  font-size: 0.82rem;
-  font-weight: 500;
-}
-
-/* ───────────── 顶栏角标：手数 / 未读数（数字 + aria-label 双重表意） ───────────── */
-
-.count-chip {
-  display: inline-grid;
-  place-items: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 9px;
-  background: var(--gold-dim);
-  color: var(--gold);
-  font-size: 0.68rem;
-  line-height: 1;
-}
-
-.count-chip--unread {
-  background: var(--action);
-  color: #ffffff;
-  font-weight: 700;
-}
-
-/* ───────────── 观战者面板（!game.isSeated 时替换「你的底牌」区） ───────────── */
-
-.spectator {
-  display: grid;
-  gap: 6px;
-  padding: var(--space-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-}
-
-.spectator-state {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0;
-  font-size: 0.88rem;
-}
-
-.spectator-state b {
-  color: var(--gold);
-  /* 「观战中」在窄屏不折行。 */
-  white-space: nowrap;
-}
-
-.spectator-seats {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  margin: 0;
-  font-size: 0.82rem;
-}
-
-.spectator-seats b {
-  color: var(--text);
-}
-
-.spectator-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  flex-wrap: wrap;
-}
-
-.spectator .hint {
-  font-size: 0.78rem;
-}
-
-/* ───────────── 手牌历史（最新在最上面） ───────────── */
-
-.history {
-  display: grid;
-  gap: var(--space-1);
-  margin: var(--space-1) 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.history-item {
-  display: grid;
-  gap: 4px;
-  padding: var(--space-1);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-}
-
-.history-head {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-1);
-  margin: 0;
-  font-size: 0.86rem;
-}
-
-.history-no {
-  color: var(--gold);
-}
-
-.history-pot {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
-  margin-left: auto;
-  font-size: 0.78rem;
-}
-
-.history-board {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  margin: 0;
-  font-size: 0.78rem;
-}
-
-.history-board-label {
   color: var(--muted);
-}
-
-.board-cards {
-  /* 长牌面（5 张）允许换行，不横向撑破抽屉。 */
-  overflow-wrap: anywhere;
-}
-
-.history-winners {
-  display: grid;
-  gap: 2px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
   font-size: 0.8rem;
 }
 
-.history-winners li {
+/* ═══════════════ 手牌历史战报卡片系统 ═══════════════ */
+.history-pane {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 65vh;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.history-empty {
+  padding: 40px 16px;
+  text-align: center;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.history-empty-icon {
+  font-size: 2.2rem;
+  opacity: 0.4;
+}
+
+.history-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  background: #141c28;
+  border: 1px solid #253346;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.history-card.is-hero-won {
+  border-color: rgba(212, 177, 106, 0.45);
+  background: linear-gradient(180deg, #182333 0%, #131b26 100%);
+  box-shadow: 0 4px 20px rgba(212, 177, 106, 0.12), 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.history-card.is-hero-showdown {
+  border-color: rgba(96, 165, 250, 0.35);
+}
+
+.history-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.history-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
-.winner-name {
+.history-hand-tag {
+  font-size: 0.9rem;
+  font-weight: 800;
+  color: #ffd875;
+  background: rgba(255, 216, 117, 0.12);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 216, 117, 0.25);
+}
+
+.history-result-badge {
+  font-size: 0.76rem;
   font-weight: 600;
-  /* 长昵称截断，避免把金额挤出可视区。 */
-  max-width: 40%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
-.winner-name.is-hero {
-  color: var(--gold);
+.badge-win {
+  background: linear-gradient(135deg, rgba(212, 177, 106, 0.3), rgba(180, 138, 56, 0.4));
+  color: #ffd875;
+  border: 1px solid rgba(212, 177, 106, 0.5);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 
-.winner-amount {
-  color: var(--positive);
+.badge-showdown {
+  background: rgba(59, 130, 246, 0.15);
+  color: #93c5fd;
+  border: 1px solid rgba(59, 130, 246, 0.3);
 }
 
-.winner-hand,
-.winner-pot {
-  font-size: 0.74rem;
-  color: var(--muted);
+.badge-neutral {
+  background: rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+  border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
-/* ───────────── 聊天 ───────────── */
-
-.drawer-body--chat {
-  display: flex;
-  flex-direction: column;
-  /* 抽屉高度内部分配：消息列表滚动，输入区固定在底部。 */
-  flex: 1;
-  gap: 6px;
-  min-height: 0;
+.badge-fold {
+  background: rgba(148, 163, 184, 0.1);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.2);
 }
 
-.chat-list {
-  flex: 1;
-  min-height: 120px;
-  max-height: 60vh;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding-right: 4px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-}
-
-.chat-msgs {
-  display: grid;
-  /* 组内贴紧、组间留白：间距本身承担「这是一组」的表达，不需要额外装饰。 */
-  gap: 2px;
-  margin: 0;
-  padding: var(--space-1);
-  list-style: none;
-}
-
-.chat-msg {
-  display: grid;
-  gap: 2px;
-  max-width: 88%;
-  padding: 6px 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-}
-
-/* 同一个人连续发言：组首与上一条拉开距离，组内后续消息紧贴组首。 */
-.chat-msg:not(.is-continuation) {
-  margin-top: 6px;
-}
-
-.chat-msg:first-child {
-  margin-top: 0;
-}
-
-/* 自己的消息：靠右 + 「你」标记 + 左侧描边，不只靠颜色区分。 */
-.chat-msg.is-own {
-  justify-self: end;
-  border-color: var(--gold-soft);
-  border-left-width: 3px;
-  text-align: right;
-}
-
-.chat-meta {
-  display: flex;
+.history-header-right {
+  display: inline-flex;
   align-items: baseline;
   gap: 6px;
-  margin: 0;
-  font-size: 0.72rem;
+}
+
+.history-pot-label {
+  font-size: 0.75rem;
   color: var(--muted);
 }
 
-.chat-msg.is-own .chat-meta {
-  flex-direction: row-reverse;
+.history-pot-value {
+  font-size: 0.95rem;
+  color: #ffd875;
+  font-weight: 700;
 }
 
-.chat-who {
+.history-board-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.history-section-title {
+  font-size: 0.76rem;
   font-weight: 600;
-  color: var(--text);
-  max-width: 55%;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: #94a3b8;
   white-space: nowrap;
 }
 
-.chat-msg.is-own .chat-who {
-  color: var(--gold);
+.history-cards-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
 }
 
-.chat-text {
-  margin: 0;
-  font-size: 0.84rem;
-  line-height: 1.45;
-  /* 长文本与长英文串在气泡内换行，不撑破抽屉。 */
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
+.history-empty-board {
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-style: italic;
 }
 
-.chat-empty {
-  padding: var(--space-1);
+.history-showdown-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
 }
 
-.chat-jump {
-  justify-self: start;
+.history-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
-.chat-form {
+.history-revealed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.history-revealed-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-sm);
+  transition: background 0.15s ease;
+}
+
+.history-revealed-row.is-winner {
+  background: rgba(212, 177, 106, 0.08);
+  border-color: rgba(212, 177, 106, 0.35);
+}
+
+.history-revealed-row.is-hero {
+  border-left: 3px solid #60a5fa;
+}
+
+.history-revealed-row.is-hero.is-winner {
+  border-left: 3px solid #ffd875;
+}
+
+.revealed-player-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.revealed-player-name-row {
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
-.chat-input {
-  flex: 1;
-  min-width: 0;
+.revealed-crown {
+  font-size: 0.85rem;
 }
 
-.chat-counter {
+.revealed-nickname {
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.revealed-nickname.hero-name {
+  color: #60a5fa;
+}
+
+.history-revealed-row.is-winner .revealed-nickname {
+  color: #ffd875;
+}
+
+.revealed-win-num {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #34d399;
+}
+
+.revealed-hand-badge {
+  font-size: 0.74rem;
+  color: #94a3b8;
+  display: inline-flex;
+}
+
+.revealed-hand-badge.badge-winner {
+  color: #ffd875;
+  font-weight: 600;
+}
+
+.revealed-cards-box {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.revealed-card {
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+
+.revealed-card.winner-card {
+  box-shadow: 0 0 8px rgba(212, 177, 106, 0.4);
+}
+
+.history-uncontested-section {
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: var(--radius-sm);
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+}
+
+.history-uncontested-winner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  flex-wrap: wrap;
+}
+
+.uncontested-crown {
+  font-size: 0.9rem;
+}
+
+.uncontested-name {
+  font-weight: 600;
+  color: #ffd875;
+}
+
+.uncontested-name.hero-name {
+  color: #60a5fa;
+}
+
+.uncontested-text {
+  color: var(--muted);
+}
+
+.uncontested-amount {
+  color: #34d399;
+  font-weight: 700;
+}
+
+.uncontested-note {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+/* ═══════════════ 桌面左上角 HUD 快捷聊天 ═══════════════ */
+.hud-chat {
+  position: absolute;
+  top: 14px;
+  left: 18px;
+  z-index: 22;
+  width: clamp(230px, 20vw, 300px);
+  max-width: calc(100% - 36px);
+  display: flex;
+  flex-direction: column;
+  background: rgba(10, 16, 26, 0.42);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+  pointer-events: auto;
+  transition: 
+    width 0.34s cubic-bezier(0.16, 1, 0.3, 1),
+    min-width 0.34s cubic-bezier(0.16, 1, 0.3, 1),
+    border-radius 0.34s cubic-bezier(0.16, 1, 0.3, 1),
+    background 0.25s ease,
+    border-color 0.25s ease,
+    box-shadow 0.25s ease,
+    transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: width, transform;
+}
+
+.hud-chat:hover,
+.hud-chat:focus-within {
+  background: rgba(10, 16, 26, 0.76);
+  border-color: rgba(212, 177, 106, 0.35);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+}
+
+.hud-chat.is-collapsed {
+  width: 96px;
+  min-width: 96px;
+  background: rgba(10, 16, 26, 0.55);
+}
+
+/* 历史展开时：聊天按钮平滑缩小，只展示图标 */
+.hud-chat.is-icon-only.is-collapsed {
+  width: 36px !important;
+  min-width: 36px !important;
+  border-radius: var(--radius-sm) !important;
+  background: rgba(10, 16, 26, 0.65) !important;
+  cursor: pointer;
+}
+
+.hud-chat.is-icon-only.is-collapsed:hover {
+  background: rgba(15, 23, 42, 0.9) !important;
+  border-color: rgba(96, 165, 250, 0.6) !important;
+  transform: scale(1.08);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5), 0 0 10px rgba(96, 165, 250, 0.3) !important;
+}
+
+.hud-chat.is-icon-only.is-collapsed:active {
+  transform: scale(0.96);
+}
+
+.hud-chat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  min-height: 36px;
+  box-sizing: border-box;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  user-select: none;
+  transition: padding 0.34s cubic-bezier(0.16, 1, 0.3, 1), border-bottom-color 0.25s ease;
+}
+
+.hud-chat.is-collapsed .hud-chat-header {
+  border-bottom-color: transparent;
+}
+
+.hud-chat.is-icon-only.is-collapsed .hud-chat-header {
+  padding: 0 !important;
+  width: 100% !important;
+  height: 34px !important;
+  justify-content: center !important;
+}
+
+.hud-chat-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #e2e8f0;
+  position: relative;
+  transition: gap 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.hud-chat.is-icon-only.is-collapsed .hud-chat-title {
+  gap: 0;
+  justify-content: center;
+}
+
+.hud-chat-title i {
+  color: #60a5fa;
+  font-size: 0.86rem;
+  transition: transform 0.34s cubic-bezier(0.16, 1, 0.3, 1), font-size 0.34s cubic-bezier(0.16, 1, 0.3, 1), color 0.2s ease;
+}
+
+.hud-chat.is-icon-only.is-collapsed .hud-chat-title i {
+  font-size: 1.1rem;
+  transform: scale(1.08);
+}
+
+.hud-chat-label {
+  display: inline-block;
+  white-space: nowrap;
+  max-width: 50px;
+  opacity: 1;
+  transform: scale(1);
+  transform-origin: left center;
+  transition: 
+    max-width 0.34s cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 0.22s ease,
+    transform 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.hud-chat.is-icon-only.is-collapsed .hud-chat-label {
+  max-width: 0 !important;
+  opacity: 0 !important;
+  margin: 0 !important;
+  transform: scale(0.6) !important;
+  pointer-events: none !important;
+  overflow: hidden !important;
+}
+
+.hud-chat-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.72rem;
+  display: inline-flex;
+  align-items: center;
+  max-width: 30px;
+  opacity: 1;
+  transform: scale(1);
+  transition: 
+    max-width 0.34s cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 0.2s ease,
+    transform 0.26s cubic-bezier(0.16, 1, 0.3, 1),
+    color 0.15s ease;
+}
+
+.hud-chat.is-icon-only.is-collapsed .hud-chat-toggle-btn {
+  max-width: 0 !important;
+  opacity: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  transform: scale(0.6) !important;
+  pointer-events: none !important;
+  overflow: hidden !important;
+}
+
+.hud-chat-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  transition: all 0.34s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.hud-chat.is-icon-only.is-collapsed .hud-chat-badge {
+  position: absolute !important;
+  top: -8px !important;
+  right: -9px !important;
+  min-width: 14px !important;
+  height: 14px !important;
+  padding: 0 3px !important;
+  font-size: 0.58rem !important;
+  line-height: 1 !important;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.8) !important;
+}
+
+/* 聊天主体顺滑折叠过渡 */
+.hud-slide-enter-active,
+.hud-slide-leave-active {
+  transition: 
+    max-height 0.3s cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 0.22s ease,
+    transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+  overflow: hidden;
+}
+
+.hud-slide-enter-from,
+.hud-slide-leave-to {
+  max-height: 0 !important;
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+.hud-slide-enter-to,
+.hud-slide-leave-from {
+  max-height: 240px;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+
+.hud-chat-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.hud-chat-list {
+  height: 140px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.hud-chat-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 0.76rem;
+}
+
+.hud-chat-item {
+  word-break: break-word;
+  color: #f1f5f9;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+}
+
+.hud-msg-sender {
+  color: #93c5fd;
+  font-weight: 600;
+  margin-right: 4px;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.hud-msg-sender:hover {
+  color: #bfdbfe;
+  text-decoration: underline;
+}
+
+.hud-chat-item.is-own .hud-msg-sender {
+  color: #fbbf24;
+}
+
+.hud-msg-text {
+  color: #f8fafc;
+}
+
+.hud-chat-item.is-mention {
+  background: rgba(251, 191, 36, 0.14);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+.hud-msg-system {
+  color: #94a3b8;
+  font-size: 0.76rem;
+  font-style: italic;
+  opacity: 0.9;
+}
+
+.hud-chat-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.hud-chat-input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.05);
+  color: #f8fafc;
+  font-size: 0.8rem;
+  outline: none;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.hud-chat-input::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.hud-chat-input:focus {
+  background: rgba(10, 16, 26, 0.65);
+  border-color: rgba(212, 177, 106, 0.6);
+  box-shadow: 0 0 6px rgba(212, 177, 106, 0.2);
+}
+
+.hud-chat-send {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(212, 177, 106, 0.3);
+  background: linear-gradient(135deg, rgba(212, 177, 106, 0.25), rgba(184, 142, 60, 0.35));
+  color: #ffd875;
+  cursor: pointer;
+  font-size: 0.78rem;
+  transition: transform 0.15s ease, opacity 0.15s ease, background 0.15s ease;
+}
+
+.hud-chat-send:hover:not(:disabled) {
+  transform: scale(1.05);
+  background: linear-gradient(135deg, rgba(212, 177, 106, 0.4), rgba(184, 142, 60, 0.5));
+  color: #fff;
+}
+
+.hud-chat-send:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.hud-chat-error {
   margin: 0;
+  padding: 2px 8px 4px;
+  color: #f87171;
   font-size: 0.72rem;
 }
 
-.chat-error {
+@media (max-width: 768px) {
+  .hud-chat {
+    top: 8px;
+    left: 8px;
+    width: clamp(190px, 45vw, 240px);
+  }
+  .hud-chat.is-collapsed {
+    width: auto;
+    min-width: 76px;
+  }
+  .hud-chat.is-icon-only.is-collapsed {
+    width: 32px !important;
+    min-width: 32px !important;
+    height: 32px !important;
+  }
+  .hud-chat-list {
+    height: 110px;
+  }
+  .hud-history {
+    top: 8px;
+    right: 8px;
+    width: min(350px, calc(100vw - 52px));
+    z-index: 23;
+  }
+  .hud-history.is-collapsed {
+    width: auto;
+    min-width: 86px;
+    z-index: 22;
+  }
+  .hud-history-list {
+    max-height: clamp(200px, 46vh, 340px);
+    padding: 6px 8px;
+    gap: 8px;
+  }
+  .hud-history .history-card {
+    padding: 8px 10px;
+    gap: 8px;
+  }
+  .hud-history .history-card-header {
+    padding-bottom: 6px;
+  }
+  .hud-history .history-board-row {
+    padding: 4px 8px;
+    gap: 8px;
+  }
+  .hud-history .history-revealed-row {
+    padding: 6px 8px;
+  }
+}
+
+/* ═══════════════ 弹窗与确认框 ═══════════════ */
+.buyin {
+  display: grid;
+  gap: 12px;
+}
+
+.buyin-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
   margin: 0;
-  color: var(--danger);
+  font-size: 0.95rem;
+}
+
+.buyin-line .num {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #ffd875;
+}
+
+.buyin-quick {
+  display: flex;
+  gap: 8px;
+}
+
+.buyin-quick :deep(.p-button) {
+  flex: 1;
+}
+
+.kick-list {
+  list-style: none;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  max-height: min(50vh, 320px);
+  overflow-y: auto;
+}
+
+.kick-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1);
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #1a232f;
+  border: 1px solid #283749;
+}
+
+.kick-who {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.kick-who b {
+  overflow-wrap: anywhere;
+}
+
+.kick-who .muted,
+.kick-self {
   font-size: 0.78rem;
 }
 
-/*
- * 手机横屏（第 1 项需求：手机版不支持横屏）：
- * 不渲染牌桌与底部操作区，只留一条「请竖屏使用」的提示。
- * 判定用 `orientation: landscape` + `max-height: 560px`：手机横屏最高约 430px，平板约 768px 不受影响。
- */
+.kick-confirm {
+  min-width: 0;
+  font-size: 0.86rem;
+  color: var(--danger);
+}
+
+.kick-actions {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+/* ═══════════════ 响应式屏幕适配 ═══════════════ */
+/* 手机横屏屏蔽 */
 .portrait-only {
   display: none;
 }
@@ -2412,53 +3741,67 @@ onBeforeUnmount(() => onFatalRoomError(null))
   line-height: 1.6;
 }
 
-/* 竖屏窄屏：牌桌与操作区保持可用（提示条只是说明，不影响操作）。 */
+/* 竖屏窄屏（≤768px 或 ≤560px）：座舱由左右变为自然纵向流 */
+@media (max-width: 768px) {
+  .hero-cockpit {
+    flex-direction: column;
+    gap: 10px;
+    padding: 8px 12px;
+  }
+
+  .cockpit-divider {
+    display: none;
+  }
+
+  .cockpit-wing--hero {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .cockpit-badge-row {
+    flex-direction: row;
+    gap: 8px;
+  }
+
+  .hero-seat-actions {
+    margin-left: auto;
+  }
+}
+
 @media (orientation: portrait) and (max-width: 560px) {
-  /* 竖屏高度按 8px 一档抠：通知槽位 32 → 26px，仍放得下一条 24–26px 的通知。 */
   .notice-slot {
     height: 26px;
   }
 
-  .hero-cards {
+  .hero {
+    padding: 4px 6px 8px;
+  }
+
+  .hero-cockpit {
+    padding: 6px 10px;
     gap: 6px;
   }
 
-  /*
-   * 竖屏高度预算（390×844 实测，改版前底部区要 432px、整页溢出 75px）：
-   *   顶栏 105 + 引导 32 + 桌面阶段 326 + 底部约 350 = 813，余 31px → 不再纵向滚动。
-   * 竖屏压缩四处（组件内部样式各自归组件管）：
-   *   1) 本人底牌 58 → 42px（每张牌高 1.4 倍牌宽，是底部区最占高度的一块）；
-   *   2) 「离座 / 退出房间」收成纯图标：这两个入口顶栏也有，竖屏让出 44px 一行；
-   *   3) 动作按钮内边距与快捷额度高度在 ActionBar.vue 的竖屏规则里收一档；
-   *   4) 底部区内边距 16 → 8px。触控目标仍全部 ≥40px。
-   */
-  .hero-cards :deep(.card--lg) {
-    --cw: 42px;
+  .hero-cockpit :deep(.card--lg) {
+    --cw: 44px;
   }
 
-  .hero-cards .hero-seat-actions {
-    gap: 0;
+  .fan-card--1 {
+    transform: rotate(4.5deg) translateX(-12px) translateY(-1px);
   }
 
-  .hero-cards .hero-seat-actions :deep(.p-button) {
-    min-width: 40px;
-    padding-inline: 8px;
+  .hero-seat-actions :deep(.sub-action-btn) {
+    padding: 3px 7px !important;
+    font-size: 0.74rem !important;
   }
 
-  /* 按钮文字在竖屏隐藏：离座与退出收成图标，开始对局按钮保留完整文字识别 */
-  .hero-cards .hero-seat-actions :deep(.p-button:not(.hero-start-btn) .p-button-label),
-  .hero-cards .hero-seat-actions :deep(.p-button:not(.hero-start-btn) > span:not([class])) {
-    display: none;
-  }
-
-  /* 顶栏收成图标按钮，避免换行占掉牌桌高度。 */
   .bar {
-    gap: var(--space-1);
-    padding: 4px var(--space-1);
+    gap: 6px;
+    padding: 4px 8px;
   }
 
   .bar-title {
-    font-size: 0.94rem;
+    font-size: 0.92rem;
   }
 
   .stat--stage,
@@ -2466,62 +3809,37 @@ onBeforeUnmount(() => onFatalRoomError(null))
     display: none;
   }
 
-  .bar :deep(.p-button) {
-    min-width: 36px;
-    padding-inline: 7px;
-  }
-
-  .bar-btn-text,
-  .bar :deep(.p-button-label),
-  .bar :deep(.p-button > span:not([class])) {
+  .bar-btn-text {
     display: none;
   }
 
-  .bar-right {
-    gap: 4px;
+  .bar-btn {
+    padding: 4px 8px;
+    min-width: 34px;
   }
 
-  /* 手数角标窄屏省略（按钮 aria-label 仍带手数）；未读角标始终保留。 */
   .count-chip--history {
     display: none;
-  }
-
-  .spectator {
-    padding: var(--space-1);
   }
 
   .chat-list {
     max-height: none;
   }
+}
 
-  .hero-label {
+@media (max-width: 820px) {
+  .bar .stat--stage,
+  .bar .link-state {
     display: none;
   }
 
-  .hero {
-    /* 竖屏按 2px 一档抠：行间距 6 → 4px、底部内边距 16 → 8px。 */
-    gap: 4px;
-    padding: 4px var(--space-1) var(--space-1);
-  }
-
-  .hero-hand {
-    padding: 2px 6px;
-    font-size: 0.76rem;
-  }
-
-  .hero-stack {
-    padding: 2px 6px;
-    font-size: 0.76rem;
-  }
-
-  /* 动作按钮在竖屏收一档内边距：四个按钮合计省 32px（10 → 6px/边）。 */
-  .hero-actions :deep(.p-button) {
-    padding-block: 6px;
-    font-size: 0.86rem;
+  .bar-title {
+    max-width: 28vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
-
-/* 横屏手机：压缩顶栏与底部区域，把高度让给牌桌。 */
 
 @media (max-height: 380px) {
   .stat--hand {
@@ -2536,159 +3854,4 @@ onBeforeUnmount(() => onFatalRoomError(null))
     padding-bottom: 0;
   }
 }
-/*
- * 顶栏右侧重构后稳定收敛为 4 个按钮（历史、聊天、邀请、更多），
- * 无论宽屏还是窄屏均常驻一行，不再发生多余折行。
- */
-.bar-more {
-  display: inline-flex;
-}
-/*
- * 更窄（≤820px）：连收纳后的顶栏也放不下，隐藏「阶段」与连接状态文案
- * （阶段在牌桌中央已有显示；连接异常时 ConnectionBanner 会明确提示），
- * 并限制房间名宽度，保证盲注、手数、更多、开始下一手、退出都在一行内。
- */
-@media (max-width: 820px) {
-  .bar .stat--stage,
-  .bar .link-state {
-    display: none;
-  }
-
-  .bar-title {
-    max-width: 26vw;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-}
-
-/* 移除玩家：一行一人，昵称与座位号在左、按钮在右；长昵称换行而不是把按钮挤出弹窗。 */
-.kick-list {
-  list-style: none;
-  margin: var(--space-1) 0 0;
-  padding: 0;
-  display: grid;
-  gap: 6px;
-  max-height: min(50vh, 320px);
-  overflow-y: auto;
-}
-
-.kick-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-1);
-  padding: 6px 8px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bg) 45%, transparent);
-}
-
-.kick-who {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.kick-who b {
-  overflow-wrap: anywhere;
-}
-
-.kick-who .muted,
-.kick-self {
-  font-size: 0.78rem;
-}
-
-.kick-row :deep(.p-button) {
-  flex: none;
-}
-
-/* 就地二次确认：文案换行、按钮不换行，行高不跳变。 */
-.kick-confirm {
-  min-width: 0;
-  font-size: 0.86rem;
-  color: var(--danger);
-}
-
-.kick-actions {
-  display: flex;
-  flex: none;
-  gap: 4px;
-}
-
-/* 聊天分组：日期 / 时间间隔 / 未读分隔线。 */
-.chat-day,
-.chat-gap,
-.chat-unread {
-  list-style: none;
-  text-align: center;
-  font-size: 0.72rem;
-  color: var(--muted);
-  margin: 6px 0 2px;
-}
-
-.chat-day span,
-.chat-gap span {
-  display: inline-block;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--bg) 55%, transparent);
-}
-
-.chat-unread {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  color: var(--gold);
-}
-
-.chat-unread::before,
-.chat-unread::after {
-  content: '';
-  flex: 1;
-  height: 1px;
-  background: currentColor;
-  opacity: 0.45;
-}
-
-/* 聊天搜索与 @ 提醒。 */
-.chat-search {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-
-.chat-search-input {
-  flex: 1;
-  min-width: 0;
-}
-
-.chat-mention-tag {
-  padding: 0 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--gold) 26%, transparent);
-  color: var(--gold);
-  font-size: 0.68rem;
-}
-
-.chat-msg.is-mention {
-  border-inline-start: 3px solid var(--gold);
-  background: color-mix(in srgb, var(--gold) 10%, transparent);
-  border-radius: var(--radius-sm);
-  padding-inline: 6px;
-}
-
-/* 房间事件（系统消息）：居中细线，与玩家发言区分开。 */
-.chat-system {
-  list-style: none;
-  display: flex;
-  align-items: baseline;
-  justify-content: center;
-  gap: 6px;
-  margin: 4px 0;
-  font-size: 0.72rem;
-  color: var(--muted);
-  text-align: center;
-}
-
 </style>

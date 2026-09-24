@@ -205,7 +205,15 @@ export class HoldemTable {
       if (existing.seat !== seat) {
         throw new EngineError('bad_state', '你已经有一个保留的座位，先退出房间才能换座')
       }
-      if (!existing.away) throw new EngineError('bad_state', '你已经入座')
+      if (!existing.away) {
+        if (existing.stack !== 0 || this.isHandRunning()) throw new EngineError('bad_state', '你已经入座')
+        existing.stack = stack
+        existing.inHand = false
+        existing.folded = false
+        existing.allIn = false
+        existing.lastAction = null
+        return
+      }
       existing.away = false
       existing.pendingRemoval = false
       if (existing.stack <= 0 && !this.isHandRunning()) existing.stack = stack
@@ -406,12 +414,13 @@ export class HoldemTable {
       (lastBet !== undefined && this.currentBet - lastBet >= this.minRaise)
     if (mayRaise && maxTarget > this.currentBet) {
       const minTarget = this.currentBet === 0 ? this.config.bigBlind : this.currentBet + this.minRaise
-      const bounded = Math.min(minTarget, maxTarget)
-      actions.push(
-        this.currentBet === 0
-          ? { action: 'bet', min: bounded, max: maxTarget }
-          : { action: 'raise', min: bounded, max: maxTarget },
-      )
+      if (maxTarget >= minTarget) {
+        actions.push(
+          this.currentBet === 0
+            ? { action: 'bet', min: minTarget, max: maxTarget }
+            : { action: 'raise', min: minTarget, max: maxTarget },
+        )
+      }
     }
 
     if (seat.stack > 0 && (maxTarget <= this.currentBet || mayRaise)) {
