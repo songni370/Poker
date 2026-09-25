@@ -422,3 +422,53 @@ test('重启后按持久化的截止时间判定超时：已过期则立即执�
     '超时动作必须是自动过牌或自动弃牌',
   )
 })
+
+test('重启后自动下一手沿用快照里的截止时间，不重新计满间隔', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'poker-next-hand-recovery-'))
+  const dbPath = join(dir, 'poker.sqlite')
+  let server: ServerHandle | null = await startServer(dbPath)
+  t.after(async () => { if (server) await server.stop(); rmSync(dir, { recursive: true, force: true }) })
+
+  const host = await postJson<RoomCredentials>(`${server.base}/api/rooms`, {
+    nickname: '甲', nextHandSeconds: 120, turnSeconds: 9,
+  })
+  const guest = await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '乙' })
+  const a = new TestClient(server.wsUrl)
+  const b = new TestClient(server.wsUrl)
+  await Promise.all([a.open(), b.open()])
+  a.send(joinCommand(host))
+  await a.waitFor((message) => message.type === 'room.snapshot')
+  b.send(joinCommand(guest))
+  await b.waitFor((message) => message.type === 'room.snapshot')
+  await takeSeat(a, 0)
+  await takeSeat(b, 1)
+  a.send({ type: 'game.start', requestId: rid() })
+  const started = await a.waitFor((message) => message.type === 'hand.started')
+  assert.ok(started.type === 'hand.started')
+  a.send({ type: 'game.action', requestId: rid(), handId: started.state.handId!,
+    expectedVersion: started.state.version, action: 'fold' })
+  const settled = await a.waitFor((message) => message.type === 'hand.settled')
+  assert.ok(settled.type === 'hand.settled')
+  assert.ok(settled.state.nextHandDeadlineAt)
+  a.close()
+  b.close()
+  await server.stop()
+  server = null
+
+  const handle = openDatabase(dbPath)
+  const row = handle.db.prepare('SELECT state_json FROM room_snapshots WHERE room_id = ?').get(host.roomId) as
+    { state_json: string }
+  const snapshot = JSON.parse(row.state_json) as { nextHandDeadlineAt: number }
+  snapshot.nextHandDeadlineAt = Date.now() - 1000
+  handle.db.prepare('UPDATE room_snapshots SET state_json = ? WHERE room_id = ?')
+    .run(JSON.stringify(snapshot), host.roomId)
+  handle.close()
+
+  server = await startServer(dbPath)
+  const restored = server.rooms.get(host.roomId)
+  assert.ok(restored)
+  await delay(100)
+  assert.equal(restored.table.publicState().handNo, 2)
+  assert.equal(restored.turnSeconds, 9)
+  assert.equal(restored.nextHandDeadlineAt, null)
+})

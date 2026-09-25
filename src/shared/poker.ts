@@ -124,6 +124,11 @@ export const TABLE_RULES = {
   /** 保证 10 个大盲的最低买入仍可落在买入上限内。 */
   maxBigBlind: 1000,
   turnSeconds: 20,
+  minTurnSeconds: 5,
+  maxTurnSeconds: 120,
+  /** 0 保持房主手动开下一手；正数表示结算后的自动开局间隔。 */
+  nextHandSeconds: 0,
+  maxNextHandSeconds: 120,
   /** 房主可选买入区间的允许范围；步进等于小盲。 */
   minBuyInFloor: 200,
   maxBuyInLimit: 20000,

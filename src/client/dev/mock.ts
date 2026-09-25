@@ -140,6 +140,8 @@ function buildState(init: StateInit): GameStatePublic {
     buyInStep: TABLE_RULES.smallBlind,
     maxSeats: init.maxSeats,
     turnSeconds: TABLE_RULES.turnSeconds,
+    nextHandSeconds: TABLE_RULES.nextHandSeconds,
+    nextHandDeadlineAt: null,
     seats: init.seats,
     buttonSeat: init.buttonSeat,
     actingPlayerId: actingSeat === null ? null : (init.seats[actingSeat]?.playerId ?? null),
@@ -896,4 +898,6 @@ export const MOCK_ROOM_INFO: RoomInfoResponse = {
   smallBlind: TABLE_RULES.smallBlind,
   bigBlind: TABLE_RULES.bigBlind,
   startingStack: TABLE_RULES.startingStack,
+  turnSeconds: TABLE_RULES.turnSeconds,
+  nextHandSeconds: TABLE_RULES.nextHandSeconds,
 }

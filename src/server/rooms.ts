@@ -107,6 +107,8 @@ export interface RoomSnapshot {
   /** 房主设定的初始筹码 = 上桌最低买入（老快照没有该字段时回落到 2000 与买入上限的较小值）。 */
   minBuyIn: number
   turnSeconds: number
+  nextHandSeconds?: number
+  nextHandDeadlineAt?: number | null
   status: RoomStatus
   version: number
   turnDeadlineAt: number | null
@@ -133,6 +135,7 @@ interface RoomInit {
   bigBlind: number
   startingStack: number
   turnSeconds: number
+  nextHandSeconds?: number
   buyInMax?: number
   minBuyIn?: number
 }
@@ -151,6 +154,7 @@ export class RoomRuntime {
   /** 上桌最低买入（房主设定的初始筹码）。 */
   readonly minBuyIn: number
   readonly turnSeconds: number
+  readonly nextHandSeconds: number
   /** 房主自定义的买入上限；买入下限 = 10 个大盲，步进 = 小盲。 */
   readonly buyInMax: number
   table: HoldemTable
@@ -173,6 +177,8 @@ export class RoomRuntime {
   version = 0
   turnDeadlineAt: number | null = null
   turnTimer: NodeJS.Timeout | null = null
+  nextHandDeadlineAt: number | null = null
+  nextHandTimer: NodeJS.Timeout | null = null
   /** 已写入 SQLite 的手牌号，保证结算记录幂等。 */
   persistedHandId: string | null = null
   /** 最近聊天（内存环形缓冲，不落库、不记录历史聊天内容）。 */
@@ -200,6 +206,7 @@ export class RoomRuntime {
     this.bigBlind = init.bigBlind
     this.startingStack = init.startingStack
     this.turnSeconds = init.turnSeconds
+    this.nextHandSeconds = init.nextHandSeconds ?? TABLE_RULES.nextHandSeconds
     this.buyInMax = init.buyInMax ?? init.startingStack
     /*
      * 初始筹码（上桌最低买入）：
@@ -231,6 +238,8 @@ export class RoomRuntime {
       buyInMax: this.buyInMax,
       minBuyIn: this.minBuyIn,
       turnSeconds: this.turnSeconds,
+      nextHandSeconds: this.nextHandSeconds,
+      nextHandDeadlineAt: this.nextHandDeadlineAt,
       status: this.status,
       version: this.version,
       turnDeadlineAt: this.turnDeadlineAt,
@@ -266,6 +275,7 @@ export class RoomRuntime {
       buyInMax: snapshot.buyInMax ?? snapshot.startingStack,
       minBuyIn: snapshot.minBuyIn ?? TABLE_RULES.startingStack,
       turnSeconds: snapshot.turnSeconds,
+      nextHandSeconds: snapshot.nextHandSeconds ?? TABLE_RULES.nextHandSeconds,
     })
     for (const entry of snapshot.members) {
       room.members.set(entry.playerId, {
@@ -284,6 +294,7 @@ export class RoomRuntime {
     room.status = snapshot.status === 'closed' ? 'waiting' : snapshot.status
     room.version = snapshot.version
     room.turnDeadlineAt = snapshot.turnDeadlineAt
+    room.nextHandDeadlineAt = snapshot.nextHandDeadlineAt ?? null
     room.persistedHandId = snapshot.persistedHandId
     room.table = HoldemTable.restore(snapshot.table)
     return room
@@ -410,6 +421,7 @@ export class RoomManager {
         restored += 1
         // 恢复后立刻按持久化的截止时间接管计时（过期则立即执行一次超时动作）。
         this.scheduleTurn(room, true)
+        this.scheduleNextHand(room, true)
       } catch (error) {
         discarded += 1
         this.logger.warn(`房间 ${row.room_id} 的快照已损坏，已安全关闭该房间`, {
@@ -443,6 +455,8 @@ export class RoomManager {
     buyInMax?: number
     smallBlind?: number
     bigBlind?: number
+    turnSeconds?: number
+    nextHandSeconds?: number
   }): RoomCredentials {
     if (this.rooms.size >= this.maxRooms) {
       throw new CommandError(
@@ -457,6 +471,12 @@ export class RoomManager {
       smallBlind < 1 || bigBlind <= smallBlind || bigBlind > TABLE_RULES.maxBigBlind
     ) {
       throw new CommandError('bad_request', `盲注须为正整数，且小盲低于大盲（大盲最多 ${TABLE_RULES.maxBigBlind}）`)
+    }
+    const turnSeconds = input.turnSeconds ?? TABLE_RULES.turnSeconds
+    const nextHandSeconds = input.nextHandSeconds ?? TABLE_RULES.nextHandSeconds
+    if (!Number.isSafeInteger(turnSeconds) || turnSeconds < TABLE_RULES.minTurnSeconds || turnSeconds > TABLE_RULES.maxTurnSeconds ||
+      !Number.isSafeInteger(nextHandSeconds) || nextHandSeconds < 0 || nextHandSeconds > TABLE_RULES.maxNextHandSeconds) {
+      throw new CommandError('bad_request', '行动时间或下一手间隔超出允许范围')
     }
     const buyInFloor = Math.max(TABLE_RULES.minBuyInFloor, 10 * bigBlind)
     const firstValidBuyIn = Math.ceil(buyInFloor / smallBlind) * smallBlind
@@ -488,7 +508,8 @@ export class RoomManager {
       buyInMax: normalizedMax,
       // 房主输入的下限向上、上限向下对齐小盲，实际买入不会越过其设定的范围。
       minBuyIn: normalizedMin,
-      turnSeconds: TABLE_RULES.turnSeconds,
+      turnSeconds,
+      nextHandSeconds,
     })
 
     // 主持人不自动入座：建房后直接进牌桌，自己选座位并确认买入（与加入者一致）。
@@ -517,6 +538,7 @@ export class RoomManager {
         minBuyIn: room.minBuyIn,
         maxSeats: room.maxSeats,
         turnSeconds: room.turnSeconds,
+        nextHandSeconds: room.nextHandSeconds,
       })
       this.repo.upsertPlayer(this.playerRecord(room, member))
       // 建房即落一份快照：否则「建了房但还没发过命令」的房间重启后无快照可恢复，只能被关闭。
@@ -629,6 +651,7 @@ export class RoomManager {
   closeAll(): void {
     for (const room of this.rooms.values()) {
       if (room.turnTimer) clearTimeout(room.turnTimer)
+      if (room.nextHandTimer) clearTimeout(room.nextHandTimer)
       room.clearRevealTimers()
       for (const member of room.members.values()) member.socket?.close(1001, 'server shutting down')
     }
@@ -685,6 +708,7 @@ export class RoomManager {
       const abandoned = connected === 0 && idleFor >= idleMs
       if (!empty && !nobodySeatedAndGone && !abandoned) continue
       if (room.turnTimer) clearTimeout(room.turnTimer)
+      if (room.nextHandTimer) clearTimeout(room.nextHandTimer)
       room.clearRevealTimers()
       for (const timer of room.seatReleaseTimers.values()) clearTimeout(timer)
       room.seatReleaseTimers.clear()
@@ -896,6 +920,7 @@ export class RoomManager {
             throw new CommandError('illegal_action', '至少需要 2 名已入座且有筹码的玩家')
           }
           if (room.table.suggestButtonSeat() === undefined) throw new CommandError('illegal_action', '无法确定庄位')
+          this.clearNextHand(room)
           room.table.startHand({
             handId: randomUUID(),
             rng: cryptoRng(),
@@ -962,6 +987,9 @@ export class RoomManager {
       // 这样快照里的 version / turnDeadlineAt 与随后广播的状态完全一致。
       this.bumpVersion(room)
       this.scheduleTurn(room)
+      if (result && revealSteps.length === 0) this.scheduleNextHand(room)
+      if (command.type === 'seat.take' && room.nextHandDeadlineAt === null && !room.pendingSettlement &&
+        room.table.publicState().phase === 'settlement' && room.table.canStartHand()) this.scheduleNextHand(room)
       this.repo.transaction(() => {
         this.repo.saveReceipt(command.requestId, room.id, playerId, command.type, '{"ok":true}')
         this.writeState(room)
@@ -1080,6 +1108,8 @@ export class RoomManager {
           // 结算事件与它的日志同时在最后一步发出：亮牌过程里不会提前说「已结算」。
           if (logNoticeToChat && notice) this.publishSystemChat(room, notice)
           this.bumpVersion(room)
+          this.scheduleNextHand(room)
+          this.persist(room)
           this.publish(room, 'hand.settled', { notice, result })
         })
       },
@@ -1160,6 +1190,36 @@ export class RoomManager {
 
   /* ───────────────────────── 超时 ───────────────────────── */
 
+  private clearNextHand(room: RoomRuntime): void {
+    if (room.nextHandTimer) clearTimeout(room.nextHandTimer)
+    room.nextHandTimer = null
+    room.nextHandDeadlineAt = null
+  }
+
+  /** 结算后自动开下一手；重启时沿用已保存的截止时间。0 秒表示手动开局。 */
+  private scheduleNextHand(room: RoomRuntime, keepPersistedDeadline = false): void {
+    const savedDeadline = room.nextHandDeadlineAt
+    this.clearNextHand(room)
+    if (room.nextHandSeconds === 0 || room.table.publicState().phase !== 'settlement') return
+    const now = Date.now()
+    const deadline = keepPersistedDeadline && savedDeadline !== null
+      ? savedDeadline : now + room.nextHandSeconds * 1000
+    room.nextHandDeadlineAt = deadline
+    room.nextHandTimer = setTimeout(() => {
+      void room.run(() => {
+        if (this.rooms.get(room.id) !== room || room.nextHandDeadlineAt !== deadline || room.table.isHandRunning()) return
+        if (!room.table.canStartHand()) {
+          this.clearNextHand(room)
+          this.bumpVersion(room)
+          this.persist(room)
+          this.publish(room, 'hand.state_changed')
+          return
+        }
+        this.execute(room, room.hostPlayerId, { type: 'game.start', requestId: randomUUID() })
+      })
+    }, Math.max(0, deadline - now))
+  }
+
   /**
    * 武装/重置行动计时器。
    * keepPersistedDeadline=true 用于重启恢复：沿用快照里的截止时间，
@@ -1209,8 +1269,9 @@ export class RoomManager {
     this.publishSystemChat(room, notice)
     this.bumpVersion(room)
     this.scheduleTurn(room)
-    this.repo.transaction(() => this.writeState(room))
     const steps = justSettled && settled ? this.revealStepsFor(settled, boardBefore) : []
+    if (justSettled && steps.length === 0) this.scheduleNextHand(room)
+    this.repo.transaction(() => this.writeState(room))
     if (justSettled && settled && steps.length > 0) {
       this.scheduleReveals(room, settled, steps, notice)
     } else {
@@ -1332,6 +1393,8 @@ export class RoomManager {
       buyInStep: room.smallBlind,
       maxSeats: room.maxSeats,
       turnSeconds: room.turnSeconds,
+      nextHandSeconds: room.nextHandSeconds,
+      nextHandDeadlineAt: room.nextHandDeadlineAt,
       seats,
       buttonSeat: table.buttonSeat,
       actingPlayerId: actingSeat === null ? null : (room.memberAtSeat(actingSeat)?.playerId ?? null),

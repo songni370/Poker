@@ -58,6 +58,8 @@ const minBuyIn = ref(TABLE_RULES.startingStack)
 const buyInMax = ref(TABLE_RULES.maxBuyInDefault)
 const smallBlind = ref(TABLE_RULES.smallBlind)
 const bigBlind = ref(TABLE_RULES.bigBlind)
+const turnSeconds = ref(TABLE_RULES.turnSeconds)
+const nextHandSeconds = ref(TABLE_RULES.nextHandSeconds)
 const buyInFloor = computed(() => Math.max(TABLE_RULES.minBuyInFloor, 10 * Number(bigBlind.value)))
 const error = ref('')
 const busy = ref(false)
@@ -80,6 +82,14 @@ function problem(): string | null {
     }
     if (!Number.isInteger(big) || big <= small || big > TABLE_RULES.maxBigBlind) {
       return `大盲需高于小盲，且不超过 ${String(TABLE_RULES.maxBigBlind)}。`
+    }
+    if (!Number.isInteger(turnSeconds.value) || turnSeconds.value < TABLE_RULES.minTurnSeconds ||
+      turnSeconds.value > TABLE_RULES.maxTurnSeconds) {
+      return `每次行动时间需为 ${String(TABLE_RULES.minTurnSeconds)}–${String(TABLE_RULES.maxTurnSeconds)} 秒。`
+    }
+    if (!Number.isInteger(nextHandSeconds.value) || nextHandSeconds.value < 0 ||
+      nextHandSeconds.value > TABLE_RULES.maxNextHandSeconds) {
+      return `下一手间隔需为 0–${String(TABLE_RULES.maxNextHandSeconds)} 秒（0 表示手动开局）。`
     }
     const min = Number(minBuyIn.value)
     const max = Number(buyInMax.value)
@@ -123,6 +133,8 @@ async function createRoom(): Promise<void> {
       buyInMax: Number(buyInMax.value),
       smallBlind: Number(smallBlind.value),
       bigBlind: Number(bigBlind.value),
+      turnSeconds: Number(turnSeconds.value),
+      nextHandSeconds: Number(nextHandSeconds.value),
     })
     room.setCredentials(credentials)
     connectRoom(credentials)
@@ -262,7 +274,7 @@ async function joinRoom(): Promise<void> {
               <span>入桌须知</span>
             </div>
             <ul class="rules-list">
-              <li>每轮行动 {{ TABLE_RULES.turnSeconds }} 秒，超时系统将自动过牌或弃牌。</li>
+              <li>行动时间由房主设定；超时系统将自动过牌或弃牌。</li>
               <li>断线或关闭网页后座位保留，重新进入自动恢复。</li>
               <li>绝不泄露任何玩家未公开的私有底牌，纯随机公正发牌。</li>
             </ul>
@@ -313,6 +325,20 @@ async function joinRoom(): Promise<void> {
                 :step="smallBlind || 1" :use-grouping="false" fluid />
             </label>
           </div>
+
+          <div class="field-grid">
+            <label class="field" for="turn-seconds">
+              <span class="label">玩家思考时间（秒）</span>
+              <InputNumber input-id="turn-seconds" v-model="turnSeconds" :min="TABLE_RULES.minTurnSeconds"
+                :max="TABLE_RULES.maxTurnSeconds" :step="1" :use-grouping="false" fluid />
+            </label>
+            <label class="field" for="next-hand-seconds">
+              <span class="label">下一手自动开始间隔（秒）</span>
+              <InputNumber input-id="next-hand-seconds" v-model="nextHandSeconds" :min="0"
+                :max="TABLE_RULES.maxNextHandSeconds" :step="1" :use-grouping="false" fluid />
+            </label>
+          </div>
+          <p class="hint buyin-hint">下一手间隔填 0 时，由房主手动开局；人数不足时不会自动发牌。</p>
 
           <p class="hint buyin-hint">
             玩家落座时在 {{ minBuyIn || TABLE_RULES.startingStack }}–{{ buyInMax || TABLE_RULES.maxBuyInDefault }}

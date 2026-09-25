@@ -155,6 +155,8 @@ export interface GameStatePublic {
   buyInStep: number
   maxSeats: number
   turnSeconds: number
+  nextHandSeconds: number
+  nextHandDeadlineAt: number | null
   /** 座位数组，下标即座位号，空位为 null。 */
   seats: (SeatPublic | null)[]
   buttonSeat: number | null
@@ -400,6 +402,8 @@ export const CreateRoomRequestSchema = z.object({
   /** 房主设置的盲注；旧客户端省略时沿用 10/20。 */
   smallBlind: z.number().int().min(1).max(TABLE_RULES.maxBigBlind - 1).optional(),
   bigBlind: z.number().int().min(2).max(TABLE_RULES.maxBigBlind).optional(),
+  turnSeconds: z.number().int().min(TABLE_RULES.minTurnSeconds).max(TABLE_RULES.maxTurnSeconds).optional(),
+  nextHandSeconds: z.number().int().min(0).max(TABLE_RULES.maxNextHandSeconds).optional(),
   /**
    * 初始筹码：玩家上桌**最低**要买入多少（默认 2000）。
    * 步进为小盲，允许范围 minBuyInFloor–maxBuyInLimit。
@@ -450,6 +454,8 @@ export const RoomInfoResponseSchema = z.object({
   smallBlind: z.number().int(),
   bigBlind: z.number().int(),
   startingStack: z.number().int(),
+  turnSeconds: z.number().int(),
+  nextHandSeconds: z.number().int(),
 })
 export type RoomInfoResponse = z.infer<typeof RoomInfoResponseSchema>
 

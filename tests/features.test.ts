@@ -70,6 +70,7 @@ test('房间号：纯数字 6 位；撞上已有房间（含历史房间）自�
     startingStack: 2000,
     maxSeats: 9,
     turnSeconds: 20,
+    nextHandSeconds: 0,
   })
   assert.equal(repo.roomExists('100000'), true, '历史房间号也算已占用')
   assert.equal(repo.roomExists('999999'), false, '没建过的号应是空的')
@@ -197,6 +198,114 @@ test('房主自定义盲注：建房校验、买入步进、发盲与公开状�
   assert.equal(started.state.minRaise, 30)
   assert.equal(started.state.seats[0]!.committedStreet, 15)
   assert.equal(started.state.seats[1]!.committedStreet, 30)
+})
+
+test('房主自定义计时：行动倒计时与结算后自动开下一手', async (t) => {
+  const server = await startTestServer()
+  t.after(server.stop)
+  for (const settings of [
+    { turnSeconds: 4 }, { turnSeconds: 121 }, { nextHandSeconds: -1 }, { nextHandSeconds: 121 },
+  ]) {
+    const rejected = await postJson<{ error: string }>(`${server.base}/api/rooms`, { nickname: '甲', ...settings })
+    assert.equal(rejected.status, 400)
+  }
+  const host = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, {
+    nickname: '甲', turnSeconds: 7, nextHandSeconds: 1,
+  })).data
+  const guest = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '乙' })).data
+  const row = server.handle.db.prepare('SELECT turn_seconds, next_hand_seconds FROM rooms WHERE room_id = ?')
+    .get(host.roomId) as { turn_seconds: number; next_hand_seconds: number }
+  assert.deepEqual([row.turn_seconds, row.next_hand_seconds], [7, 1])
+  const info = await (await fetch(`${server.base}/api/rooms/${host.roomId}`)).json() as
+    { turnSeconds: number; nextHandSeconds: number }
+  assert.deepEqual([info.turnSeconds, info.nextHandSeconds], [7, 1])
+
+  const a = new TestClient(server.wsUrl)
+  const b = new TestClient(server.wsUrl)
+  t.after(() => { a.close(); b.close() })
+  await Promise.all([a.open(), b.open()])
+  a.send(joinCommand(host))
+  await a.waitFor((message) => message.type === 'room.snapshot')
+  b.send(joinCommand(guest))
+  await b.waitFor((message) => message.type === 'room.snapshot')
+  await takeSeat(a, 0, 500)
+  await takeSeat(b, 1, 500)
+  a.send({ type: 'game.start', requestId: rid() })
+  const first = await a.waitFor((message) => message.type === 'hand.started')
+  assert.ok(first.type === 'hand.started')
+  assert.equal(first.state.turnSeconds, 7)
+  assert.equal(first.state.nextHandSeconds, 1)
+  assert.ok(first.state.turnDeadlineAt && first.state.turnDeadlineAt - Date.now() <= 7000)
+
+  a.send({ type: 'game.action', requestId: rid(), handId: first.state.handId!,
+    expectedVersion: first.state.version, action: 'fold' })
+  const settled = await a.waitFor((message) => message.type === 'hand.settled')
+  assert.ok(settled.type === 'hand.settled')
+  assert.ok(settled.state.nextHandDeadlineAt && settled.state.nextHandDeadlineAt > Date.now())
+  const saved = server.handle.db.prepare('SELECT state_json FROM room_snapshots WHERE room_id = ?').get(host.roomId) as
+    { state_json: string }
+  assert.equal((JSON.parse(saved.state_json) as { nextHandDeadlineAt: number }).nextHandDeadlineAt,
+    settled.state.nextHandDeadlineAt)
+  const from = a.messages.length
+  const second = await a.waitFor((message) => message.type === 'hand.started' && message.state.handNo === 2, 3000, from)
+  assert.ok(second.type === 'hand.started')
+  assert.equal(second.state.nextHandDeadlineAt, null)
+
+  const actor = second.state.actingPlayerId === host.playerId ? a : b
+  actor.send({ type: 'game.action', requestId: rid(), handId: second.state.handId!,
+    expectedVersion: second.state.version, action: 'fold' })
+  const secondSettlement = await a.waitFor((message) => message.type === 'hand.settled' && message.state.handNo === 2)
+  assert.ok(secondSettlement.type === 'hand.settled')
+  a.send({ type: 'game.start', requestId: rid() })
+  const third = await a.waitFor((message) => message.type === 'hand.started' && message.state.handNo === 3)
+  assert.ok(third.type === 'hand.started')
+  assert.equal(third.state.nextHandDeadlineAt, null, '房主提前开局后应取消原来的自动计时')
+})
+
+test('自动下一手人数不足时不发牌；有人重新买入后重新计时', async (t) => {
+  const server = await startTestServer()
+  t.after(server.stop)
+  const host = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, {
+    nickname: '甲', minBuyIn: 200, buyInMax: 1000, nextHandSeconds: 1,
+  })).data
+  const guest = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '乙' })).data
+  const a = new TestClient(server.wsUrl)
+  const b = new TestClient(server.wsUrl)
+  t.after(() => { a.close(); b.close() })
+  await Promise.all([a.open(), b.open()])
+  a.send(joinCommand(host))
+  await a.waitFor((message) => message.type === 'room.snapshot')
+  b.send(joinCommand(guest))
+  await b.waitFor((message) => message.type === 'room.snapshot')
+  await takeSeat(a, 0, 200)
+  await takeSeat(b, 1, 200)
+  a.send({ type: 'game.start', requestId: rid() })
+  const started = await a.waitFor((message) => message.type === 'hand.started')
+  assert.ok(started.type === 'hand.started')
+  a.send({ type: 'game.action', requestId: rid(), handId: started.state.handId!,
+    expectedVersion: started.state.version, action: 'all_in' })
+  await b.waitFor((message) => message.type === 'turn.started' && message.state.currentBet === 200)
+  b.send({ type: 'game.action', requestId: rid(), handId: b.lastState()!.handId!,
+    expectedVersion: b.lastState()!.version, action: 'call' })
+  const settled = await a.waitFor((message) => message.type === 'hand.settled')
+  assert.ok(settled.type === 'hand.settled')
+  // 随机牌面可能平局；此用例只测计时器的人数门槛，平局时构造确定性的 0 筹码座位。
+  let bustedSeat = settled.state.seats[0]?.stack === 0 ? 0 : 1
+  if ((settled.state.seats[bustedSeat]?.stack ?? 0) > 0) {
+    server.rooms.get(host.roomId)!.table.seatOf(host.playerId)!.stack = 0
+    bustedSeat = 0
+  }
+  const afterExpiry = await a.waitFor((message) => message.type === 'hand.state_changed' &&
+    message.state.handNo === 1 && message.state.nextHandDeadlineAt === null, 3000, a.messages.length)
+  assert.ok(afterExpiry.type === 'hand.state_changed')
+  assert.equal(server.rooms.get(host.roomId)!.table.publicState().handNo, 1)
+
+  const busted = bustedSeat === 0 ? a : b
+  await takeSeat(busted, bustedSeat, 300)
+  assert.ok(busted.lastState()!.nextHandDeadlineAt, '重新买入后重新计时')
+  const next = await a.waitFor((message) => message.type === 'hand.started' && message.state.handNo === 2,
+    3000, a.messages.length)
+  assert.ok(next.type === 'hand.started')
 })
 
 test('聊天：广播给房内所有人、重连能拿到历史、服务端限流与长度校验', async (t) => {

@@ -121,9 +121,7 @@ async function applyScenario(name: string): Promise<void> {
  * 这里给出「填昵称加入」面板，加入后先是旁观者，再自己选座买入。
  */
 onMounted(() => {
-  if (isMobileScreen()) {
-    hudHistoryCollapsed.value = true
-  }
+  window.addEventListener('pointerdown', handleHudPointerDown)
   const credentials = room.credentials?.roomId === props.roomId ? room.credentials : loadCredentials(props.roomId)
   if (credentials) {
     room.setCredentials(credentials)
@@ -345,7 +343,9 @@ const blockedReason = computed(() => {
   if (game.mySeat?.folded) return '你已弃牌，本手不再行动。'
   if (game.mySeat?.allIn) return '你已全下，等待发牌与结算。'
   if (game.state.phase === 'waiting') return '等待主持人开局。'
-  if (game.state.phase === 'showdown' || game.state.phase === 'settlement') return '本手已结束，等待下一手。'
+  if (game.state.phase === 'showdown' || game.state.phase === 'settlement') {
+    return game.state.nextHandDeadlineAt ? '本手已结束，下一手即将自动开始。' : '本手已结束，等待下一手。'
+  }
   if (game.actingSeat) return `等待 ${game.actingSeat.nickname} 行动。`
   return '当前没有需要你处理的动作。'
 })
@@ -433,8 +433,8 @@ watch(
 
 /** 独立邀请朋友弹窗显隐 */
 const inviteDialogOpen = ref(false)
-/** 桌面右上角 HUD 历史面板折叠状态（参考左上角 HUD 聊天） */
-const hudHistoryCollapsed = ref(false)
+/** 桌面右上角 HUD 历史面板折叠状态（默认关闭，点击展开） */
+const hudHistoryCollapsed = ref(true)
 
 /* ── 邀请朋友：房间号是 6 位纯数字（见 §6.8），这里把它和邀请链接摆出来给朋友。 ── */
 /** 房间号：以凭证为准；没有凭证（理论上进不了牌桌）时回落到路由里那串。 */
@@ -486,10 +486,14 @@ function openInviteDialog(): void {
 
 function toggleHistory(): void {
   hudHistoryCollapsed.value = !hudHistoryCollapsed.value
+  if (!hudHistoryCollapsed.value) {
+    hudChatCollapsed.value = true
+  }
 }
 
 function openHistory(): void {
   hudHistoryCollapsed.value = false
+  hudChatCollapsed.value = true
 }
 
 /* ───────────── 聊天（抽屉内的 chat 分节） ─────────────
@@ -524,8 +528,8 @@ function chatIso(at: number): string | undefined {
 }
 
 /* ───────────── 聊天（桌面左上角 HUD 浮层） ─────────────
- * 消息流常驻在牌桌左上角，半透明黑晶背景，支持实时滚屏与快捷打字。 */
-const hudChatCollapsed = ref(false)
+ * 消息流常驻在牌桌左上角，半透明黑晶背景，支持实时滚屏与快捷打字。默认关闭。 */
+const hudChatCollapsed = ref(true)
 const hudChatInputRef = ref<HTMLInputElement | null>(null)
 
 function isMobileScreen(): boolean {
@@ -533,7 +537,7 @@ function isMobileScreen(): boolean {
 }
 
 /**
- * 历史展开时，聊天按钮缩小只展示图标；手机端互斥联动。
+ * 历史与聊天面板展开互斥联动：展开一个自动收起另一个
  */
 watch(hudHistoryCollapsed, (collapsed) => {
   if (!collapsed) {
@@ -542,19 +546,41 @@ watch(hudHistoryCollapsed, (collapsed) => {
 })
 
 watch(hudChatCollapsed, (collapsed) => {
-  if (!collapsed && isMobileScreen()) {
+  if (!collapsed) {
     hudHistoryCollapsed.value = true
   }
 })
 
+function toggleChat(): void {
+  hudChatCollapsed.value = !hudChatCollapsed.value
+  if (!hudChatCollapsed.value) {
+    hudHistoryCollapsed.value = true
+    nextTick(() => {
+      hudChatInputRef.value?.focus()
+      void scrollChatToBottom()
+    })
+  }
+}
+
 function openChat(): void {
   hudChatCollapsed.value = false
-  if (isMobileScreen()) {
-    hudHistoryCollapsed.value = true
-  }
+  hudHistoryCollapsed.value = true
   nextTick(() => {
     hudChatInputRef.value?.focus()
+    void scrollChatToBottom()
   })
+}
+
+/** 点击牌桌外部空白区域时，自动顺畅收起已展开的 HUD 浮动面板 */
+function handleHudPointerDown(event: PointerEvent): void {
+  const target = event.target as HTMLElement | null
+  if (!target) return
+  if (!hudChatCollapsed.value && !target.closest('.hud-chat-anchor')) {
+    hudChatCollapsed.value = true
+  }
+  if (!hudHistoryCollapsed.value && !target.closest('.hud-history-anchor')) {
+    hudHistoryCollapsed.value = true
+  }
 }
 
 function onSenderClick(nickname: string): void {
@@ -1036,7 +1062,10 @@ onFatalRoomError((error) => {
     query: { kind: 'room', code: error.code, detail: error.message },
   })
 })
-onBeforeUnmount(() => onFatalRoomError(null))
+onBeforeUnmount(() => {
+  onFatalRoomError(null)
+  window.removeEventListener('pointerdown', handleHudPointerDown)
+})
 
 </script>
 
@@ -1179,234 +1208,257 @@ onBeforeUnmount(() => onFatalRoomError(null))
     </div>
 
     <main id="main" class="stage">
-      <!-- 桌面左上角透明 HUD 聊天（历史展开时缩小为仅图标） -->
-      <aside
-        class="hud-chat"
-        :class="{
-          'is-collapsed': hudChatCollapsed,
-          'is-icon-only': !hudHistoryCollapsed,
-        }"
-        aria-label="牌桌快捷聊天"
-      >
-        <header
-          class="hud-chat-header"
+      <!-- 桌面左上角 HUD 快捷聊天 -->
+      <aside class="hud-anchor hud-chat-anchor" aria-label="牌桌快捷聊天">
+        <button
+          type="button"
+          class="hud-capsule-btn hud-chat-pill"
+          :class="{ 'is-active': !hudChatCollapsed }"
           :title="hudChatCollapsed ? '展开聊天' : '收起聊天'"
-          @click="hudChatCollapsed = !hudChatCollapsed"
+          :aria-expanded="!hudChatCollapsed"
+          @click="toggleChat"
         >
-          <div class="hud-chat-title">
-            <i class="pi pi-comments" aria-hidden="true" />
-            <span class="hud-chat-label">聊天</span>
-            <span v-if="chat.unread > 0 && hudChatCollapsed" class="hud-chat-badge num">{{ unreadText }}</span>
-          </div>
-          <button
-            type="button"
-            class="hud-chat-toggle-btn"
-            :title="hudChatCollapsed ? '展开聊天' : '收起聊天'"
-            :aria-label="hudChatCollapsed ? '展开聊天' : '收起聊天'"
-            @click.stop="hudChatCollapsed = !hudChatCollapsed"
-          >
-            <i :class="hudChatCollapsed ? 'pi pi-chevron-down' : 'pi pi-minus'" aria-hidden="true" />
-          </button>
-        </header>
+          <i class="pi pi-comments hud-capsule-icon" aria-hidden="true" />
+          <span class="hud-capsule-label">聊天</span>
+          <span v-if="chat.unread > 0" class="hud-capsule-badge num">{{ unreadText }}</span>
+          <i :class="hudChatCollapsed ? 'pi pi-chevron-down' : 'pi pi-chevron-up'" class="hud-capsule-arrow" aria-hidden="true" />
+        </button>
 
-        <Transition name="hud-slide">
-          <div v-show="!hudChatCollapsed" class="hud-chat-body">
-          <div
-            ref="chatListRef"
-            class="hud-chat-list thin-scroll"
-            role="log"
-            aria-live="polite"
-            aria-label="聊天消息"
-            @scroll.passive="onChatScroll"
-          >
-            <div v-if="chat.messages.length === 0" class="hud-chat-empty">
-              <span>暂无消息，打个招呼吧~</span>
-            </div>
-            <div
-              v-for="msg in chat.messages"
-              :key="msg.id"
-              class="hud-chat-item"
-              :class="{
-                'is-own': msg.playerId === myPlayerId,
-                'is-system': msg.kind === 'system',
-                'is-mention': mentionsMe(msg),
-              }"
-              :title="chatTime(msg.at)"
-            >
-              <template v-if="msg.kind === 'system'">
-                <span class="hud-msg-system">📢 {{ msg.text }}</span>
-              </template>
-              <template v-else>
-                <span
-                  class="hud-msg-sender"
-                  :title="`点击 @${msg.nickname}`"
-                  @click="onSenderClick(msg.nickname)"
+        <Transition name="hud-popover">
+          <div v-show="!hudChatCollapsed" class="hud-popover hud-chat-popover">
+            <header class="hud-popover-header">
+              <div class="hud-popover-title">
+                <i class="pi pi-comments" aria-hidden="true" />
+                <span>牌桌聊天</span>
+                <span v-if="chat.unread > 0" class="hud-popover-badge num">{{ unreadText }}</span>
+              </div>
+              <button
+                type="button"
+                class="hud-popover-close-btn"
+                title="收起聊天"
+                aria-label="收起聊天"
+                @click="hudChatCollapsed = true"
+              >
+                <i class="pi pi-times" aria-hidden="true" />
+              </button>
+            </header>
+
+            <div class="hud-chat-body">
+              <div
+                ref="chatListRef"
+                class="hud-chat-list thin-scroll"
+                role="log"
+                aria-live="polite"
+                aria-label="聊天消息"
+                @scroll.passive="onChatScroll"
+              >
+                <div v-if="chat.messages.length === 0" class="hud-chat-empty">
+                  <span>暂无消息，打个招呼吧~</span>
+                </div>
+                <div
+                  v-for="msg in chat.messages"
+                  :key="msg.id"
+                  class="hud-chat-item"
+                  :class="{
+                    'is-own': msg.playerId === myPlayerId,
+                    'is-system': msg.kind === 'system',
+                    'is-mention': mentionsMe(msg),
+                  }"
+                  :title="chatTime(msg.at)"
                 >
-                  {{ msg.playerId === myPlayerId ? '你' : msg.nickname }}:
-                </span>
-                <span class="hud-msg-text">{{ msg.text }}</span>
-              </template>
-            </div>
-          </div>
+                  <template v-if="msg.kind === 'system'">
+                    <span class="hud-msg-system">📢 {{ msg.text }}</span>
+                  </template>
+                  <template v-else>
+                    <span
+                      class="hud-msg-sender"
+                      :title="`点击 @${msg.nickname}`"
+                      @click="onSenderClick(msg.nickname)"
+                    >
+                      {{ msg.playerId === myPlayerId ? '你' : msg.nickname }}:
+                    </span>
+                    <span class="hud-msg-text">{{ msg.text }}</span>
+                  </template>
+                </div>
+              </div>
 
-          <form class="hud-chat-form" @submit.prevent="submitChat">
-            <input
-              ref="hudChatInputRef"
-              v-model="chatText"
-              type="text"
-              class="hud-chat-input"
-              :maxlength="CHAT_MAX_LENGTH"
-              placeholder="说点什么… (Enter)"
-              autocomplete="off"
-              @keydown="onChatKeydown"
-              @compositionstart="composing = true"
-              @compositionend="composing = false"
-              @input="chatError = ''"
-            />
-            <button
-              type="submit"
-              class="hud-chat-send"
-              :disabled="!canSendChat"
-              :title="canSendChat ? '发送消息' : '请输入消息'"
-            >
-              <i class="pi pi-send" aria-hidden="true" />
-            </button>
-          </form>
-          <p v-if="chatError" class="hud-chat-error" role="alert">{{ chatError }}</p>
+              <form class="hud-chat-form" @submit.prevent="submitChat">
+                <input
+                  ref="hudChatInputRef"
+                  v-model="chatText"
+                  type="text"
+                  class="hud-chat-input"
+                  :maxlength="CHAT_MAX_LENGTH"
+                  placeholder="说点什么… (Enter)"
+                  autocomplete="off"
+                  @keydown="onChatKeydown"
+                  @compositionstart="composing = true"
+                  @compositionend="composing = false"
+                  @input="chatError = ''"
+                />
+                <button
+                  type="submit"
+                  class="hud-chat-send"
+                  :disabled="!canSendChat"
+                  :title="canSendChat ? '发送消息' : '请输入消息'"
+                >
+                  <i class="pi pi-send" aria-hidden="true" />
+                </button>
+              </form>
+              <p v-if="chatError" class="hud-chat-error" role="alert">{{ chatError }}</p>
+            </div>
           </div>
         </Transition>
       </aside>
 
-      <!-- 桌面右上角透明 HUD 历史（参考左上角快捷聊天设计） -->
-      <aside class="hud-history" :class="{ 'is-collapsed': hudHistoryCollapsed }" aria-label="牌局手牌历史">
-        <header class="hud-history-header" @click="hudHistoryCollapsed = !hudHistoryCollapsed">
-          <div class="hud-history-title">
-            <i class="pi pi-history" aria-hidden="true" />
-            <span class="hud-history-label">手牌历史</span>
-            <span v-if="game.history.length > 0" class="hud-history-badge num">{{ game.history.length }}</span>
-          </div>
-          <button
-            type="button"
-            class="hud-history-toggle-btn"
-            :title="hudHistoryCollapsed ? '展开历史' : '收起历史'"
-            :aria-label="hudHistoryCollapsed ? '展开历史' : '收起历史'"
-            @click.stop="hudHistoryCollapsed = !hudHistoryCollapsed"
-          >
-            <i :class="hudHistoryCollapsed ? 'pi pi-chevron-down' : 'pi pi-minus'" aria-hidden="true" />
-          </button>
-        </header>
+      <!-- 桌面右上角 HUD 快捷手牌历史 -->
+      <aside class="hud-anchor hud-history-anchor" aria-label="牌局手牌历史">
+        <button
+          type="button"
+          class="hud-capsule-btn hud-history-pill"
+          :class="{ 'is-active': !hudHistoryCollapsed }"
+          :title="hudHistoryCollapsed ? '展开历史' : '收起历史'"
+          :aria-expanded="!hudHistoryCollapsed"
+          @click="toggleHistory"
+        >
+          <i class="pi pi-history hud-capsule-icon" aria-hidden="true" />
+          <span class="hud-capsule-label">手牌历史</span>
+          <span v-if="game.history.length > 0" class="hud-capsule-badge num">{{ game.history.length }}</span>
+          <i :class="hudHistoryCollapsed ? 'pi pi-chevron-down' : 'pi pi-chevron-up'" class="hud-capsule-arrow" aria-hidden="true" />
+        </button>
 
-        <div v-show="!hudHistoryCollapsed" class="hud-history-body">
-          <div class="hud-history-list thin-scroll">
-            <div v-if="historyRows.length === 0" class="history-empty">
-              <i class="pi pi-folder-open history-empty-icon" aria-hidden="true" />
-              <p>暂无已结算的手牌记录</p>
-            </div>
-
-            <article
-              v-for="entry in historyRows"
-              :key="entry.handId || entry.handNo"
-              class="history-card"
-              :class="{ 'is-hero-won': entry.heroWon, 'is-hero-showdown': entry.heroShowdown && !entry.heroWon }"
-            >
-              <!-- 卡片顶栏：局号、状态勋章、总底池 -->
-              <header class="history-card-header">
-                <div class="history-header-left">
-                  <span class="history-hand-tag num">#{{ entry.handNo }}</span>
-                  <span v-if="entry.heroWon" class="history-result-badge badge-win">
-                    <i class="pi pi-trophy" aria-hidden="true" />
-                    <span>你赢得 +{{ entry.heroWonAmount }}</span>
-                  </span>
-                  <span v-else-if="entry.heroShowdown" class="history-result-badge badge-showdown">
-                    跟注到底
-                  </span>
-                  <span v-else-if="entry.showdown" class="history-result-badge badge-neutral">
-                    摊牌对决
-                  </span>
-                  <span v-else class="history-result-badge badge-fold">
-                    弃牌结算
-                  </span>
-                </div>
-                <div class="history-header-right">
-                  <span class="history-pot-label">总底池</span>
-                  <b class="history-pot-value num">{{ entry.potTotal }}</b>
-                </div>
-              </header>
-
-              <!-- 公共牌区域（真实卡牌组件渲染） -->
-              <div class="history-board-row">
-                <span class="history-section-title">公共牌</span>
-                <div v-if="entry.board.length > 0" class="history-cards-line">
-                  <PlayingCard
-                    v-for="card in entry.board"
-                    :key="card"
-                    size="sm"
-                    upright
-                    :card="card"
-                    class="history-card-item"
-                  />
-                </div>
-                <span v-else class="history-empty-board">翻牌前弃牌（无公共牌）</span>
+        <Transition name="hud-popover-right">
+          <div v-show="!hudHistoryCollapsed" class="hud-popover hud-history-popover">
+            <header class="hud-popover-header">
+              <div class="hud-popover-title">
+                <i class="pi pi-history" aria-hidden="true" />
+                <span>手牌历史</span>
+                <span v-if="game.history.length > 0" class="hud-popover-badge num">{{ game.history.length }}</span>
               </div>
+              <button
+                type="button"
+                class="hud-popover-close-btn"
+                title="收起历史"
+                aria-label="收起历史"
+                @click="hudHistoryCollapsed = true"
+              >
+                <i class="pi pi-times" aria-hidden="true" />
+              </button>
+            </header>
 
-              <!-- 摊牌明细（若有人跟到底开牌） -->
-              <div v-if="entry.showdown && entry.revealedPlayers.length > 0" class="history-showdown-section">
-                <div class="history-section-header">
-                  <span class="history-section-title">摊牌开牌（{{ entry.revealedPlayers.length }} 人亮牌比牌）</span>
+            <div class="hud-history-body">
+              <div class="hud-history-list thin-scroll">
+                <div v-if="historyRows.length === 0" class="history-empty">
+                  <i class="pi pi-folder-open history-empty-icon" aria-hidden="true" />
+                  <p>暂无已结算的手牌记录</p>
                 </div>
-                <div class="history-revealed-list">
-                  <div
-                    v-for="p in entry.revealedPlayers"
-                    :key="p.playerId"
-                    class="history-revealed-row"
-                    :class="{ 'is-hero': p.isHero, 'is-winner': p.isWinner }"
-                  >
-                    <!-- 玩家身份与牌型 -->
-                    <div class="revealed-player-info">
-                      <div class="revealed-player-name-row">
-                        <span v-if="p.isWinner" class="revealed-crown" title="获胜者">🏆</span>
-                        <span class="revealed-nickname" :class="{ 'hero-name': p.isHero }">
-                          {{ p.isHero ? '你' : p.nickname }}
-                        </span>
-                        <span v-if="p.isWinner" class="revealed-win-num num">
-                          +{{ p.winAmount }}
-                        </span>
-                      </div>
-                      <div class="revealed-hand-badge" :class="{ 'badge-winner': p.isWinner }">
-                        {{ p.handName }}
-                      </div>
-                    </div>
 
-                    <!-- 玩家亮出的 2 张底牌（物理卡牌） -->
-                    <div class="revealed-cards-box">
+                <article
+                  v-for="entry in historyRows"
+                  :key="entry.handId || entry.handNo"
+                  class="history-card"
+                  :class="{ 'is-hero-won': entry.heroWon, 'is-hero-showdown': entry.heroShowdown && !entry.heroWon }"
+                >
+                  <!-- 卡片顶栏：局号、状态勋章、总底池 -->
+                  <header class="history-card-header">
+                    <div class="history-header-left">
+                      <span class="history-hand-tag num">#{{ entry.handNo }}</span>
+                      <span v-if="entry.heroWon" class="history-result-badge badge-win">
+                        <i class="pi pi-trophy" aria-hidden="true" />
+                        <span>你赢得 +{{ entry.heroWonAmount }}</span>
+                      </span>
+                      <span v-else-if="entry.heroShowdown" class="history-result-badge badge-showdown">
+                        跟注到底
+                      </span>
+                      <span v-else-if="entry.showdown" class="history-result-badge badge-neutral">
+                        摊牌对决
+                      </span>
+                      <span v-else class="history-result-badge badge-fold">
+                        弃牌结算
+                      </span>
+                    </div>
+                    <div class="history-header-right">
+                      <span class="history-pot-label">总底池</span>
+                      <b class="history-pot-value num">{{ entry.potTotal }}</b>
+                    </div>
+                  </header>
+
+                  <!-- 公共牌区域（真实卡牌组件渲染） -->
+                  <div class="history-board-row">
+                    <span class="history-section-title">公共牌</span>
+                    <div v-if="entry.board.length > 0" class="history-cards-line">
                       <PlayingCard
-                        v-for="c in p.cards"
-                        :key="c"
+                        v-for="card in entry.board"
+                        :key="card"
                         size="sm"
                         upright
-                        :card="c"
-                        :class="['revealed-card', { 'winner-card': p.isWinner }]"
+                        :card="card"
+                        class="history-card-item"
                       />
                     </div>
+                    <span v-else class="history-empty-board">翻牌前弃牌（无公共牌）</span>
                   </div>
-                </div>
-              </div>
 
-              <!-- 未摊牌获胜展示（对手全弃牌） -->
-              <div v-else class="history-uncontested-section">
-                <div v-for="w in entry.winners" :key="w.playerId" class="history-uncontested-winner">
-                  <span class="uncontested-crown">🏆</span>
-                  <span class="uncontested-name" :class="{ 'hero-name': w.isHero }">
-                    {{ w.isHero ? '你' : w.nickname }}
-                  </span>
-                  <span class="uncontested-text">拿下底池</span>
-                  <b class="uncontested-amount num">+{{ w.amount }}</b>
-                  <span class="uncontested-note">（其他玩家弃牌，底牌未公开）</span>
-                </div>
+                  <!-- 摊牌明细（若有人跟到底开牌） -->
+                  <div v-if="entry.showdown && entry.revealedPlayers.length > 0" class="history-showdown-section">
+                    <div class="history-section-header">
+                      <span class="history-section-title">摊牌开牌（{{ entry.revealedPlayers.length }} 人亮牌比牌）</span>
+                    </div>
+                    <div class="history-revealed-list">
+                      <div
+                        v-for="p in entry.revealedPlayers"
+                        :key="p.playerId"
+                        class="history-revealed-row"
+                        :class="{ 'is-hero': p.isHero, 'is-winner': p.isWinner }"
+                      >
+                        <!-- 玩家身份与牌型 -->
+                        <div class="revealed-player-info">
+                          <div class="revealed-player-name-row">
+                            <span v-if="p.isWinner" class="revealed-crown" title="获胜者">🏆</span>
+                            <span class="revealed-nickname" :class="{ 'hero-name': p.isHero }">
+                              {{ p.isHero ? '你' : p.nickname }}
+                            </span>
+                            <span v-if="p.isWinner" class="revealed-win-num num">
+                              +{{ p.winAmount }}
+                            </span>
+                          </div>
+                          <div class="revealed-hand-badge" :class="{ 'badge-winner': p.isWinner }">
+                            {{ p.handName }}
+                          </div>
+                        </div>
+
+                        <!-- 玩家亮出的 2 张底牌（物理卡牌） -->
+                        <div class="revealed-cards-box">
+                          <PlayingCard
+                            v-for="c in p.cards"
+                            :key="c"
+                            size="sm"
+                            upright
+                            :card="c"
+                            :class="['revealed-card', { 'winner-card': p.isWinner }]"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 未摊牌获胜展示（对手全弃牌） -->
+                  <div v-else class="history-uncontested-section">
+                    <div v-for="w in entry.winners" :key="w.playerId" class="history-uncontested-winner">
+                      <span class="uncontested-crown">🏆</span>
+                      <span class="uncontested-name" :class="{ 'hero-name': w.isHero }">
+                        {{ w.isHero ? '你' : w.nickname }}
+                      </span>
+                      <span class="uncontested-text">拿下底池</span>
+                      <b class="uncontested-amount num">+{{ w.amount }}</b>
+                      <span class="uncontested-note">（其他玩家弃牌，底牌未公开）</span>
+                    </div>
+                  </div>
+                </article>
               </div>
-            </article>
+            </div>
           </div>
-        </div>
+        </Transition>
       </aside>
 
       <PokerTable
@@ -2596,100 +2648,6 @@ onBeforeUnmount(() => onFatalRoomError(null))
 }
 
 /* ═══════════════ 桌面右上角 HUD 快捷手牌历史 ═══════════════ */
-.hud-history {
-  position: absolute;
-  top: 14px;
-  right: 18px;
-  z-index: 22;
-  width: clamp(280px, 25vw, 360px);
-  max-width: calc(100% - 36px);
-  display: flex;
-  flex-direction: column;
-  background: rgba(10, 16, 26, 0.42);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--radius-md);
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.3);
-  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
-  overflow: hidden;
-  pointer-events: auto;
-}
-
-.hud-history:hover,
-.hud-history:focus-within {
-  background: rgba(10, 16, 26, 0.82);
-  border-color: rgba(212, 177, 106, 0.45);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
-}
-
-.hud-history.is-collapsed {
-  width: auto;
-  min-width: 86px;
-  background: rgba(10, 16, 26, 0.55);
-}
-
-.hud-history-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 5px 10px;
-  background: rgba(255, 255, 255, 0.03);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  cursor: pointer;
-  user-select: none;
-}
-
-.hud-history.is-collapsed .hud-history-header {
-  border-bottom: none;
-}
-
-.hud-history-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: #e2e8f0;
-}
-
-.hud-history-title i {
-  color: #ffd875;
-  font-size: 0.82rem;
-}
-
-.hud-history-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: rgba(212, 177, 106, 0.25);
-  color: #ffd875;
-  border: 1px solid rgba(212, 177, 106, 0.4);
-  font-size: 0.65rem;
-  font-weight: 700;
-}
-
-.hud-history-toggle-btn {
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  padding: 2px 4px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-size: 0.72rem;
-  display: inline-flex;
-  align-items: center;
-  transition: color 0.15s ease;
-}
-
-.hud-history-toggle-btn:hover {
-  color: #fff;
-}
-
 .hud-history-body {
   display: flex;
   flex-direction: column;
@@ -3221,173 +3179,83 @@ onBeforeUnmount(() => onFatalRoomError(null))
   font-size: 0.74rem;
 }
 
-/* ═══════════════ 桌面左上角 HUD 快捷聊天 ═══════════════ */
-.hud-chat {
+/* ═══════════════ HUD 快捷胶囊与微弹出面板体系（硬件加速 120FPS 丝滑版） ═══════════════ */
+.hud-anchor {
   position: absolute;
   top: 14px;
-  left: 18px;
-  z-index: 22;
-  width: clamp(230px, 20vw, 300px);
-  max-width: calc(100% - 36px);
-  display: flex;
-  flex-direction: column;
-  background: rgba(10, 16, 26, 0.42);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--radius-md);
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.3);
-  overflow: hidden;
+  z-index: 25;
   pointer-events: auto;
-  transition: 
-    width 0.34s cubic-bezier(0.16, 1, 0.3, 1),
-    min-width 0.34s cubic-bezier(0.16, 1, 0.3, 1),
-    border-radius 0.34s cubic-bezier(0.16, 1, 0.3, 1),
-    background 0.25s ease,
-    border-color 0.25s ease,
-    box-shadow 0.25s ease,
-    transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-  will-change: width, transform;
 }
 
-.hud-chat:hover,
-.hud-chat:focus-within {
-  background: rgba(10, 16, 26, 0.76);
-  border-color: rgba(212, 177, 106, 0.35);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+.hud-chat-anchor {
+  left: 18px;
 }
 
-.hud-chat.is-collapsed {
-  width: 96px;
-  min-width: 96px;
-  background: rgba(10, 16, 26, 0.55);
+.hud-history-anchor {
+  right: 18px;
 }
 
-/* 历史展开时：聊天按钮平滑缩小，只展示图标 */
-.hud-chat.is-icon-only.is-collapsed {
-  width: 36px !important;
-  min-width: 36px !important;
-  border-radius: var(--radius-sm) !important;
-  background: rgba(10, 16, 26, 0.65) !important;
-  cursor: pointer;
-}
-
-.hud-chat.is-icon-only.is-collapsed:hover {
-  background: rgba(15, 23, 42, 0.9) !important;
-  border-color: rgba(96, 165, 250, 0.6) !important;
-  transform: scale(1.08);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5), 0 0 10px rgba(96, 165, 250, 0.3) !important;
-}
-
-.hud-chat.is-icon-only.is-collapsed:active {
-  transform: scale(0.96);
-}
-
-.hud-chat-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 10px;
-  min-height: 36px;
-  box-sizing: border-box;
-  background: rgba(255, 255, 255, 0.03);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  cursor: pointer;
-  user-select: none;
-  transition: padding 0.34s cubic-bezier(0.16, 1, 0.3, 1), border-bottom-color 0.25s ease;
-}
-
-.hud-chat.is-collapsed .hud-chat-header {
-  border-bottom-color: transparent;
-}
-
-.hud-chat.is-icon-only.is-collapsed .hud-chat-header {
-  padding: 0 !important;
-  width: 100% !important;
-  height: 34px !important;
-  justify-content: center !important;
-}
-
-.hud-chat-title {
+/* 胶囊按钮（固定尺寸、无布局重排、质感十足） */
+.hud-capsule-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(12, 18, 28, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+  color: #e2e8f0;
   font-size: 0.8rem;
   font-weight: 600;
-  color: #e2e8f0;
-  position: relative;
-  transition: gap 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.hud-chat.is-icon-only.is-collapsed .hud-chat-title {
-  gap: 0;
-  justify-content: center;
-}
-
-.hud-chat-title i {
-  color: #60a5fa;
-  font-size: 0.86rem;
-  transition: transform 0.34s cubic-bezier(0.16, 1, 0.3, 1), font-size 0.34s cubic-bezier(0.16, 1, 0.3, 1), color 0.2s ease;
-}
-
-.hud-chat.is-icon-only.is-collapsed .hud-chat-title i {
-  font-size: 1.1rem;
-  transform: scale(1.08);
-}
-
-.hud-chat-label {
-  display: inline-block;
-  white-space: nowrap;
-  max-width: 50px;
-  opacity: 1;
-  transform: scale(1);
-  transform-origin: left center;
-  transition: 
-    max-width 0.34s cubic-bezier(0.16, 1, 0.3, 1),
-    opacity 0.22s ease,
-    transform 0.26s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.hud-chat.is-icon-only.is-collapsed .hud-chat-label {
-  max-width: 0 !important;
-  opacity: 0 !important;
-  margin: 0 !important;
-  transform: scale(0.6) !important;
-  pointer-events: none !important;
-  overflow: hidden !important;
-}
-
-.hud-chat-toggle-btn {
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  padding: 2px 4px;
-  border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: 0.72rem;
-  display: inline-flex;
-  align-items: center;
-  max-width: 30px;
-  opacity: 1;
-  transform: scale(1);
+  user-select: none;
   transition: 
-    max-width 0.34s cubic-bezier(0.16, 1, 0.3, 1),
-    opacity 0.2s ease,
-    transform 0.26s cubic-bezier(0.16, 1, 0.3, 1),
-    color 0.15s ease;
+    background 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    transform 0.15s cubic-bezier(0.16, 1, 0.3, 1),
+    color 0.2s ease;
+  will-change: transform;
 }
 
-.hud-chat.is-icon-only.is-collapsed .hud-chat-toggle-btn {
-  max-width: 0 !important;
-  opacity: 0 !important;
-  padding: 0 !important;
-  margin: 0 !important;
-  transform: scale(0.6) !important;
-  pointer-events: none !important;
-  overflow: hidden !important;
+.hud-capsule-btn:hover {
+  background: rgba(18, 28, 44, 0.88);
+  border-color: rgba(212, 177, 106, 0.4);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4), 0 0 10px rgba(212, 177, 106, 0.15);
+  color: #fff;
 }
 
-.hud-chat-badge {
+.hud-capsule-btn:active {
+  transform: translateY(0) scale(0.96);
+}
+
+.hud-capsule-btn.is-active {
+  background: rgba(18, 28, 44, 0.95);
+  border-color: rgba(212, 177, 106, 0.65);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45), 0 0 12px rgba(212, 177, 106, 0.25);
+  color: #ffd875;
+}
+
+.hud-chat-pill .hud-capsule-icon {
+  color: #60a5fa;
+  font-size: 0.88rem;
+}
+
+.hud-history-pill .hud-capsule-icon {
+  color: #ffd875;
+  font-size: 0.85rem;
+}
+
+.hud-capsule-label {
+  white-space: nowrap;
+}
+
+.hud-capsule-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3399,46 +3267,179 @@ onBeforeUnmount(() => onFatalRoomError(null))
   color: #fff;
   font-size: 0.65rem;
   font-weight: 700;
-  transition: all 0.34s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
 }
 
-.hud-chat.is-icon-only.is-collapsed .hud-chat-badge {
-  position: absolute !important;
-  top: -8px !important;
-  right: -9px !important;
-  min-width: 14px !important;
-  height: 14px !important;
-  padding: 0 3px !important;
-  font-size: 0.58rem !important;
-  line-height: 1 !important;
-  box-shadow: 0 0 6px rgba(239, 68, 68, 0.8) !important;
+.hud-history-pill .hud-capsule-badge {
+  background: rgba(212, 177, 106, 0.25);
+  color: #ffd875;
+  border: 1px solid rgba(212, 177, 106, 0.4);
+  box-shadow: none;
 }
 
-/* 聊天主体顺滑折叠过渡 */
-.hud-slide-enter-active,
-.hud-slide-leave-active {
-  transition: 
-    max-height 0.3s cubic-bezier(0.16, 1, 0.3, 1),
-    opacity 0.22s ease,
-    transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+.hud-capsule-arrow {
+  font-size: 0.62rem;
+  color: rgba(255, 255, 255, 0.4);
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), color 0.2s ease;
+}
+
+.hud-capsule-btn:hover .hud-capsule-arrow {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.hud-capsule-btn.is-active .hud-capsule-arrow {
+  color: #ffd875;
+}
+
+/* 浮动面板本体（脱离文档流、GPU加速、0 Layout Reflow） */
+.hud-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  background: rgba(10, 16, 26, 0.92);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(212, 177, 106, 0.28);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.7), 0 0 16px rgba(0, 0, 0, 0.35);
   overflow: hidden;
+  user-select: auto;
 }
 
-.hud-slide-enter-from,
-.hud-slide-leave-to {
-  max-height: 0 !important;
+.hud-chat-popover {
+  left: 0;
+  width: clamp(260px, 22vw, 320px);
+}
+
+.hud-history-popover {
+  right: 0;
+  width: clamp(310px, 26vw, 390px);
+}
+
+.hud-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.hud-popover-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+.hud-chat-popover .hud-popover-title i {
+  color: #60a5fa;
+  font-size: 0.88rem;
+}
+
+.hud-history-popover .hud-popover-title i {
+  color: #ffd875;
+  font-size: 0.85rem;
+}
+
+.hud-popover-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(212, 177, 106, 0.22);
+  color: #ffd875;
+  border: 1px solid rgba(212, 177, 106, 0.4);
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.hud-popover-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.hud-popover-close-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  transform: scale(1.08);
+}
+
+/* 动效：纯 GPU 合成层变换，0 Layout Reflow，120FPS 丝滑体验 */
+.hud-popover-enter-active {
+  transition: 
+    opacity 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  transform-origin: top left;
+  will-change: opacity, transform;
+}
+
+.hud-popover-leave-active {
+  transition: 
+    opacity 0.16s ease-in,
+    transform 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+  transform-origin: top left;
+  will-change: opacity, transform;
+}
+
+.hud-popover-enter-from,
+.hud-popover-leave-to {
   opacity: 0;
-  transform: translateY(-6px);
+  transform: translateY(-8px) scale(0.96);
 }
 
-.hud-slide-enter-to,
-.hud-slide-leave-from {
-  max-height: 240px;
+.hud-popover-enter-to,
+.hud-popover-leave-from {
   opacity: 1;
-  transform: translateY(0);
+  transform: translateY(0) scale(1);
 }
 
+.hud-popover-right-enter-active {
+  transition: 
+    opacity 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  transform-origin: top right;
+  will-change: opacity, transform;
+}
 
+.hud-popover-right-leave-active {
+  transition: 
+    opacity 0.16s ease-in,
+    transform 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+  transform-origin: top right;
+  will-change: opacity, transform;
+}
+
+.hud-popover-right-enter-from,
+.hud-popover-right-leave-to {
+  opacity: 0;
+  transform: translateY(-8px) scale(0.96);
+}
+
+.hud-popover-right-enter-to,
+.hud-popover-right-leave-from {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+/* 聊天面板内容布局 */
 .hud-chat-body {
   display: flex;
   flex-direction: column;
@@ -3572,51 +3573,47 @@ onBeforeUnmount(() => onFatalRoomError(null))
 }
 
 @media (max-width: 768px) {
-  .hud-chat {
+  .hud-anchor {
     top: 8px;
+  }
+  .hud-chat-anchor {
     left: 8px;
-    width: clamp(190px, 45vw, 240px);
   }
-  .hud-chat.is-collapsed {
-    width: auto;
-    min-width: 76px;
+  .hud-history-anchor {
+    right: 8px;
   }
-  .hud-chat.is-icon-only.is-collapsed {
-    width: 32px !important;
-    min-width: 32px !important;
-    height: 32px !important;
+  .hud-capsule-btn {
+    height: 30px;
+    padding: 0 9px;
+    font-size: 0.75rem;
+    gap: 5px;
+  }
+  .hud-chat-popover {
+    width: min(290px, calc(100vw - 20px));
+  }
+  .hud-history-popover {
+    width: min(340px, calc(100vw - 20px));
   }
   .hud-chat-list {
-    height: 110px;
-  }
-  .hud-history {
-    top: 8px;
-    right: 8px;
-    width: min(350px, calc(100vw - 52px));
-    z-index: 23;
-  }
-  .hud-history.is-collapsed {
-    width: auto;
-    min-width: 86px;
-    z-index: 22;
+    height: 120px;
   }
   .hud-history-list {
     max-height: clamp(200px, 46vh, 340px);
     padding: 6px 8px;
     gap: 8px;
   }
-  .hud-history .history-card {
+  .hud-history-popover .history-card {
     padding: 8px 10px;
     gap: 8px;
   }
-  .hud-history .history-card-header {
+  .hud-history-popover .history-card-header {
     padding-bottom: 6px;
   }
-  .hud-history .history-board-row {
+  .hud-history-popover .history-board-row {
     padding: 4px 8px;
     gap: 8px;
   }
-  .hud-history .history-revealed-row {
+  .hud-history-popover .history-revealed-row {
     padding: 6px 8px;
   }
 }

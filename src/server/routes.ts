@@ -124,6 +124,8 @@ export async function registerHttpRoutes(
       smallBlind: room.smallBlind,
       bigBlind: room.bigBlind,
       startingStack: room.startingStack,
+      turnSeconds: room.turnSeconds,
+      nextHandSeconds: room.nextHandSeconds,
     }
     return reply.send(info)
   })

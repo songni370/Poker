@@ -17,6 +17,7 @@ export interface RoomRecord {
   minBuyIn?: number
   maxSeats: number
   turnSeconds: number
+  nextHandSeconds: number
 }
 
 export interface PlayerRecord {
@@ -104,8 +105,8 @@ export class Repo {
     this.db
       .prepare(
         `INSERT INTO rooms (room_id, room_name, host_player_id, status, small_blind, big_blind,
-           starting_stack, buy_in_max, min_buy_in, max_seats, turn_seconds, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           starting_stack, buy_in_max, min_buy_in, max_seats, turn_seconds, next_hand_seconds, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         room.roomId,
@@ -119,6 +120,7 @@ export class Repo {
         room.minBuyIn ?? null,
         room.maxSeats,
         room.turnSeconds,
+        room.nextHandSeconds,
         now,
         now,
       )

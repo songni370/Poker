@@ -19,7 +19,7 @@ test('首次启动自动建库并迁移；再次打开幂等且保留数据', ()
   const dbPath = join(dir, 'nested', 'poker.sqlite')
 
   const first = openDatabase(dbPath)
-  assert.equal(first.migration, 3, '迁移版本应为 3（001 基础表 + 002 买入上限 + 003 初始筹码）')
+  assert.equal(first.migration, 4, '迁移版本应为 4（新增自动下一手间隔）')
 
   const tables = (first.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as unknown as {
     name: string
@@ -45,13 +45,16 @@ test('首次启动自动建库并迁移；再次打开幂等且保留数据', ()
 
   // 第二次打开：不重复迁移，数据保留。
   const second = openDatabase(dbPath)
-  assert.equal(second.migration, 3)
+  assert.equal(second.migration, 4)
   const roomCount = second.db.prepare('SELECT COUNT(*) AS c FROM rooms').get() as unknown as { c: number }
   assert.equal(Number(roomCount.c), 1, '重启后房间数据应保留')
   const migrationCount = second.db.prepare('SELECT COUNT(*) AS c FROM schema_migrations').get() as unknown as {
     c: number
   }
-  assert.equal(Number(migrationCount.c), 3, '迁移不应重复执行')
+  assert.equal(Number(migrationCount.c), 4, '迁移不应重复执行')
+  const room = second.db.prepare('SELECT next_hand_seconds FROM rooms WHERE room_id = ?').get('room_test') as
+    { next_hand_seconds: number }
+  assert.equal(room.next_hand_seconds, 0, '老房间默认保持手动开局')
   second.close()
 
   rmSync(dir, { recursive: true, force: true })
