@@ -43,7 +43,7 @@ npm run dev        # 客户端 http://localhost:5173 · 服务端 http://localho
 `npm run e2e` 使用 **Playwright**（`@playwright/test`，Apache-2.0）驱动两个相互隔离的浏览器上下文，
 直接复用系统已安装的 Google Chrome（`channel: 'chrome'`，不额外下载浏览器内核），
 并用独立端口 + 独立数据库启动一次生产进程，因此随时可跑、不影响正在服务的实例。
-受限环境里 Chrome 自身沙箱可能无法初始化，故带 `--no-sandbox`（仅访问本机页面）。截图输出到 `artifacts/e2e/`。
+受限环境里 Chrome 自身沙箱可能无法初始化，故带 `--no-sandbox`（仅访问本机页面）。页面验收使用行为与布局断言，不生成截图。
 
 部署、升级、备份与发布前检查清单见 [`docs/DEPLOY.md`](docs/DEPLOY.md)。
 
@@ -87,8 +87,8 @@ npm run dev        # 客户端 http://localhost:5173 · 服务端 http://localho
 | 测试 | `node --test` | 直接跑 `.ts`，不引入 vitest/jest |
 | 客户端 | Vue 3 + Vite + **PrimeVue 4（MIT）** + Pinia | PrimeVue 仅用于表单/对话框等控件，牌桌视觉为自绘 |
 
-> **PrimeVue 版本说明**：PrimeVue **5.x 及其配套 `primeicons@8` 已改为 PrimeTek 商业许可**，未配置许可证时会在生产界面右下角常驻 “Invalid PrimeVue License” 水印（本项目实测截图确认）。
-> 因此依赖锁定在最后一批 MIT 版本：`primevue@4.5.5`、`@primevue/themes@4.5.4`、`primeicons@7.0.0`。
+> **PrimeVue 版本说明**：PrimeVue **5.x 及其配套 `primeicons@8` 已改为 PrimeTek 商业许可**，未配置许可证时会在生产界面右下角常驻 “Invalid PrimeVue License” 水印（本项目曾在生产界面观察到）。
+> 因此依赖锁定在 MIT 版本：`primevue@4.5.5`、`@primeuix/themes@2.0.3`、`primeicons@7.0.0`。
 > 升级到 5.x 前必须先确认许可与是否需要购买密钥。
 
 ### 关于 npm 缓存（沙箱环境备注）

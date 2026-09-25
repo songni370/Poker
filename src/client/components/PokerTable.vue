@@ -592,6 +592,11 @@ const tableStatus = computed(() => {
  * 实测 390×844：6 人桌与 9 人桌的公共牌与任何座位面板都零重叠。
  */
 @media (max-width: 560px) and (orientation: portrait) {
+  /* 空桌引导放进下方观战栏，避免中央长句压住环形座位。 */
+  .empty-state {
+    display: none;
+  }
+
   .table {
     /*
      * 竖屏桌面高度 = **flex 布局算出来的剩余空间**，不再猜数值。

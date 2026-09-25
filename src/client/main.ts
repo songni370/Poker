@@ -1,7 +1,7 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import PrimeVue from 'primevue/config'
-import Aura from '@primevue/themes/aura'
+import Aura from '@primeuix/themes/aura'
 import 'primeicons/primeicons.css'
 import './styles/theme.css'
 import App from './App.vue'
@@ -9,7 +9,7 @@ import router from './router.ts'
 
 const app = createApp(App)
 app.config.errorHandler = (err, instance, info) => {
-  console.error('*** VUE ERROR HANDLER ***', err, info, (instance as any)?.$options?.__name || (instance as any)?.$options?.name, instance)
+  console.error('*** VUE ERROR HANDLER ***', err, info, instance)
 }
 
 app

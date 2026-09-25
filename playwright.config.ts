@@ -26,8 +26,8 @@ export default defineConfig({
     headless: true,
     viewport: { width: 1440, height: 900 },
     launchOptions: { args: ['--no-sandbox', '--disable-gpu'] },
-    trace: 'retain-on-failure',
-    screenshot: 'only-on-failure',
+    trace: 'off',
+    screenshot: 'off',
   },
   webServer: {
     // MAX_ROOMS 放宽：整个 e2e 轮次共用这一个服务端，多个用例各自建房会撞上「最多 3 桌」的

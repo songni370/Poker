@@ -19,8 +19,10 @@ const props = withDefaults(
     myCards?: readonly Card[]
     /** 是否显示。由父组件控制。 */
     visible?: boolean
+    /** 服务端截止时间换算的剩余秒数；null 表示未启用自动开局。 */
+    nextHandSeconds?: number | null
   }>(),
-  { seats: () => [], heroPlayerId: null, myCards: () => [], visible: false },
+  { seats: () => [], heroPlayerId: null, myCards: () => [], visible: false, nextHandSeconds: null },
 )
 
 const emit = defineEmits<{
@@ -280,6 +282,10 @@ const contendersList = computed(() => {
 
     <template #footer>
       <div class="result-footer">
+        <span v-if="nextHandSeconds !== null" class="result-next-hand">
+          <i class="pi pi-clock" aria-hidden="true" />
+          下一手 {{ nextHandSeconds > 0 ? `${String(nextHandSeconds)} 秒后自动开始` : '即将开始' }}
+        </span>
         <Button text class="history-quick-btn" :title="'查看手牌历史'" @click="emit('history')">
           <i class="pi pi-history" aria-hidden="true" />
           <span>手牌历史</span>
@@ -674,9 +680,13 @@ const contendersList = computed(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   width: 100%;
   gap: 12px;
 }
+
+.result-next-hand { flex-basis: 100%; color: #ffd875; font-size: 0.8rem; text-align: center; }
+.result-next-hand i { margin-right: 4px; }
 
 .history-quick-btn {
   color: var(--muted) !important;

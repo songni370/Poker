@@ -14,6 +14,7 @@ import {
   type HandResultPublic,
   type LegalAction,
   type PrivateSelfState,
+  type PlayerScorePublic,
   type RoomCredentials,
   type RoomMemberPublic,
   type RoomStatus,
@@ -113,6 +114,7 @@ export interface RoomSnapshot {
   version: number
   turnDeadlineAt: number | null
   persistedHandId: string | null
+  scores?: PlayerScorePublic[]
   members: {
     playerId: string
     nickname: string
@@ -153,8 +155,8 @@ export class RoomRuntime {
   readonly startingStack: number
   /** 上桌最低买入（房主设定的初始筹码）。 */
   readonly minBuyIn: number
-  readonly turnSeconds: number
-  readonly nextHandSeconds: number
+  turnSeconds: number
+  nextHandSeconds: number
   /** 房主自定义的买入上限；买入下限 = 10 个大盲，步进 = 小盲。 */
   readonly buyInMax: number
   table: HoldemTable
@@ -185,6 +187,8 @@ export class RoomRuntime {
   readonly chat: ChatMessage[] = []
   /** 本房最近的手牌结算，进入房间时下发给客户端。 */
   readonly history: HandResultPublic[] = []
+  /** 曾入座玩家的累计记录；离桌后仍留在本桌。 */
+  readonly scores = new Map<string, PlayerScorePublic>()
   /** 逐张亮牌的待执行定时器，开下一手或关房时必须清掉。 */
   readonly revealTimers: NodeJS.Timeout[] = []
   /** 已结算但还没广播出去的结算（逐张亮牌期间暂存），保证结果绝不丢失。 */
@@ -244,6 +248,7 @@ export class RoomRuntime {
       version: this.version,
       turnDeadlineAt: this.turnDeadlineAt,
       persistedHandId: this.persistedHandId,
+      scores: [...this.scores.values()],
       members: [...this.members.values()].map((member) => ({
         playerId: member.playerId,
         nickname: member.nickname,
@@ -296,6 +301,7 @@ export class RoomRuntime {
     room.turnDeadlineAt = snapshot.turnDeadlineAt
     room.nextHandDeadlineAt = snapshot.nextHandDeadlineAt ?? null
     room.persistedHandId = snapshot.persistedHandId
+    for (const score of snapshot.scores ?? []) room.scores.set(score.playerId, score)
     room.table = HoldemTable.restore(snapshot.table)
     return room
   }
@@ -742,6 +748,7 @@ export class RoomManager {
       void room.run(() => {
         const member = room.members.get(playerId)
         if (!member || member.socket !== null || member.seat === null) return
+        this.freezeScore(room, playerId)
         room.table.removePlayer(playerId)
         member.seat = null
         this.bumpVersion(room)
@@ -781,6 +788,7 @@ export class RoomManager {
     const boardBeforeCommand = room.table.publicState().board.length
     let notice: string | undefined
     let result: HandResultPublic | undefined
+    let newHostPlayerId: string | null = null
     /** 被主持人移除者的连接：等错误与广播都发完再关闭。 */
     let kickedSocket: ClientSocket | null | undefined
     /** 全下摊牌时需要补发的中间公共牌张数（例如 0 → 3 → 4 → 5）。 */
@@ -797,6 +805,7 @@ export class RoomManager {
         case 'seat.take': {
           const seated = room.table.seatOf(playerId)
           const wasAway = seated?.away ?? false
+          const needsBuyIn = !seated || seated.stack <= 0
           // 买入区间 = 房主设定的「初始筹码 ~ 买入上限」，缺省买入额取上限（一次带够）。
           const buyIn = normalizeBuyIn(
             command.buyIn ?? room.buyInMax,
@@ -826,6 +835,16 @@ export class RoomManager {
           }
           member.seat = command.seat
           member.ready = true
+          const score = room.scores.get(playerId) ?? {
+            playerId, nickname: member.nickname, totalBuyIn: 0, buyInCount: 0,
+            handsPlayed: 0, banked: 0, stack: 0, net: 0, seated: true,
+          }
+          if (needsBuyIn) {
+            score.totalBuyIn += buyIn
+            score.buyInCount += 1
+          }
+          score.seated = true
+          room.scores.set(playerId, score)
           this.clearAwayTimer(room, playerId)
           notice = wasAway
             ? `${member.nickname} 回到 ${command.seat + 1} 号位（筹码 ${String(room.table.seatOf(playerId)?.stack ?? 0)} 原样带走）`
@@ -842,15 +861,28 @@ export class RoomManager {
           break
         }
         case 'room.leave': {
+          const previousHostSeat = member.seat
+          this.freezeScore(room, playerId)
           if (member.seat !== null) room.table.removePlayer(playerId)
           room.members.delete(playerId)
           this.clearAwayTimer(room, playerId)
-          // 主持人退出：把主持权交给还在房间里的下一位（否则没人能开局）。
+          // 房主退出后按座位顺序顺延；无人入座时才交给房间里的观战者。
           if (playerId === room.hostPlayerId) {
-            const next = [...room.members.values()][0]
+            const seated = [...room.members.values()]
+              .filter((candidate) => candidate.seat !== null && !candidate.pendingKickRemoval)
+              .sort((a, b) => {
+                const distance = (seat: number) => previousHostSeat === null
+                  ? seat
+                  : (seat - previousHostSeat + room.maxSeats) % room.maxSeats
+                return distance(a.seat!) - distance(b.seat!)
+              })
+            const next = seated.find((candidate) => !room.table.seatOf(candidate.playerId)?.away)
+              ?? seated[0]
+              ?? [...room.members.values()].find((candidate) => !candidate.pendingKickRemoval)
             if (next) {
               room.hostPlayerId = next.playerId
               next.isHost = true
+              newHostPlayerId = next.playerId
             }
           }
           notice = `${member.nickname} 退出了房间`
@@ -863,6 +895,15 @@ export class RoomManager {
           // 只读命令：不推进版本号，所以也没有可写的回执（否则重放时会漏发名单）。
           this.sendMembers(room, member)
           return
+        }
+        case 'room.configure': {
+          if (playerId !== room.hostPlayerId) throw new CommandError('not_host')
+          room.turnSeconds = command.turnSeconds
+          room.nextHandSeconds = command.nextHandSeconds
+          if (room.table.publicState().phase === 'settlement' && !room.pendingSettlement) this.scheduleNextHand(room)
+          notice = `${member.nickname} 更新了思考时间和下一手等待时间`
+          eventType = 'room.configured'
+          break
         }
         case 'room.kick': {
           if (playerId !== room.hostPlayerId) throw new CommandError('not_host')
@@ -884,6 +925,7 @@ export class RoomManager {
           )
 
           // 与「退出房间」同一套语义：手牌中先弃牌并挂 pendingRemoval，等本手结算再让出座位。
+          this.freezeScore(room, command.playerId)
           if (target.seat !== null) room.table.removePlayer(command.playerId)
           // 手牌进行中时成员记录要留到结算之后：公共状态的座位是按 room.members 渲染的，
           // 提前删掉会让那个座位在桌面上凭空消失——筹码还在池里却看不见，别人还会以为能坐。
@@ -926,6 +968,12 @@ export class RoomManager {
             rng: cryptoRng(),
             buttonSeat: room.table.suggestButtonSeat(),
           })
+          for (const seat of room.table.publicState().seats) {
+            if (seat.inHand) {
+              const score = room.scores.get(seat.playerId)
+              if (score) score.handsPlayed += 1
+            }
+          }
           room.status = 'playing'
           room.persistedHandId = null
           notice = `第 ${room.table.publicState().handNo} 手牌开始`
@@ -971,6 +1019,8 @@ export class RoomManager {
       }
 
       // 结算之后才真正移除被踢的成员（在此之前那个座位还挂在公共状态里）。
+      if (result) this.bankDepartedWinnings(room, result)
+      this.syncScores(room)
       this.dropPendingKicks(room)
 
       // 精简日志里最有价值的一条：这一手谁赢了、赢多少。
@@ -986,12 +1036,14 @@ export class RoomManager {
       // 先推进版本号并定下本回合截止时间，再连同快照一起落库：
       // 这样快照里的 version / turnDeadlineAt 与随后广播的状态完全一致。
       this.bumpVersion(room)
-      this.scheduleTurn(room)
+      this.scheduleTurn(room, command.type === 'room.configure')
       if (result && revealSteps.length === 0) this.scheduleNextHand(room)
       if (command.type === 'seat.take' && room.nextHandDeadlineAt === null && !room.pendingSettlement &&
         room.table.publicState().phase === 'settlement' && room.table.canStartHand()) this.scheduleNextHand(room)
       this.repo.transaction(() => {
         this.repo.saveReceipt(command.requestId, room.id, playerId, command.type, '{"ok":true}')
+        if (newHostPlayerId) this.repo.setRoomHost(room.id, newHostPlayerId)
+        if (command.type === 'room.configure') this.repo.updateRoomConfig(room)
         this.writeState(room)
       })
       if (room.status === 'playing') this.repo.setRoomStatus(room.id, 'playing')
@@ -1263,6 +1315,7 @@ export class RoomManager {
     room.table.act(member.playerId, chosen.action)
     const settled = room.table.publicState().result
     const justSettled = Boolean(settled && settled !== settledBefore)
+    if (justSettled && settled) this.bankDepartedWinnings(room, settled)
     room.status = 'playing'
     const notice = `${member.nickname} 超时，系统自动${chosen.action === 'check' ? '过牌' : '弃牌'}`
 
@@ -1299,6 +1352,7 @@ export class RoomManager {
 
   /** 必须在事务内调用：玩家投影、手牌结算与可恢复快照一起落库。 */
   private writeState(room: RoomRuntime): void {
+    this.syncScores(room)
     for (const member of room.members.values()) this.repo.upsertPlayer(this.playerRecord(room, member))
     const result = room.table.publicState().result
     if (result && result.handId !== room.persistedHandId) {
@@ -1338,8 +1392,38 @@ export class RoomManager {
     return member.socket !== null && member.socket.readyState === 1
   }
 
+  private freezeScore(room: RoomRuntime, playerId: string): void {
+    const score = room.scores.get(playerId)
+    if (!score) return
+    score.banked += room.table.seatOf(playerId)?.stack ?? score.stack
+    score.stack = 0
+    score.net = score.banked - score.totalBuyIn
+    score.seated = false
+  }
+
+  private bankDepartedWinnings(room: RoomRuntime, result: HandResultPublic): void {
+    for (const winner of result.winners) {
+      const score = room.scores.get(winner.playerId)
+      const member = room.members.get(winner.playerId)
+      if (score && (!member || member.pendingKickRemoval || member.seat === null)) {
+        score.banked += winner.amount
+      }
+    }
+  }
+
+  private syncScores(room: RoomRuntime): void {
+    for (const score of room.scores.values()) {
+      const seat = room.table.seatOf(score.playerId)
+      const member = room.members.get(score.playerId)
+      score.seated = Boolean(member && !member.pendingKickRemoval && member.seat !== null && seat)
+      if (score.seated && seat) score.stack = seat.stack
+      score.net = score.banked + score.stack - score.totalBuyIn
+    }
+  }
+
   /** 公共状态：只包含所有人都能看到的信息，绝不携带他人底牌。 */
   private publicState(room: RoomRuntime): GameStatePublic {
+    this.syncScores(room)
     const table = room.table.publicState()
     const seats: (SeatPublic | null)[] = Array.from({ length: room.maxSeats }, () => null)
 
@@ -1396,6 +1480,7 @@ export class RoomManager {
       nextHandSeconds: room.nextHandSeconds,
       nextHandDeadlineAt: room.nextHandDeadlineAt,
       seats,
+      scores: [...room.scores.values()].map((score) => ({ ...score })),
       buttonSeat: table.buttonSeat,
       actingPlayerId: actingSeat === null ? null : (room.memberAtSeat(actingSeat)?.playerId ?? null),
       turnDeadlineAt: room.turnDeadlineAt,
@@ -1411,7 +1496,7 @@ export class RoomManager {
     const holeCards = seat === null ? [] : room.table.holeCardsOf(playerId)
     const legalActions: LegalAction[] =
       seat !== null && state.actingSeat === seat ? room.table.legalActions(playerId) : []
-    return { playerId, seat, holeCards, legalActions }
+    return { playerId, seat, isHost: member?.isHost ?? false, holeCards, legalActions }
   }
 
   private envelope(room: RoomRuntime, type: ServerEventType, extra: Partial<ServerEvent>): Omit<ServerEvent, 'self'> {

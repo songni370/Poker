@@ -430,7 +430,7 @@ test('重启后自动下一手沿用快照里的截止时间，不重新计满�
   t.after(async () => { if (server) await server.stop(); rmSync(dir, { recursive: true, force: true }) })
 
   const host = await postJson<RoomCredentials>(`${server.base}/api/rooms`, {
-    nickname: '甲', nextHandSeconds: 120, turnSeconds: 9,
+    nickname: '甲', nextHandSeconds: 120, turnSeconds: 30,
   })
   const guest = await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '乙' })
   const a = new TestClient(server.wsUrl)
@@ -469,6 +469,6 @@ test('重启后自动下一手沿用快照里的截止时间，不重新计满�
   assert.ok(restored)
   await delay(100)
   assert.equal(restored.table.publicState().handNo, 2)
-  assert.equal(restored.turnSeconds, 9)
+  assert.equal(restored.turnSeconds, 30)
   assert.equal(restored.nextHandDeadlineAt, null)
 })

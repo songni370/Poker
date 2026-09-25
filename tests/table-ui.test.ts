@@ -3,7 +3,7 @@
 //   2) 操作区快捷额度（1/2、2/3、满池、超池）的换算与夹取 —— action-bar-sizing.ts；
 //   3) 邀请面板的复制退路 —— clipboard.ts（局域网 http 明文下没有 navigator.clipboard）。
 //
-// 这几块共同点：界面上的数字/文案必须与服务端裁定一致，不能只靠肉眼看截图。
+// 这几块共同点：界面上的数字/文案必须与服务端裁定一致，不能只靠目测。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { describeHand, evaluateHand } from '../src/engine/evaluate.ts'

@@ -50,8 +50,6 @@ test('聊天：房主发言对手能看到，刷新后仍能看到历史，未�
   await openDrawerSection(guest, '聊天')
   await expect(guest.getByText(text)).toBeVisible()
   await expect(chatButton).toHaveAttribute('aria-label', '聊天，没有未读消息')
-  await guest.waitForTimeout(500) // 等抽屉滑入动画结束再截图
-  await guest.screenshot({ path: 'artifacts/e2e/07-chat-drawer.png' })
 
   // 关掉抽屉后再来一条消息：重新打开时应出现「以下为新消息」分隔线
   await guest.locator('.p-drawer-close, [aria-label="Close"]').first().click().catch(() => guest.keyboard.press('Escape'))
@@ -62,8 +60,6 @@ test('聊天：房主发言对手能看到，刷新后仍能看到历史，未�
   await openDrawerSection(guest, '聊天')
   await expect(guest.getByText('以下为新消息')).toBeVisible()
   await expect(guest.getByText('第二条消息')).toBeVisible()
-  await guest.waitForTimeout(400)
-  await guest.screenshot({ path: 'artifacts/e2e/09-chat-unread-divider.png' })
 
   // ── 房间事件进聊天日志（服务端 system 消息） ──
   await expect(guest.locator('.chat-system').first()).toBeVisible()
@@ -88,7 +84,6 @@ test('聊天：房主发言对手能看到，刷新后仍能看到历史，未�
   await expect(guest.getByText('没有匹配的消息')).toBeVisible()
   await guest.getByRole('button', { name: '清除' }).click()
   await expect(guest.locator('.chat-msg').first()).toBeVisible()
-  await guest.screenshot({ path: 'artifacts/e2e/12-chat-mention-and-log.png' })
 
   // 刷新后聊天历史仍在（服务端下发 chatHistory）
   await guest.reload()
@@ -137,7 +132,6 @@ test('聊天分组：同一个人连续发言只显示一次昵称，@ 提醒另
   await expect(ownMessages.nth(1)).toContainText('你')
   // 三条共用一个组首昵称，页面上「你」只出现一次（没有逐条重复）
   await expect(host.locator('.chat-msg .chat-who')).toHaveCount(1)
-  await host.screenshot({ path: 'artifacts/e2e/14-chat-grouping.png' })
 
   // 别人插话后，同一个人再发言要重新起一组
   await openDrawerSection(guest, '聊天')
@@ -203,7 +197,6 @@ test('观战：座位满仍可进入观战，看不到底牌也没有操作区�
   }))
   expect(layout.stripTop, '通知条应在顶栏之下').toBeGreaterThanOrEqual(layout.barBottom)
   expect(layout.stripBottom, '通知条应在牌桌之上').toBeLessThanOrEqual(layout.tableTop)
-  await watcher.screenshot({ path: 'artifacts/e2e/34-notice-strip.png' })
 
   // 观战者：能看到牌桌与观战面板，但没有可执行的动作、没有底牌。
   // 底部操作栏本身会渲染（第 3 项需求把「退出房间」搬了进去），但一个动作按钮都不该有。
@@ -214,13 +207,11 @@ test('观战：座位满仍可进入观战，看不到底牌也没有操作区�
   // 对局进行中，观战者 DOM 里不应出现任何正面牌（背面牌不计）
   const faceUp = await watcher.locator('[role="img"]:not([aria-label="盖住的牌"])').count()
   expect(faceUp).toBe(0)
-  await watcher.screenshot({ path: 'artifacts/e2e/08-spectator.png' })
 
   // 客人「离座」：座位与筹码保留，别人坐不进来（第 6 项）
   await leaveSeat(guest)
   await expect(guest.locator('.spectator-state')).toContainText('已离座')
   await expect(guest.getByRole('button', { name: /坐回 \d+ 号位/ })).toBeVisible()
-  await guest.screenshot({ path: 'artifacts/e2e/10-seat-reserved-after-leave.png' })
   // 别人也要能看出来这个座位「人走了、座位还在」：座位上显示「已离座」（第 4 项需求改成了小胶囊）
   await expect(host.locator('.away-pill')).toHaveCount(1)
   await expect(host.locator('.away-pill')).toContainText('已离座')
@@ -243,7 +234,6 @@ test('观战：座位满仍可进入观战，看不到底牌也没有操作区�
   await expect(watcher.locator('.spectator-seat-picker')).toHaveCount(0)
   await expect(watcher.locator('.seat-picker')).toHaveCount(0)
   await expect(watcher.locator('.table .seat-empty')).toHaveCount(8, { timeout: 10_000 })
-  await watcher.screenshot({ path: 'artifacts/e2e/11-spectator-empty-seat.png' })
 
   // 点桌面空位（客人刚腾出来的 2 号位）→ 买入确认 → 落座
   await takeSeat(watcher, 2)
@@ -284,7 +274,6 @@ test('中等宽度顶栏收纳：只留「更多」与「退出」，菜单里�
   await expect(menu.first()).toBeVisible()
   await expect(menu.first().getByText('规则摘要')).toBeVisible()
   await expect(menu.first().getByText(/手牌历史|聊天|提示音/).first()).toBeVisible()
-  await host.screenshot({ path: 'artifacts/e2e/11-bar-more-menu.png' })
   await menu.first().getByText(/^聊天/).first().click()
   await expect(host.getByPlaceholder('说点什么…')).toBeVisible()
 
@@ -340,13 +329,11 @@ test('移除玩家：房主把客人移出房间，客人跳到错误页，释�
   await expect(kickDialog.getByText('这是你')).toBeVisible()
   // 自己不能被移除：只有另外两行有按钮
   await expect(kickDialog.getByRole('button', { name: '移除' })).toHaveCount(2)
-  await host.screenshot({ path: 'artifacts/e2e/21-kick-player-dialog.png' })
 
   // 点「移除」先就地二次确认：这时候还没真的移除
   const guestRow = kickDialog.locator('.kick-row').filter({ hasText: guestName })
   await guestRow.getByRole('button', { name: '移除' }).click()
   await expect(kickDialog).toContainText(`确定把「${guestName}」移出房间吗？`)
-  await host.screenshot({ path: 'artifacts/e2e/22-kick-player-confirm.png' })
   // 取消不会移除任何人
   await kickDialog.getByRole('button', { name: '取消' }).click()
   await expect(guestRow.getByRole('button', { name: '移除' })).toBeVisible()
@@ -360,7 +347,6 @@ test('移除玩家：房主把客人移出房间，客人跳到错误页，释�
   await expect(guest).toHaveURL(/\/error/)
   await expect(guest.getByRole('heading', { name: '你已被移出房间' })).toBeVisible()
   await expect(guest.locator('.panel')).toContainText('移出')
-  await guest.screenshot({ path: 'artifacts/e2e/23-kicked-error-page.png' })
   // 而且不能一直往牌桌重连（凭证已作废并清掉）
   await guest.waitForTimeout(800)
   await expect(guest).toHaveURL(/\/error/)
@@ -474,14 +460,12 @@ test('桌面空位落座：窄屏点桌面空位买入即可落座，底部不�
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   )
   expect(overflowX, '窄屏不应横向溢出').toBe(0)
-  await watcher.screenshot({ path: 'artifacts/e2e/15-spectator-empty-seats-narrow.png' })
 
   /* ③ 点桌面第 5 个空位 → 买入确认 → 落座（新流程的完整闭环）。
         takeAnyFreeSeat 内部已覆盖「弹窗出现 → 填/用默认金额 → 确认 → 落座」全流程。 */
   await takeAnyFreeSeat(watcher, 4)
   await expect(watcher.getByText('观战中')).toBeHidden({ timeout: 10_000 })
   await expect(watcher.locator('.hero-cards')).toBeVisible()
-  await watcher.screenshot({ path: 'artifacts/e2e/20-seated-by-picking-a-seat.png' })
 
   // 退出房间：释放座位并回到大厅（与「离座」不同）
   await exitRoom(watcher)
@@ -560,13 +544,11 @@ test('界面改造：牌面无中央花色、座位角色槽位、底部当前�
   // 没有角色的座位：槽位整块不渲染（不是渲染成空盒子）。
   expect(withRoles.length).toBe(3)
   expect(await host.locator('.seat .roles').count()).toBe(3)
-  await host.locator('.table').screenshot({ path: 'artifacts/e2e/28-seat-role-slots.png' })
 
   /* ③ 翻牌前的当前牌型：两张底牌也要给结论。 */
   const handName = host.locator('.hero-hand .hand-name')
   await expect(handName).toBeVisible()
   await expect(handName).toHaveText(/^(一对 |高牌 )/)
-  await host.locator('.hero-meta').screenshot({ path: 'artifacts/e2e/29-hero-hand-name-preflop.png' })
 
   /* ④ 操作区：英文主 + 中文辅，且有四个快捷额度。 */
   let actor = null as typeof host | null
@@ -648,13 +630,10 @@ test('界面改造：牌面无中央花色、座位角色槽位、底部当前�
   const potValue = ((await potButton.locator('.quick-value').textContent()) ?? '').trim()
   await potButton.click()
   await expect(bettor.locator('#bet-amount')).toHaveValue(potValue)
-  await bettor.locator('.action-bar').screenshot({ path: 'artifacts/e2e/31-action-bar-quick-sizes.png' })
 
   /* ③+ 河牌：公共牌发到 5 张后，牌型文案跟着更新（结算叠层里是引擎的同一个说法）。 */
   expect(await playUntilSettled([host, guest, third])).toBe(true)
   await expect(host.locator('.best-five .card').first()).toBeVisible()
-  await host.screenshot({ path: 'artifacts/e2e/24-card-face-no-center-pip.png' })
-  await host.locator('.best-five').first().screenshot({ path: 'artifacts/e2e/26-card-face-best-five-26px.png' })
 
   const settledFace = await host.evaluate(() => ({
     pips: document.querySelectorAll('.pip').length,
@@ -679,9 +658,6 @@ test('界面改造：牌面无中央花色、座位角色槽位、底部当前�
   await expect(riverName).toHaveText(
     /^(高牌（|一对 |两对（|三条 |顺子（|同花（|葫芦（|四条 |同花顺（)/,
   )
-  await host.locator('.hero-meta').screenshot({ path: 'artifacts/e2e/30-hero-hand-name-river.png' })
-  await host.locator('.hero-cards .cards').screenshot({ path: 'artifacts/e2e/25-card-face-hero-58px.png' })
-  await host.locator('.table').screenshot({ path: 'artifacts/e2e/27-card-face-board-42px.png' })
 
   /* ②+ 单挑（双人桌）：庄家同时是小盲，同一个座位的角色槽位要同时挂 D 与 SB。 */
   await dismissResult(guest)
@@ -696,7 +672,6 @@ test('界面改造：牌面无中央花色、座位角色槽位、底部当前�
       .filter((roles) => roles !== ''),
   )
   expect(headsUp.sort()).toEqual(['BB', 'D+SB'])
-  await host.locator('.table').screenshot({ path: 'artifacts/e2e/32-seat-role-slots-heads-up.png' })
 
   expect(errors).toEqual([])
   await hostContext.close()
@@ -731,7 +706,6 @@ test('房间号：纯数字，大厅可以按号加入，非数字当场拦下',
   await guest.waitForURL(new RegExp(`/table/${roomId}$`))
   await expect(guest.locator('.table')).toBeVisible()
   await expect(guest.getByText('观战中')).toBeVisible()
-  await guest.screenshot({ path: 'artifacts/e2e/34-lobby-join-by-code.png' })
 
   expect(errors).toEqual([])
   await hostContext.close()
@@ -761,7 +735,6 @@ test('邀请：抽屉里给出房间号与邀请链接，复制有反馈，没�
   await expect(panel).toBeVisible()
   await expect(panel.locator('.invite-code')).toHaveText(roomId)
   await expect(host.locator('#invite-link')).toHaveValue(link)
-  await host.locator('.p-drawer').screenshot({ path: 'artifacts/e2e/35-invite-panel.png' })
 
   // 分节内容不能横向溢出（长链接 + 两个按钮挤在一起时最容易撑破抽屉）。
   const fit = await panel.evaluate((section) => {
@@ -804,7 +777,6 @@ test('邀请：抽屉里给出房间号与邀请链接，复制有反馈，没�
     Math.round(document.querySelector('.bar')!.getBoundingClientRect().height),
   )
   expect(barHeight, '顶栏必须保持一行').toBeLessThan(80)
-  await host.screenshot({ path: 'artifacts/e2e/36-invite-bar-1150.png' })
 
   /* 窄屏：入口收进「更多」，四个分节标签不能横向溢出。 */
   await host.setViewportSize({ width: 360, height: 740 })
@@ -823,8 +795,6 @@ test('邀请：抽屉里给出房间号与邀请链接，复制有反馈，没�
     return { scrollWidth: row.scrollWidth, clientWidth: row.clientWidth }
   })
   expect(tabs.scrollWidth, '四个分节标签不能横向溢出').toBeLessThanOrEqual(tabs.clientWidth + 1)
-  await host.waitForTimeout(500) // 等抽屉滑入动画结束再截图
-  await host.screenshot({ path: 'artifacts/e2e/38-invite-portrait-360x740.png' })
   expect(errors).toEqual([])
   await hostContext.close()
 
@@ -851,7 +821,6 @@ test('邀请：抽屉里给出房间号与邀请链接，复制有反馈，没�
   })
   expect(picked.value).toBe(link)
   expect([picked.start, picked.end], '链接应被整段选中，手按 Ctrl/⌘+C 就能复制').toEqual([0, link.length])
-  await plainPanel.screenshot({ path: 'artifacts/e2e/37-invite-manual-copy.png' })
 
   expect(plainErrors).toEqual([])
   await plainContext.close()

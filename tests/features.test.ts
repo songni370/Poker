@@ -9,6 +9,136 @@ import { TestClient, delay, joinCommand, postJson, rid, startTestServer, takeSea
 import { Repo, newRoomId } from '../src/server/repo.ts'
 import { buildApp } from '../src/server/app.ts'
 import { openDatabase } from '../src/server/db/index.ts'
+import { RoomRuntime, type RoomSnapshot } from '../src/server/rooms.ts'
+
+test('计分板累计买入、参局与离桌筹码，并保存进房间快照', async (t) => {
+  const server = await startTestServer()
+  t.after(server.stop)
+  const host = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '房主' })).data
+  const guest = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '玩家' })).data
+  const a = new TestClient(server.wsUrl)
+  const b = new TestClient(server.wsUrl)
+  t.after(() => { a.close(); b.close() })
+  await Promise.all([a.open(), b.open()])
+  a.send(joinCommand(host))
+  await a.waitFor((m) => m.type === 'room.snapshot')
+  b.send(joinCommand(guest))
+  await b.waitFor((m) => m.type === 'room.snapshot')
+  assert.deepEqual(a.lastState()?.scores, [], '未入座的旁观者不进入计分板')
+
+  await takeSeat(a, 0, 2000)
+  await takeSeat(b, 1, 3000)
+  assert.deepEqual(a.lastState()?.scores.map((score) => [score.nickname, score.totalBuyIn, score.buyInCount]), [
+    ['房主', 2000, 1], ['玩家', 3000, 1],
+  ])
+
+  const fromStart = a.messages.length
+  a.send({ type: 'game.start', requestId: rid() })
+  await a.waitFor((m) => m.type === 'hand.started', 5000, fromStart)
+  assert.deepEqual(a.lastState()?.scores.map((score) => score.handsPlayed), [1, 1])
+
+  const fromLeave = b.messages.length
+  a.send({ type: 'room.leave', requestId: rid() })
+  await b.waitFor((m) => 'state' in m && m.state.scores.some((score) => score.playerId === host.playerId && !score.seated), 5000, fromLeave)
+  const departed = b.lastState()!.scores.find((score) => score.playerId === host.playerId)!
+  assert.equal(departed.seated, false)
+  assert.equal(departed.net, departed.banked + departed.stack - departed.totalBuyIn, '离桌带走的筹码仍计入净筹码')
+  assert.ok(departed.banked > 0)
+  const saved = server.handle.db.prepare('SELECT state_json FROM room_snapshots WHERE room_id = ?').get(host.roomId) as { state_json: string }
+  assert.equal(JSON.parse(saved.state_json).scores.length, 2)
+  const recovered = RoomRuntime.fromSnapshot(JSON.parse(saved.state_json) as RoomSnapshot)
+  assert.equal(recovered.scores.get(host.playerId)?.banked, departed.banked)
+})
+
+test('只有房主可调整思考与下一手时间，进行中仍不能修改买入范围', async (t) => {
+  const server = await startTestServer()
+  t.after(server.stop)
+  const created = await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '房主' })
+  assert.equal(created.status, 201)
+  const host = created.data
+  const guest = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '玩家' })).data
+  const a = new TestClient(server.wsUrl)
+  const b = new TestClient(server.wsUrl)
+  t.after(() => { a.close(); b.close() })
+  await Promise.all([a.open(), b.open()])
+  a.send(joinCommand(host))
+  await a.waitFor((message) => message.type === 'room.snapshot')
+  b.send(joinCommand(guest))
+  await b.waitFor((message) => message.type === 'room.snapshot')
+  await takeSeat(a, 0)
+  await takeSeat(b, 1)
+  a.send({ type: 'game.start', requestId: rid() })
+  await a.waitFor((message) => message.type === 'hand.started')
+
+  const deniedFrom = b.messages.length
+  b.send({ type: 'room.configure', requestId: rid(), turnSeconds: 45, nextHandSeconds: 0 })
+  const denied = await b.waitFor((message) => message.type === 'room.error', 5000, deniedFrom)
+  assert.equal(denied.type === 'room.error' && denied.error?.code, 'not_host')
+
+  const before = a.lastState()!
+  const from = a.messages.length
+  const attemptedBuyInChange = {
+    type: 'room.configure' as const, requestId: rid(), turnSeconds: 45, nextHandSeconds: 0,
+    minBuyIn: 9999, buyInMax: 9999,
+  }
+  a.send(attemptedBuyInChange)
+  const changed = await a.waitFor((message) => message.type === 'room.configured', 5000, from)
+  assert.equal(changed.type === 'room.configured' && changed.state.turnSeconds, 45)
+  assert.equal(a.lastState()!.nextHandSeconds, 0)
+  assert.equal(a.lastState()!.turnDeadlineAt, before.turnDeadlineAt, '当前玩家的倒计时不应重新开始')
+  assert.equal(a.lastState()!.buyInMin, before.buyInMin)
+  assert.equal(a.lastState()!.buyInMax, before.buyInMax)
+  const row = server.handle.db.prepare('SELECT turn_seconds, next_hand_seconds, min_buy_in, buy_in_max FROM rooms WHERE room_id = ?')
+    .get(host.roomId) as { turn_seconds: number; next_hand_seconds: number; min_buy_in: number; buy_in_max: number }
+  assert.equal(row.turn_seconds, 45)
+  assert.equal(row.next_hand_seconds, 0)
+  assert.equal(row.min_buy_in, before.buyInMin)
+  assert.equal(row.buy_in_max, before.buyInMax)
+  const snapshot = server.handle.db.prepare('SELECT state_json FROM room_snapshots WHERE room_id = ?').get(host.roomId) as { state_json: string }
+  assert.equal(JSON.parse(snapshot.state_json).turnSeconds, 45)
+})
+
+test('房主退出后按座位顺延，观战者不能抢先继任，权限和数据库同步更新', async (t) => {
+  const server = await startTestServer()
+  t.after(server.stop)
+
+  const host = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, { nickname: '房主' })).data
+  const spectator = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '观战' })).data
+  const clockwise = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '顺位' })).data
+  const wrapped = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '次位' })).data
+  const clients = [host, spectator, clockwise, wrapped].map(() => new TestClient(server.wsUrl))
+  t.after(() => clients.forEach((client) => client.close()))
+  await Promise.all(clients.map((client) => client.open()))
+  for (let index = 0; index < clients.length; index++) {
+    clients[index]!.send(joinCommand([host, spectator, clockwise, wrapped][index]!))
+    await clients[index]!.waitFor((message) => message.type === 'room.snapshot')
+  }
+  await takeSeat(clients[0]!, 4)
+  await takeSeat(clients[2]!, 6)
+  await takeSeat(clients[3]!, 1)
+
+  const from = clients.map((client) => client.messages.length)
+  clients[0]!.send({ type: 'room.leave', requestId: rid() })
+  const changed = await clients[2]!.waitFor((message) => message.type === 'room.player_left', 5000, from[2])
+  await Promise.all([1, 3].map((index) => clients[index]!.waitFor((message) => message.type === 'room.player_left', 5000, from[index])))
+  assert.equal(changed.type === 'room.player_left' && changed.self.isHost, true)
+  assert.equal(clients[2]!.lastState()!.seats[6]?.isHost, true)
+  assert.equal(clients[1]!.lastSelf()!.isHost, false)
+  assert.equal(clients[3]!.lastSelf()!.isHost, false)
+
+  const roomRow = server.handle.db.prepare('SELECT host_player_id FROM rooms WHERE room_id = ?').get(host.roomId) as { host_player_id: string }
+  assert.equal(roomRow.host_player_id, clockwise.playerId)
+  const hosts = server.handle.db.prepare('SELECT player_id FROM players WHERE room_id = ? AND is_host = 1').all(host.roomId) as { player_id: string }[]
+  assert.deepEqual(hosts.map((row) => row.player_id), [clockwise.playerId])
+
+  const deniedFrom = clients[1]!.messages.length
+  clients[1]!.send({ type: 'room.members', requestId: rid() })
+  const denied = await clients[1]!.waitFor((message) => message.type === 'room.error', 5000, deniedFrom)
+  assert.equal(denied.type === 'room.error' && denied.error?.code, 'not_host')
+  const allowedFrom = clients[2]!.messages.length
+  clients[2]!.send({ type: 'room.members', requestId: rid() })
+  await clients[2]!.waitFor((message) => message.type === 'room.members', 5000, allowedFrom)
+})
 
 test('房间上限：服务器最多同时开放 10 桌，关闭一桌后可以再开', async (t) => {
   // 产品默认上限是 10（DEFAULT_MAX_ROOMS）；这里显式传 10，避免测试依赖环境变量。
@@ -204,21 +334,21 @@ test('房主自定义计时：行动倒计时与结算后自动开下一手', as
   const server = await startTestServer()
   t.after(server.stop)
   for (const settings of [
-    { turnSeconds: 4 }, { turnSeconds: 121 }, { nextHandSeconds: -1 }, { nextHandSeconds: 121 },
+    { turnSeconds: 29 }, { turnSeconds: 301 }, { nextHandSeconds: -1 }, { nextHandSeconds: 121 },
   ]) {
     const rejected = await postJson<{ error: string }>(`${server.base}/api/rooms`, { nickname: '甲', ...settings })
     assert.equal(rejected.status, 400)
   }
   const host = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, {
-    nickname: '甲', turnSeconds: 7, nextHandSeconds: 1,
+    nickname: '甲', turnSeconds: 30, nextHandSeconds: 1,
   })).data
   const guest = (await postJson<RoomCredentials>(`${server.base}/api/rooms/${host.roomId}/join`, { nickname: '乙' })).data
   const row = server.handle.db.prepare('SELECT turn_seconds, next_hand_seconds FROM rooms WHERE room_id = ?')
     .get(host.roomId) as { turn_seconds: number; next_hand_seconds: number }
-  assert.deepEqual([row.turn_seconds, row.next_hand_seconds], [7, 1])
+  assert.deepEqual([row.turn_seconds, row.next_hand_seconds], [30, 1])
   const info = await (await fetch(`${server.base}/api/rooms/${host.roomId}`)).json() as
     { turnSeconds: number; nextHandSeconds: number }
-  assert.deepEqual([info.turnSeconds, info.nextHandSeconds], [7, 1])
+  assert.deepEqual([info.turnSeconds, info.nextHandSeconds], [30, 1])
 
   const a = new TestClient(server.wsUrl)
   const b = new TestClient(server.wsUrl)
@@ -233,9 +363,9 @@ test('房主自定义计时：行动倒计时与结算后自动开下一手', as
   a.send({ type: 'game.start', requestId: rid() })
   const first = await a.waitFor((message) => message.type === 'hand.started')
   assert.ok(first.type === 'hand.started')
-  assert.equal(first.state.turnSeconds, 7)
+  assert.equal(first.state.turnSeconds, 30)
   assert.equal(first.state.nextHandSeconds, 1)
-  assert.ok(first.state.turnDeadlineAt && first.state.turnDeadlineAt - Date.now() <= 7000)
+  assert.ok(first.state.turnDeadlineAt && first.state.turnDeadlineAt - Date.now() <= 30000)
 
   a.send({ type: 'game.action', requestId: rid(), handId: first.state.handId!,
     expectedVersion: first.state.version, action: 'fold' })

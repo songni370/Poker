@@ -5,11 +5,12 @@ import Button from 'primevue/button'
 import Dialog from 'primevue/dialog'
 import InputNumber from 'primevue/inputnumber'
 import InputText from 'primevue/inputtext'
+import Message from 'primevue/message'
 import Password from 'primevue/password'
 import type { ActionType, Card } from '../../shared/poker.ts'
-import { ROOM_PASSWORD_DIGITS, STREET_NAMES, TABLE_RULES, formatCard } from '../../shared/poker.ts'
+import { ROOM_PASSWORD_DIGITS, STREET_NAMES, TABLE_RULES } from '../../shared/poker.ts'
 import { describeHand } from '../../engine/evaluate.ts'
-import type { ChatMessage, RoomMemberPublic } from '../../shared/protocol.ts'
+import type { ChatMessage, RoomInfoResponse, RoomMemberPublic } from '../../shared/protocol.ts'
 import { CHAT_MAX_LENGTH } from '../../shared/protocol.ts'
 import { NICKNAME_MAX } from '../../shared/poker.ts'
 import {
@@ -31,8 +32,8 @@ import HandResultOverlay from '../components/HandResultOverlay.vue'
 import NoticeStrip from '../components/NoticeStrip.vue'
 import PlayingCard from '../components/PlayingCard.vue'
 import PokerTable from '../components/PokerTable.vue'
+import RoomConfigDialog from '../components/RoomConfigDialog.vue'
 import { copyText } from '../components/clipboard.ts'
-import { playPing, soundEnabled, unlockAudio } from '../sound.ts'
 import { useChatStore } from '../stores/chat.ts'
 import { useConnectionStore } from '../stores/connection.ts'
 import { useGameStore } from '../stores/game.ts'
@@ -50,7 +51,7 @@ import { useRoomStore } from '../stores/room.ts'
  *     connection.setStatus('online')
  *   }
  *
- * 生产构建下 import.meta.env.DEV 为 false，模拟数据会被摇树移除。
+ * 只有开发模式的 /table/dev 使用模拟数据；真实房间号始终走服务端。
  */
 const props = defineProps<{ roomId: string }>()
 
@@ -78,7 +79,7 @@ const isDev = import.meta.env.DEV
  *   }
  */
 
-const scenario = ref(isDev && typeof route.query.mock === 'string' ? route.query.mock : 'flop')
+const scenario = typeof route.query.mock === 'string' ? route.query.mock : 'flop'
 const noticeText = ref('')
 watch(
   () => session.notice,
@@ -116,9 +117,8 @@ async function applyScenario(name: string): Promise<void> {
 }
 
 /**
- * 接入优先级：本地有房间凭证 → 真实 WebSocket；否则开发模式用模拟场景；
- * 生产环境没有凭证时**不再跳错误页**：邀请链接直接落在牌桌上，
- * 这里给出「填昵称加入」面板，加入后先是旁观者，再自己选座买入。
+ * 接入优先级：本地有房间凭证 → 真实 WebSocket；开发模式的 /table/dev → 模拟场景；
+ * 真实房间没有凭证时显示「填昵称加入」面板，加入后先旁观，再选座买入。
  */
 onMounted(() => {
   window.addEventListener('pointerdown', handleHudPointerDown)
@@ -128,8 +128,8 @@ onMounted(() => {
     connectRoom(credentials)
     return
   }
-  if (isDev) {
-    void applyScenario(scenario.value)
+  if (isDev && props.roomId === 'dev') {
+    void applyScenario(scenario)
     return
   }
   void loadJoinInfo()
@@ -138,10 +138,10 @@ onMounted(() => {
 /* ───────────── 邀请链接：未加入时的「填昵称进桌」 ───────────── */
 
 const joining = ref(false)
-const joinNickname = ref('')
+const joinNickname = ref(room.nickname || '')
 const joinPassword = ref('')
 const joinError = ref('')
-const joinInfo = ref<{ roomName: string; seated: number; maxSeats: number; status: string } | null>(null)
+const joinInfo = ref<RoomInfoResponse | null>(null)
 const joinInfoError = ref('')
 
 /** 先取公开信息（房间名/人数），失败就给出可执行的提示，而不是白屏。 */
@@ -185,6 +185,8 @@ async function submitJoin(): Promise<void> {
 
 const remainingSeconds = ref(0)
 const remainingRatio = ref(1)
+const nextHandRemainingSeconds = ref(0)
+const nextHandCountdownVisible = computed(() => game.state?.phase === 'settlement' && game.state.nextHandDeadlineAt != null)
 const turnSeconds = computed(() => game.state?.turnSeconds ?? TABLE_RULES.turnSeconds)
 
 let rafId = 0
@@ -193,15 +195,20 @@ let lastUpdateRatioBucket = -1
 
 function tick(): void {
   const deadline = game.state?.turnDeadlineAt
-  if (!deadline) {
+  const nextHandDeadline = game.state?.nextHandDeadlineAt
+  if (!deadline && !nextHandDeadline) {
     if (remainingSeconds.value !== 0) remainingSeconds.value = 0
     if (remainingRatio.value !== 0) remainingRatio.value = 0
+    if (nextHandRemainingSeconds.value !== 0) nextHandRemainingSeconds.value = 0
     rafId = 0
     return
   }
 
   const now = Date.now() + connection.clockOffsetMs
-  const remMs = Math.max(0, deadline - now)
+  const nextRemMs = nextHandDeadline ? Math.max(0, nextHandDeadline - now) : 0
+  const nextSec = Math.ceil(nextRemMs / 1000)
+  if (nextHandRemainingSeconds.value !== nextSec) nextHandRemainingSeconds.value = nextSec
+  const remMs = deadline ? Math.max(0, deadline - now) : 0
   const sec = Math.ceil(remMs / 1000)
   const totalMs = Math.max(1, turnSeconds.value * 1000)
   const ratio = Math.max(0, Math.min(1, remMs / totalMs))
@@ -217,7 +224,7 @@ function tick(): void {
     remainingRatio.value = ratio
   }
 
-  if (remMs > 0) {
+  if (remMs > 0 || nextRemMs > 0) {
     rafId = requestAnimationFrame(tick)
   } else {
     rafId = 0
@@ -227,17 +234,18 @@ function tick(): void {
 }
 
 watch(
-  () => game.state?.turnDeadlineAt ?? null,
-  (deadline) => {
+  [() => game.state?.turnDeadlineAt ?? null, () => game.state?.nextHandDeadlineAt ?? null],
+  ([deadline, nextHandDeadline]) => {
     cancelAnimationFrame(rafId)
     rafId = 0
     lastUpdateSec = -1
     lastUpdateRatioBucket = -1
-    if (deadline !== null) {
+    if (deadline !== null || nextHandDeadline !== null) {
       tick()
     } else {
       remainingSeconds.value = 0
       remainingRatio.value = 0
+      nextHandRemainingSeconds.value = 0
     }
   },
   { immediate: true },
@@ -263,7 +271,7 @@ watch(
 watch(
   () => game.state?.handNo,
   () => {
-    if (game.state?.phase === 'betting' && game.state?.street === 'preflop') {
+    if (game.state?.street === 'preflop') {
       savedHeroCards.value = []
     }
   },
@@ -340,12 +348,16 @@ const blockedReason = computed(() => {
   if (!game.state) return '正在载入牌局状态…'
   if (!game.isSeated) return '你正在旁观，入座后才能行动。'
   if (game.isMyTurn) return ''
+  if (game.state.phase === 'settlement') {
+    if (!nextHandCountdownVisible.value) return '本手已结束，等待下一手。'
+    return nextHandRemainingSeconds.value > 0
+      ? `本手已结束，下一手 ${String(nextHandRemainingSeconds.value)} 秒后自动开始。`
+      : '本手已结束，下一手即将开始。'
+  }
   if (game.mySeat?.folded) return '你已弃牌，本手不再行动。'
   if (game.mySeat?.allIn) return '你已全下，等待发牌与结算。'
   if (game.state.phase === 'waiting') return '等待主持人开局。'
-  if (game.state.phase === 'showdown' || game.state.phase === 'settlement') {
-    return game.state.nextHandDeadlineAt ? '本手已结束，下一手即将自动开始。' : '本手已结束，等待下一手。'
-  }
+  if (game.state.phase === 'showdown') return '本手已结束，等待结算。'
   if (game.actingSeat) return `等待 ${game.actingSeat.nickname} 行动。`
   return '当前没有需要你处理的动作。'
 })
@@ -428,13 +440,23 @@ watch(
     if (handNo !== null && handNo !== undefined) announcement.value = `轮到你行动，请在 ${String(turnSeconds.value)} 秒内选择动作。`
   },
 )
+watch(
+  () => game.state?.nextHandDeadlineAt ?? null,
+  (deadline) => {
+    if (deadline !== null) announcement.value = `下一手将在 ${String(Math.max(0, Math.ceil((deadline - Date.now() - connection.clockOffsetMs) / 1000)))} 秒后自动开始。`
+  },
+)
 
 /* ───────────── 交互 ───────────── */
 
 /** 独立邀请朋友弹窗显隐 */
 const inviteDialogOpen = ref(false)
+const configDialogOpen = ref(false)
 /** 桌面右上角 HUD 历史面板折叠状态（默认关闭，点击展开） */
 const hudHistoryCollapsed = ref(true)
+const hudScoreCollapsed = ref(true)
+const scoreRows = computed(() => [...(game.state?.scores ?? [])].sort((a, b) => b.net - a.net || b.totalBuyIn - a.totalBuyIn))
+const scoreTotalBuyIn = computed(() => scoreRows.value.reduce((sum, row) => sum + row.totalBuyIn, 0))
 
 /* ── 邀请朋友：房间号是 6 位纯数字（见 §6.8），这里把它和邀请链接摆出来给朋友。 ── */
 /** 房间号：以凭证为准；没有凭证（理论上进不了牌桌）时回落到路由里那串。 */
@@ -488,12 +510,14 @@ function toggleHistory(): void {
   hudHistoryCollapsed.value = !hudHistoryCollapsed.value
   if (!hudHistoryCollapsed.value) {
     hudChatCollapsed.value = true
+    hudScoreCollapsed.value = true
   }
 }
 
 function openHistory(): void {
   hudHistoryCollapsed.value = false
   hudChatCollapsed.value = true
+  hudScoreCollapsed.value = true
 }
 
 /* ───────────── 聊天（抽屉内的 chat 分节） ─────────────
@@ -507,24 +531,9 @@ const chat = useChatStore()
  * 避免浏览器区域是 en-US 时出现「06:48 PM」这类与界面不一致的格式。
  */
 const chatTimeFormat = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' })
-const chatDayFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' })
-
-function isOwnMessage(message: ChatMessage): boolean {
-  const selfId = game.self?.playerId
-  return Boolean(selfId) && message.playerId === selfId
-}
 
 function chatTime(at: number): string {
   return Number.isFinite(at) ? chatTimeFormat.format(at) : ''
-}
-
-function chatFullTime(at: number): string {
-  return Number.isFinite(at) ? chatDayFormat.format(at) : ''
-}
-
-/** <time datetime> 用：时间戳异常时不抛错，只省略属性。 */
-function chatIso(at: number): string | undefined {
-  return Number.isFinite(at) ? new Date(at).toISOString() : undefined
 }
 
 /* ───────────── 聊天（桌面左上角 HUD 浮层） ─────────────
@@ -532,22 +541,27 @@ function chatIso(at: number): string | undefined {
 const hudChatCollapsed = ref(true)
 const hudChatInputRef = ref<HTMLInputElement | null>(null)
 
-function isMobileScreen(): boolean {
-  return typeof window !== 'undefined' && window.innerWidth <= 768
-}
-
 /**
  * 历史与聊天面板展开互斥联动：展开一个自动收起另一个
  */
 watch(hudHistoryCollapsed, (collapsed) => {
   if (!collapsed) {
     hudChatCollapsed.value = true
+    hudScoreCollapsed.value = true
+  }
+})
+
+watch(hudScoreCollapsed, (collapsed) => {
+  if (!collapsed) {
+    hudChatCollapsed.value = true
+    hudHistoryCollapsed.value = true
   }
 })
 
 watch(hudChatCollapsed, (collapsed) => {
   if (!collapsed) {
     hudHistoryCollapsed.value = true
+    hudScoreCollapsed.value = true
   }
 })
 
@@ -555,20 +569,12 @@ function toggleChat(): void {
   hudChatCollapsed.value = !hudChatCollapsed.value
   if (!hudChatCollapsed.value) {
     hudHistoryCollapsed.value = true
+    hudScoreCollapsed.value = true
     nextTick(() => {
       hudChatInputRef.value?.focus()
       void scrollChatToBottom()
     })
   }
-}
-
-function openChat(): void {
-  hudChatCollapsed.value = false
-  hudHistoryCollapsed.value = true
-  nextTick(() => {
-    hudChatInputRef.value?.focus()
-    void scrollChatToBottom()
-  })
 }
 
 /** 点击牌桌外部空白区域时，自动顺畅收起已展开的 HUD 浮动面板 */
@@ -581,6 +587,9 @@ function handleHudPointerDown(event: PointerEvent): void {
   if (!hudHistoryCollapsed.value && !target.closest('.hud-history-anchor')) {
     hudHistoryCollapsed.value = true
   }
+  if (!hudScoreCollapsed.value && !target.closest('.hud-score-anchor')) {
+    hudScoreCollapsed.value = true
+  }
 }
 
 function onSenderClick(nickname: string): void {
@@ -589,12 +598,10 @@ function onSenderClick(nickname: string): void {
 }
 
 const chatText = ref('')
-const mentionMenu = ref<InstanceType<typeof Menu> | null>(null)
 const chatError = ref('')
 /** 中文输入法组合期间的回车只用于确认候选词，不能当成发送。 */
 const composing = ref(false)
 
-const chatRemaining = computed(() => CHAT_MAX_LENGTH - chatText.value.length)
 const canSendChat = computed(() => chatText.value.trim().length > 0)
 
 const chatListRef = ref<HTMLElement | null>(null)
@@ -645,25 +652,6 @@ function mentionsMe(message: ChatMessage): boolean {
  * 分组时按「任何 @ 提醒」断开，而不是只按「提到了我」：
  * 否则同一条消息在发送方和接收方会落进不同的分组，带 @ 的话被并进上一条里很容易漏看。
  */
-function hasMention(message: ChatMessage): boolean {
-  return (message.mentions?.length ?? 0) > 0
-}
-
-/** 被 @ 到的玩家一览（排除自己）；没有别人时菜单为空。 */
-const mentionItems = computed<MenuItem[]>(() =>
-  game.seats
-    .filter((seat): seat is NonNullable<typeof seat> => Boolean(seat) && seat?.playerId !== myPlayerId.value)
-    .map((seat) => ({
-      label: seat.nickname,
-      icon: 'pi pi-at',
-      command: () => insertMention(seat.nickname),
-    })),
-)
-
-function toggleMentionMenu(event: Event): void {
-  mentionMenu.value?.toggle(event)
-}
-
 function insertMention(nickname: string): void {
   const prefix = chatText.value.length === 0 || chatText.value.endsWith(' ') ? chatText.value : `${chatText.value} `
   chatText.value = `${prefix}@${nickname} `
@@ -685,19 +673,13 @@ function submitChat(): void {
   void scrollChatToBottom()
 }
 
-/** 提到了我的消息条数（用于按钮提示，不只靠红点）。 */
-const mentionCount = computed(
-  () => chat.messages.filter((message) => message.kind === 'user' && mentionsMe(message)).length,
-)
-
 const unreadText = computed(() => (chat.unread > 99 ? '99+' : String(chat.unread)))
-/** 按钮名称里同时报未读与「提到了你」，折叠进「更多」菜单后信息也不丢。 */
 const chatAria = computed(() => {
   const parts = [chat.unread > 0 ? `聊天，${String(chat.unread)} 条未读消息` : '聊天，没有未读消息']
-  if (mentionCount.value > 0) parts.push(`${String(mentionCount.value)} 条提到了你`)
+  const mentions = chat.messages.filter((message) => message.kind === 'user' && mentionsMe(message)).length
+  if (mentions > 0) parts.push(`${String(mentions)} 条提到了你`)
   return parts.join('，')
 })
-const chatTitle = computed(() => (chat.unread > 0 ? `聊天（${String(chat.unread)} 条未读）` : '聊天'))
 
 /** 监听新消息：在展开状态下自动滚到底部并标记已读 */
 watch(
@@ -790,21 +772,6 @@ const historyRows = computed(() => {
   })
 })
 
-
-/* ───────────── 提示音开关 ─────────────
- * soundEnabled 已持久化；打开时必须由用户手势解锁音频上下文。 */
-
-function toggleSound(): void {
-  soundEnabled.value = !soundEnabled.value
-  if (soundEnabled.value) {
-    // 顺序不能反：ensureContext 会先检查开关是否打开。
-    unlockAudio()
-    playPing()
-    announcement.value = '提示音已打开。'
-    return
-  }
-  announcement.value = '提示音已关闭。'
-}
 
 /* ───────────── 观战者面板 ───────────── */
 
@@ -1013,11 +980,6 @@ function requestMembers(): void {
   sendCommand({ type: 'room.members', requestId: nextRequestId() })
 }
 
-function openKick(): void {
-  kickTarget.value = null
-  kickOpen.value = true
-}
-
 // 打开弹窗时拉一次名单；开着的时候跟着房间版本号走。
 // 版本号在 room.player_left 等广播里都会推进，所以不需要乐观更新本地名单。
 watch(
@@ -1085,54 +1047,158 @@ onBeforeUnmount(() => {
     </section>
 
     <main v-if="!room.hasCredentials && !game.state" id="main" class="join-gate">
-      <section class="panel join-card" aria-labelledby="join-gate-title">
-        <p class="mark">私人牌局 · 邀请制</p>
-        <h1 id="join-gate-title" class="join-title">
-          {{ joinInfo ? `加入「${joinInfo.roomName}」` : '加入这桌牌局' }}
-        </h1>
-        <p v-if="joinInfo" class="hint">
-          已入座 {{ joinInfo.seated }}/{{ joinInfo.maxSeats }} · 进桌后先旁观，点空位确认买入即可落座。
-        </p>
-        <p v-else-if="joinInfoError" class="join-error" role="alert">{{ joinInfoError }}</p>
-        <p v-else class="hint">正在读取房间信息…</p>
-
-        <label class="field" for="join-nickname">
-          <span class="label">你的昵称</span>
-          <InputText
-            id="join-nickname"
-            v-model="joinNickname"
-            :maxlength="NICKNAME_MAX"
-            placeholder="例如：小满"
-            autocomplete="nickname"
-            fluid
-            @keyup.enter="submitJoin"
-          />
-        </label>
-        <label class="field" for="invite-password">
-          <span class="label">房间密码（{{ ROOM_PASSWORD_DIGITS }} 位数字）</span>
-          <Password
-            input-id="invite-password"
-            v-model="joinPassword"
-            placeholder="请输入 6 位数字"
-            autocomplete="current-password"
-            :feedback="false"
-            toggle-mask
-            :input-props="{ inputmode: 'numeric', maxlength: ROOM_PASSWORD_DIGITS, pattern: '[0-9]{6}' }"
-            fluid
-          />
-        </label>
-        <p v-if="joinError" class="join-error" role="alert">{{ joinError }}</p>
-        <div class="join-actions">
-          <Button :disabled="joining || Boolean(joinInfoError)" @click="submitJoin">
-            <i class="pi pi-sign-in" aria-hidden="true" />
-            <span>进入牌桌</span>
-          </Button>
-          <Button text :title="'回到大厅'" @click="router.push({ name: 'lobby' })">
-            <i class="pi pi-home" aria-hidden="true" />
-            <span>回大厅</span>
-          </Button>
+      <!-- 扑克花色浮雕背景与环境聚光氛围 -->
+      <div class="join-backdrop" aria-hidden="true">
+        <div class="join-ambient-glow" />
+        <div class="join-card-suits">
+          <span>♠</span>
+          <span>♥</span>
+          <span>♦</span>
+          <span>♣</span>
         </div>
-      </section>
+      </div>
+
+      <div class="join-container">
+        <section class="join-card" aria-labelledby="join-gate-title">
+          <header class="join-header">
+            <div class="badge-tag">
+              <span class="badge-icon">♠</span>
+              <span>私人牌局 · 邀请制</span>
+              <span class="badge-icon">♣</span>
+            </div>
+            <h1 id="join-gate-title" class="join-title">
+              {{ joinInfo ? `加入「${joinInfo.roomName}」` : '加入这桌牌局' }}
+            </h1>
+            <p class="join-subtitle">
+              朋友邀请你入局切磋，填入昵称与密码即可进桌
+            </p>
+          </header>
+
+          <!-- 房间对局核心参数卡片 -->
+          <div v-if="joinInfo" class="room-meta-card">
+            <div class="meta-grid">
+              <div class="meta-item">
+                <span class="meta-item-label">房间号</span>
+                <span class="meta-item-val num">#{{ joinInfo.roomId }}</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-item-label">盲注级别</span>
+                <span class="meta-item-val num text-gold">{{ joinInfo.smallBlind }}/{{ joinInfo.bigBlind }}</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-item-label">当前入座</span>
+                <span class="meta-item-val num">{{ joinInfo.seated }}/{{ joinInfo.maxSeats }} 人</span>
+              </div>
+              <div class="meta-item">
+                <span class="meta-item-label">牌桌状态</span>
+                <span class="meta-item-val meta-status">
+                  <span class="status-dot" :class="{ 'is-waiting': joinInfo.status !== 'playing' }" />
+                  <span>{{ joinInfo.status === 'playing' ? '对局中' : '等待开局' }}</span>
+                </span>
+              </div>
+            </div>
+            <div class="meta-tip">
+              <i class="pi pi-info-circle meta-tip-icon" aria-hidden="true" />
+              <span>进桌后先以旁观身份观战，点击桌上任意空位即可买入落座参赛</span>
+            </div>
+          </div>
+
+          <!-- 房间信息加载中骨架 -->
+          <div v-else-if="!joinInfoError" class="room-meta-loading">
+            <i class="pi pi-spin pi-spinner loading-icon" aria-hidden="true" />
+            <span>正在连接房间，读取对局信息…</span>
+          </div>
+
+          <!-- 房间信息获取错误提示 -->
+          <div v-else class="join-info-error-box" role="alert">
+            <i class="pi pi-exclamation-triangle join-info-error-icon" aria-hidden="true" />
+            <div class="join-info-error-content">
+              <p class="join-info-error-title">房间状态提示</p>
+              <p class="join-info-error-desc">{{ joinInfoError }}</p>
+            </div>
+          </div>
+
+          <!-- 表单报错横条 -->
+          <transition name="alert-slide">
+            <Message v-if="joinError" severity="error" :closable="false" class="join-alert" role="alert">
+              {{ joinError }}
+            </Message>
+          </transition>
+
+          <!-- 昵称与密码输入 -->
+          <div class="join-form">
+            <label class="field" for="join-nickname">
+              <span class="label">
+                <span>你的昵称</span>
+                <span class="label-sub">在桌内展示给其他牌友</span>
+              </span>
+              <InputText
+                id="join-nickname"
+                v-model="joinNickname"
+                :maxlength="NICKNAME_MAX"
+                placeholder="例如：小满"
+                autocomplete="nickname"
+                fluid
+                @keyup.enter="submitJoin"
+              />
+            </label>
+
+            <label class="field" for="invite-password">
+              <span class="label">
+                <span>房间密码</span>
+                <span class="label-sub">{{ ROOM_PASSWORD_DIGITS }} 位数字</span>
+              </span>
+              <Password
+                input-id="invite-password"
+                v-model="joinPassword"
+                placeholder="请输入 6 位数字"
+                autocomplete="current-password"
+                :feedback="false"
+                toggle-mask
+                :input-props="{ inputmode: 'numeric', maxlength: ROOM_PASSWORD_DIGITS, pattern: '[0-9]{6}' }"
+                fluid
+                @keyup.enter="submitJoin"
+              />
+            </label>
+          </div>
+
+          <!-- 操作按钮区 -->
+          <div class="join-actions">
+            <Button
+              class="submit-button join-submit-btn"
+              :disabled="joining || Boolean(joinInfoError)"
+              :loading="joining"
+              title="加入这个房间"
+              @click="submitJoin"
+            >
+              <i class="pi pi-sign-in" aria-hidden="true" />
+              <span>进入牌桌</span>
+            </Button>
+            <Button
+              text
+              class="join-back-btn"
+              title="回到大厅"
+              @click="router.push({ name: 'lobby' })"
+            >
+              <i class="pi pi-home" aria-hidden="true" />
+              <span>回大厅</span>
+            </Button>
+          </div>
+
+          <!-- 入桌须知 -->
+          <div class="join-rules-box">
+            <div class="rules-header">
+              <i class="pi pi-shield rules-icon" aria-hidden="true" />
+              <span>入桌须知</span>
+            </div>
+            <ul class="rules-list">
+              <li>进桌后先以旁观身份观战，点击桌上任意空位即可买入落座。</li>
+              <li>仅支持虚拟记分筹码，无任何充值提现或兑换，绿色对局。</li>
+              <li>断线或刷新网页将保留座位与筹码，重新进入可自动恢复。</li>
+            </ul>
+          </div>
+        </section>
+      </div>
     </main>
 
     <template v-else>
@@ -1144,6 +1210,7 @@ onBeforeUnmount(() => {
         <div class="room-badge">
           <i class="pi pi-shield room-badge-icon" aria-hidden="true" />
           <h1 class="bar-title">{{ game.state?.roomName || '牌桌' }}</h1>
+          <span v-if="room.isHost" class="host-label">你是房主</span>
         </div>
         <div class="meta-capsules">
           <span class="stat meta-pill meta-pill--blind">
@@ -1175,6 +1242,10 @@ onBeforeUnmount(() => {
 
       <!-- 顶栏右侧操作区：只保留分享按钮 -->
       <div class="bar-right" role="toolbar" aria-label="牌桌快捷工具栏">
+        <Button v-if="room.isHost" size="small" text class="bar-btn" aria-label="牌局配置" title="修改牌局配置" @click="configDialogOpen = true">
+          <i class="pi pi-cog" aria-hidden="true" />
+          <span class="bar-btn-text">配置</span>
+        </Button>
         <!-- 分享按钮：快捷桌牌与复制入口 -->
         <Button
           size="small"
@@ -1200,7 +1271,11 @@ onBeforeUnmount(() => {
       换来「有没有通知，牌桌位置都不变」。
     -->
     <div class="notice-slot">
-      <NoticeStrip
+      <div v-if="nextHandCountdownVisible" class="next-hand-notice">
+        <i class="pi pi-clock" aria-hidden="true" />
+        <span>下一手 {{ nextHandRemainingSeconds > 0 ? `${String(nextHandRemainingSeconds)} 秒后自动开始` : '即将开始' }}</span>
+      </div>
+      <NoticeStrip v-else
         :notice="noticeText"
         :version="game.state?.version ?? 0"
         :my-nickname="game.mySeat?.nickname ?? ''"
@@ -1215,6 +1290,7 @@ onBeforeUnmount(() => {
           class="hud-capsule-btn hud-chat-pill"
           :class="{ 'is-active': !hudChatCollapsed }"
           :title="hudChatCollapsed ? '展开聊天' : '收起聊天'"
+          :aria-label="chatAria"
           :aria-expanded="!hudChatCollapsed"
           @click="toggleChat"
         >
@@ -1307,6 +1383,50 @@ onBeforeUnmount(() => {
               </form>
               <p v-if="chatError" class="hud-chat-error" role="alert">{{ chatError }}</p>
             </div>
+          </div>
+        </Transition>
+      </aside>
+
+      <!-- 本桌累计计分板：曾入座者离桌后仍显示。 -->
+      <aside class="hud-anchor hud-score-anchor" aria-label="牌桌计分板">
+        <button
+          type="button"
+          class="hud-capsule-btn hud-score-pill"
+          :class="{ 'is-active': !hudScoreCollapsed }"
+          :title="hudScoreCollapsed ? '展开计分板' : '收起计分板'"
+          :aria-expanded="!hudScoreCollapsed"
+          @click="hudScoreCollapsed = !hudScoreCollapsed"
+        >
+          <i class="pi pi-chart-bar hud-capsule-icon" aria-hidden="true" />
+          <span class="hud-capsule-label">计分板</span>
+          <i :class="hudScoreCollapsed ? 'pi pi-chevron-down' : 'pi pi-chevron-up'" class="hud-capsule-arrow" aria-hidden="true" />
+        </button>
+        <Transition name="hud-score-popover">
+          <div v-show="!hudScoreCollapsed" class="hud-popover hud-score-popover">
+            <header class="hud-popover-header">
+              <div class="hud-popover-title"><i class="pi pi-chart-bar" aria-hidden="true" /><span>本桌计分板</span></div>
+              <button type="button" class="hud-popover-close-btn" title="收起计分板" aria-label="收起计分板" @click="hudScoreCollapsed = true">
+                <i class="pi pi-times" aria-hidden="true" />
+              </button>
+            </header>
+            <div class="hud-score-summary">{{ scoreRows.length }} 位玩家 · 累计买入 <b class="num">{{ scoreTotalBuyIn }}</b></div>
+            <div class="hud-score-scroll thin-scroll">
+              <p v-if="scoreRows.length === 0" class="hud-score-empty">暂无入座记录</p>
+              <table v-else class="hud-score-table">
+                <thead><tr><th scope="col">玩家</th><th scope="col">净筹码</th><th scope="col">总买入</th><th scope="col">现有</th><th scope="col">带离</th><th scope="col">手数</th></tr></thead>
+                <tbody>
+                  <tr v-for="row in scoreRows" :key="row.playerId">
+                    <th scope="row"><span>{{ row.nickname }}</span><small>{{ row.seated ? '在桌' : '已离桌' }} · 买入 {{ row.buyInCount }} 次</small></th>
+                    <td class="num" :class="row.net > 0 ? 'score-up' : row.net < 0 ? 'score-down' : ''">{{ row.net > 0 ? '+' : '' }}{{ row.net }}</td>
+                    <td class="num">{{ row.totalBuyIn }}</td>
+                    <td class="num">{{ row.stack }}</td>
+                    <td class="num">{{ row.banked }}</td>
+                    <td class="num">{{ row.handsPlayed }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="hud-score-note">虚拟筹码 · 净筹码 = 现有 + 带离 − 总买入；进行中随下注变化</p>
           </div>
         </Transition>
       </aside>
@@ -1666,16 +1786,21 @@ onBeforeUnmount(() => {
           <div class="spectator-info">
             <i class="pi pi-eye spectator-icon" aria-hidden="true" />
             <div class="spectator-texts">
-              <h3 class="spectator-title">贵宾观战席</h3>
+              <div class="spectator-heading">
+                <h3 class="spectator-title">贵宾观战席</h3>
+                <span class="spectator-badge">观战中</span>
+              </div>
               <p class="spectator-desc">
                 <template v-if="canSitDown">
-                  牌桌尚有 <b class="num empty-num">{{ emptyCount }}</b> 个空席（共 {{ maxSeats }} 席），轻触桌上空位或点击右侧快速入座
+                  <span class="spectator-copy-desktop">牌桌尚有 <b class="num empty-num">{{ emptyCount }}</b> 个空席（共 {{ maxSeats }} 席），轻触桌上空位或点击右侧快速入座</span>
+                  <span v-if="occupiedCount === 0" class="spectator-copy-mobile">还没有人入座。先选座，再邀请朋友开局。</span>
+                  <span v-else class="spectator-copy-mobile">还有 {{ emptyCount }} 个空位，点桌面空位或下方按钮入座。</span>
                 </template>
                 <template v-else-if="isTableFull">
-                  当前牌桌已满员（{{ occupiedCount }}/{{ maxSeats }} 席），你正在观战中，席位空出后即可入座
+                  牌桌已满（{{ occupiedCount }}/{{ maxSeats }} 席），空位出现后即可入座。
                 </template>
                 <template v-else>
-                  你正在观战中，请稍候…
+                  正在读取牌桌状态，请稍候…
                 </template>
               </p>
             </div>
@@ -1704,6 +1829,7 @@ onBeforeUnmount(() => {
       </div>
     </footer>
     <!-- 专属邀请朋友弹窗 -->
+    <RoomConfigDialog v-if="room.isHost && game.state" v-model:visible="configDialogOpen" :state="game.state" />
     <Dialog
       v-model:visible="inviteDialogOpen"
       modal
@@ -1765,6 +1891,7 @@ onBeforeUnmount(() => {
       :hero-player-id="game.self?.playerId ?? null"
       :my-cards="activeHeroCards"
       :visible="overlayVisible"
+      :next-hand-seconds="nextHandCountdownVisible ? nextHandRemainingSeconds : null"
       @close="closeResult"
       @history="openHistory"
     />
@@ -1980,6 +2107,16 @@ onBeforeUnmount(() => {
   filter: drop-shadow(0 0 6px rgba(212, 177, 106, 0.5));
 }
 
+.host-label {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(212, 177, 106, 0.2);
+  color: #ffe19a;
+  font-size: 0.68rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .bar-title {
   font-size: 0.98rem;
   font-weight: 700;
@@ -2150,6 +2287,20 @@ onBeforeUnmount(() => {
   height: 32px;
   overflow: visible;
   z-index: 5;
+}
+
+.next-hand-notice {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 32px;
+  color: #ffd875;
+  background: rgba(12, 18, 28, 0.9);
+  border-top: 1px solid rgba(212, 177, 106, 0.3);
+  border-bottom: 1px solid rgba(212, 177, 106, 0.3);
+  font-size: 0.82rem;
+  font-weight: 600;
 }
 
 .stage {
@@ -2426,9 +2577,11 @@ onBeforeUnmount(() => {
 }
 
 .hero-start-btn {
+  flex-shrink: 0;
   padding: 5px 16px !important;
   font-size: 0.86rem !important;
   font-weight: 700 !important;
+  white-space: nowrap;
   color: #ffffff !important;
   background: linear-gradient(135deg, #1f8d72 0%, #115745 100%) !important;
   border: 1px solid #2bc9a3 !important;
@@ -2553,6 +2706,25 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  min-width: 0;
+}
+
+.spectator-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.spectator-badge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(52, 211, 153, 0.4);
+  background: rgba(16, 185, 129, 0.12);
+  color: #6ee7b7;
+  font-size: 0.68rem;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .spectator-title {
@@ -2567,6 +2739,10 @@ onBeforeUnmount(() => {
   margin: 0;
   font-size: 0.85rem;
   color: var(--muted);
+}
+
+.spectator-copy-mobile {
+  display: none;
 }
 
 .spectator-desc .num {
@@ -3195,6 +3371,11 @@ onBeforeUnmount(() => {
   right: 18px;
 }
 
+.hud-score-anchor {
+  left: 50%;
+  transform: translateX(-50%);
+}
+
 /* 胶囊按钮（固定尺寸、无布局重排、质感十足） */
 .hud-capsule-btn {
   display: inline-flex;
@@ -3250,6 +3431,8 @@ onBeforeUnmount(() => {
   color: #ffd875;
   font-size: 0.85rem;
 }
+
+.hud-score-pill .hud-capsule-icon { color: #34d399; font-size: 0.85rem; }
 
 .hud-capsule-label {
   white-space: nowrap;
@@ -3317,6 +3500,25 @@ onBeforeUnmount(() => {
   right: 0;
   width: clamp(310px, 26vw, 390px);
 }
+
+.hud-score-popover { left: 50%; transform: translateX(-50%); width: min(470px, calc(100vw - 20px)); }
+.hud-score-popover-enter-active, .hud-score-popover-leave-active { transition: opacity .18s ease, transform .18s ease; }
+.hud-score-popover-enter-from, .hud-score-popover-leave-to { opacity: 0; transform: translate(-50%, -8px) scale(.96); }
+.hud-score-popover-enter-to, .hud-score-popover-leave-from { opacity: 1; transform: translateX(-50%); }
+.hud-score-summary { padding: 10px 14px; color: #cbd5e1; font-size: 0.78rem; border-bottom: 1px solid rgba(255,255,255,.1); }
+.hud-score-summary b { color: #ffd875; }
+.hud-score-scroll { max-height: min(48vh, 390px); overflow: auto; }
+.hud-score-empty { margin: 0; padding: 20px; text-align: center; color: #cbd5e1; }
+.hud-score-table { width: 100%; border-collapse: collapse; font-size: 0.76rem; white-space: nowrap; }
+.hud-score-table th, .hud-score-table td { padding: 9px 7px; text-align: right; border-bottom: 1px solid rgba(255,255,255,.09); }
+.hud-score-table th:first-child { text-align: left; padding-left: 14px; }
+.hud-score-table td:last-child, .hud-score-table th:last-child { padding-right: 14px; }
+.hud-score-table thead th { color: #cbd5e1; font-weight: 500; }
+.hud-score-table tbody th { color: #f8fafc; font-weight: 600; }
+.hud-score-table tbody th small { display: block; margin-top: 2px; color: #cbd5e1; font-size: 0.66rem; font-weight: 400; }
+.hud-score-table .score-up { color: #6ee7b7; font-weight: 700; }
+.hud-score-table .score-down { color: #fca5a5; font-weight: 700; }
+.hud-score-note { margin: 0; padding: 9px 14px; color: #cbd5e1; font-size: 0.68rem; border-top: 1px solid rgba(255,255,255,.1); }
 
 .hud-popover-header {
   display: flex;
@@ -3582,6 +3784,7 @@ onBeforeUnmount(() => {
   .hud-history-anchor {
     right: 8px;
   }
+  .hud-score-popover { width: min(470px, calc(100vw - 16px)); }
   .hud-capsule-btn {
     height: 30px;
     padding: 0 9px;
@@ -3751,23 +3954,92 @@ onBeforeUnmount(() => {
   }
 
   .cockpit-wing--hero {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
     width: 100%;
-    justify-content: space-between;
+    column-gap: 12px;
+    row-gap: 8px;
+  }
+
+  .cockpit-meta-group {
+    display: contents;
   }
 
   .cockpit-badge-row {
     flex-direction: row;
+    flex-wrap: wrap;
     gap: 8px;
   }
 
   .hero-seat-actions {
-    margin-left: auto;
+    grid-column: 1 / -1;
+    flex-wrap: nowrap;
+    width: 100%;
   }
 }
 
 @media (orientation: portrait) and (max-width: 560px) {
+  .hero-spectator .spectator-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  .hero-spectator .spectator-info {
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .hero-spectator .spectator-icon {
+    margin-top: 2px;
+    font-size: 1.25rem;
+  }
+
+  .hero-spectator .spectator-title {
+    font-size: 0.92rem;
+  }
+
+  .hero-spectator .spectator-desc {
+    font-size: 0.76rem;
+    line-height: 1.4;
+  }
+
+  .spectator-copy-desktop {
+    display: none;
+  }
+
+  .spectator-copy-mobile {
+    display: inline;
+  }
+
+  .hero-spectator .spectator-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    gap: 8px;
+  }
+
+  .hero-spectator .spectator-actions :deep(.p-button) {
+    justify-content: center;
+    min-width: 0;
+    min-height: 44px;
+    padding: 6px 8px;
+    font-size: 0.78rem;
+    white-space: nowrap;
+  }
+
+  .hero-spectator .spectator-actions > :only-child {
+    grid-column: 1 / -1;
+  }
+
   .notice-slot {
     height: 26px;
+  }
+
+  .next-hand-notice {
+    min-height: 26px;
+    font-size: 0.75rem;
   }
 
   .hero {
@@ -3788,8 +4060,13 @@ onBeforeUnmount(() => {
   }
 
   .hero-seat-actions :deep(.sub-action-btn) {
-    padding: 3px 7px !important;
+    padding: 3px 5px !important;
     font-size: 0.74rem !important;
+  }
+
+  .hero-seat-actions :deep(.hero-start-btn) {
+    padding: 5px 8px !important;
+    font-size: 0.76rem !important;
   }
 
   .bar {
@@ -3850,5 +4127,385 @@ onBeforeUnmount(() => {
   .hero {
     padding-bottom: 0;
   }
+}
+
+/* ═══════════════ 邀请链接进桌落地页（未加桌前） ═══════════════ */
+.join-gate {
+  flex: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  width: 100%;
+  padding: clamp(16px, 4vh, 40px) var(--space-2);
+  overflow-y: auto;
+  z-index: 2;
+  box-sizing: border-box;
+}
+
+/* 扑克花色浮雕与氛围光晕（与大厅风格统一） */
+.join-backdrop {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  overflow: hidden;
+}
+
+.join-ambient-glow {
+  position: absolute;
+  top: -120px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(900px, 100vw);
+  height: 520px;
+  background: radial-gradient(ellipse 65% 50% at 50% 30%, rgba(22, 75, 64, 0.42) 0%, rgba(16, 21, 27, 0) 70%);
+  filter: blur(48px);
+}
+
+.join-card-suits {
+  position: absolute;
+  top: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: clamp(50px, 16vw, 200px);
+  opacity: 0.04;
+  font-size: clamp(4rem, 10vw, 7.5rem);
+  user-select: none;
+  color: var(--gold);
+}
+
+.join-container {
+  position: relative;
+  z-index: 1;
+  width: min(100%, 480px);
+  margin: auto;
+  animation: rise-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.join-card {
+  position: relative;
+  background: rgba(18, 25, 34, 0.88);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(212, 177, 106, 0.25);
+  border-radius: var(--radius-lg);
+  padding: clamp(20px, 4.5vw, 32px);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* 顶部引导头 */
+.join-header {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.badge-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 14px;
+  font-size: 0.8rem;
+  letter-spacing: 0.16em;
+  color: var(--gold);
+  background: rgba(212, 177, 106, 0.08);
+  border: 1px solid var(--gold-soft);
+  border-radius: 999px;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+}
+
+.badge-icon {
+  font-size: 0.75rem;
+  opacity: 0.85;
+}
+
+.join-title {
+  margin: 2px 0 0;
+  font-size: clamp(1.35rem, 4vw, 1.7rem);
+  font-weight: 700;
+  color: #ffffff;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  text-wrap: balance;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+}
+
+.join-subtitle {
+  margin: 0;
+  font-size: 0.84rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+/* 房间对局核心参数卡片 */
+.room-meta-card {
+  background: rgba(12, 17, 24, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.meta-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+@media (max-width: 440px) {
+  .meta-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px 8px;
+  }
+}
+
+.meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.meta-item-label {
+  font-size: 0.72rem;
+  color: #7b8b98;
+}
+
+.meta-item-val {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.meta-item-val.text-gold {
+  color: #ffd875;
+}
+
+.meta-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #39b54a;
+  box-shadow: 0 0 6px rgba(57, 181, 74, 0.6);
+  flex-shrink: 0;
+}
+
+.status-dot.is-waiting {
+  background: #eab308;
+  box-shadow: 0 0 6px rgba(234, 179, 8, 0.6);
+}
+
+.meta-tip {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 0.76rem;
+  color: #8c9ba5;
+  line-height: 1.4;
+  border-top: 1px dashed rgba(255, 255, 255, 0.07);
+  padding-top: 8px;
+}
+
+.meta-tip-icon {
+  font-size: 0.82rem;
+  color: var(--gold);
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+
+.room-meta-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px;
+  background: rgba(12, 17, 24, 0.5);
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-md);
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.loading-icon {
+  font-size: 0.9rem;
+  color: var(--gold);
+}
+
+/* 错误提示 */
+.join-info-error-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: rgba(197, 74, 80, 0.12);
+  border: 1px solid rgba(197, 74, 80, 0.35);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+}
+
+.join-info-error-icon {
+  color: #ff6b72;
+  font-size: 1.1rem;
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.join-info-error-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.join-info-error-title {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #ff8b90;
+}
+
+.join-info-error-desc {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.join-alert {
+  margin: 0;
+  border-radius: var(--radius-sm);
+}
+
+.alert-slide-enter-active,
+.alert-slide-leave-active {
+  transition: all 0.22s ease-out;
+}
+
+.alert-slide-enter-from,
+.alert-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+/* 表单字段样式 */
+.join-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.join-form .field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.join-form .label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 0.84rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.join-form .label-sub {
+  font-size: 0.76rem;
+  color: #6f7d88;
+}
+
+/* 操作提交按钮 */
+.join-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.join-submit-btn {
+  width: 100%;
+  min-height: 48px;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: linear-gradient(135deg, #2b7ddb 0%, #1f61b0 100%);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-md);
+  box-shadow: 0 6px 20px rgba(43, 125, 219, 0.32);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.join-submit-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px rgba(43, 125, 219, 0.42);
+}
+
+.join-submit-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.join-back-btn {
+  width: 100%;
+  min-height: 40px;
+  color: var(--muted) !important;
+  font-size: 0.88rem;
+  gap: 6px;
+  transition: color 0.15s ease;
+}
+
+.join-back-btn:hover {
+  color: var(--text) !important;
+}
+
+/* 入桌须知规则框 */
+.join-rules-box {
+  background: rgba(12, 17, 24, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.join-rules-box .rules-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--gold);
+}
+
+.join-rules-box .rules-icon {
+  font-size: 0.85rem;
+}
+
+.join-rules-box .rules-list {
+  margin: 0;
+  padding-left: 1.1em;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  color: var(--muted);
 }
 </style>

@@ -131,6 +131,20 @@ export interface HandResultPublic {
   revealed: { playerId: string; cards: Card[]; handName: string }[]
 }
 
+/** 本桌累计虚拟筹码记录；离桌玩家仍保留。 */
+export interface PlayerScorePublic {
+  playerId: string
+  nickname: string
+  totalBuyIn: number
+  buyInCount: number
+  handsPlayed: number
+  /** 离桌时带走的虚拟筹码累计。 */
+  banked: number
+  stack: number
+  net: number
+  seated: boolean
+}
+
 /** 下发给所有玩家的公共状态：绝不含他人未公开底牌。 */
 export interface GameStatePublic {
   roomId: string
@@ -159,6 +173,7 @@ export interface GameStatePublic {
   nextHandDeadlineAt: number | null
   /** 座位数组，下标即座位号，空位为 null。 */
   seats: (SeatPublic | null)[]
+  scores: PlayerScorePublic[]
   buttonSeat: number | null
   actingPlayerId: string | null
   turnDeadlineAt: number | null
@@ -169,6 +184,7 @@ export interface GameStatePublic {
 export interface PrivateSelfState {
   playerId: string
   seat: number | null
+  isHost?: boolean
   holeCards: Card[]
   legalActions: LegalAction[]
 }
@@ -200,6 +216,7 @@ export const SERVER_EVENT_TYPES = [
   'room.snapshot',
   'room.player_joined',
   'room.player_left',
+  'room.configured',
   'hand.started',
   'hand.state_changed',
   'turn.started',
@@ -332,6 +349,13 @@ export const ListMembersCommandSchema = z.object({
   requestId,
 })
 
+export const ConfigureRoomCommandSchema = z.object({
+  type: z.literal('room.configure'),
+  requestId,
+  turnSeconds: z.number().int().min(TABLE_RULES.minTurnSeconds).max(TABLE_RULES.maxTurnSeconds),
+  nextHandSeconds: z.number().int().min(0).max(TABLE_RULES.maxNextHandSeconds),
+})
+
 /** 准备/取消准备：首版仅主持人可开局，准备状态用于提示。 */
 export const ReadyCommandSchema = z.object({
   type: z.literal('room.ready'),
@@ -372,6 +396,7 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
   LeaveRoomCommandSchema,
   KickPlayerCommandSchema,
   ListMembersCommandSchema,
+  ConfigureRoomCommandSchema,
   ReadyCommandSchema,
   StartHandCommandSchema,
   ChatSendCommandSchema,

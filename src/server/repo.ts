@@ -130,6 +130,16 @@ export class Repo {
     this.db.prepare('UPDATE rooms SET status = ?, updated_at = ? WHERE room_id = ?').run(status, Date.now(), roomId)
   }
 
+  setRoomHost(roomId: string, playerId: string): void {
+    this.db.prepare('UPDATE rooms SET host_player_id = ?, updated_at = ? WHERE room_id = ?').run(playerId, Date.now(), roomId)
+    this.db.prepare('UPDATE players SET is_host = CASE WHEN player_id = ? THEN 1 ELSE 0 END WHERE room_id = ?').run(playerId, roomId)
+  }
+
+  updateRoomConfig(room: { id: string; turnSeconds: number; nextHandSeconds: number }): void {
+    this.db.prepare('UPDATE rooms SET turn_seconds = ?, next_hand_seconds = ?, updated_at = ? WHERE room_id = ?')
+      .run(room.turnSeconds, room.nextHandSeconds, Date.now(), room.id)
+  }
+
   /** 房间号是否已被占用（含已关闭的历史房间）：room_id 是主键，重号会让建房写库失败。 */
   roomExists(roomId: string): boolean {
     return this.db.prepare('SELECT 1 FROM rooms WHERE room_id = ?').get(roomId) !== undefined
@@ -142,7 +152,8 @@ export class Repo {
         `INSERT INTO players (player_id, room_id, nickname, seat, stack, is_host, ready, reconnect_hash, joined_at, last_seen_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(player_id) DO UPDATE SET
-           seat = excluded.seat, stack = excluded.stack, ready = excluded.ready, last_seen_at = excluded.last_seen_at`,
+           seat = excluded.seat, stack = excluded.stack, is_host = excluded.is_host,
+           ready = excluded.ready, last_seen_at = excluded.last_seen_at`,
       )
       .run(
         player.playerId,

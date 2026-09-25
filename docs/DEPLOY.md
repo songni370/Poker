@@ -80,7 +80,7 @@ location / {
 
 ## 8. 已知运维注意点
 
-- **PrimeVue 许可**：依赖锁定在 MIT 版本（`primevue@4.5.5` / `@primevue/themes@4.5.4` / `primeicons@7.0.0`）。升级到 5.x 前必须先确认 PrimeTek 商业许可，否则界面右下角会出现 “Invalid PrimeUI License” 水印。
+- **PrimeVue 许可**：依赖锁定在 MIT 版本（`primevue@4.5.5` / `@primeuix/themes@2.0.3` / `primeicons@7.0.0`）。升级到 5.x 前必须先确认 PrimeTek 商业许可，否则界面右下角会出现 “Invalid PrimeUI License” 水印。
 - **npm 缓存**：仓库内 `.npmrc` 设了 `cache=./.npm-cache`（为受限沙箱准备）。普通服务器可删除该文件，恢复到默认缓存位置。
 - **单进程重启**：连接本身不跨重启保留，客户端会自动重连并收到 `connection.recovered` 快照；牌局从 SQLite 快照恢复。
 - **合规**：虚拟筹码不可充值、不可提现、不可转让兑换；本项目不提供任何真钱赌博功能。

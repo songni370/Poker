@@ -55,6 +55,84 @@ test('部署验收：一个端口同时提供网页、HTTP API 与 WebSocket', a
   expect(upgraded).toBe(true)
 })
 
+test('手机观战栏承载空桌提示，说明和按钮不互相遮挡', async ({ browser }) => {
+  const hostContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+  const guestContext = await browser.newContext({ viewport: { width: 360, height: 740 } })
+  const host = await hostContext.newPage()
+  const guest = await guestContext.newPage()
+  const roomId = await createRoom(host, `房主${Date.now() % 1000}`)
+  await expect(host.locator('.empty-state')).toBeVisible()
+  await joinRoomByLink(guest, roomId, `客人${Date.now() % 1000}`)
+
+  for (const [width, height] of [[360, 740], [390, 844]] as const) {
+    await guest.setViewportSize({ width, height })
+    await expect(guest.locator('.empty-state')).toBeHidden()
+    await expect(guest.locator('.spectator-desc')).toContainText('还没有人入座')
+    const layout = await guest.evaluate(() => {
+      const card = document.querySelector('.hero-spectator .spectator-card')!.getBoundingClientRect()
+      const text = document.querySelector('.hero-spectator .spectator-desc')!.getBoundingClientRect()
+      const actions = document.querySelector('.hero-spectator .spectator-actions')!.getBoundingClientRect()
+      return {
+        textAboveActions: text.bottom <= actions.top,
+        actionsInsideCard: actions.left >= card.left && actions.right <= card.right,
+        cardInsideViewport: card.bottom <= window.innerHeight,
+        overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      }
+    })
+    expect(layout, `${width}×${height} 观战栏布局`).toEqual({
+      textAboveActions: true,
+      actionsInsideCard: true,
+      cardInsideViewport: true,
+      overflowX: 0,
+    })
+  }
+
+  await takeSeat(host, 1)
+  await expect(guest.locator('.spectator-desc')).toContainText('还有 8 个空位')
+  await hostContext.close()
+  await guestContext.close()
+})
+
+test('手机端开局、离座和退出按钮保持同一排，开局文字不换行', async ({ browser }) => {
+  const hostContext = await browser.newContext({ viewport: { width: 320, height: 740 } })
+  const guestContext = await browser.newContext()
+  const host = await hostContext.newPage()
+  const guest = await guestContext.newPage()
+  const roomId = await createRoom(host, `房主${Date.now() % 1000}`)
+  await takeSeat(host, 1)
+  await joinRoomByLink(guest, roomId, `客人${Date.now() % 1000}`)
+  await takeSeat(guest, 2)
+  await expect(host.locator('.hero-start-btn')).toBeVisible()
+
+  for (const width of [320, 360, 390]) {
+    await host.setViewportSize({ width, height: 740 })
+    const layout = await host.locator('.hero-seat-actions').evaluate((actions) => {
+      const buttons = [...actions.querySelectorAll('button')]
+      const boxes = buttons.map((button) => button.getBoundingClientRect())
+      const label = actions.querySelector('.hero-start-btn span')!
+      const labelRange = document.createRange()
+      labelRange.selectNodeContents(label)
+      return {
+        buttonCount: buttons.length,
+        sameRow: boxes.every((box) => Math.abs(box.top - boxes[0]!.top) < 1),
+        insideRow: boxes.every((box) => box.right <= actions.getBoundingClientRect().right + 1),
+        startLabelLines: labelRange.getClientRects().length,
+        overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      }
+    })
+    expect(layout, `${width}px 手机端开局按钮布局`).toEqual({
+      buttonCount: 3,
+      sameRow: true,
+      insideRow: true,
+      startLabelLines: 1,
+      overflowX: 0,
+    })
+  }
+
+  await hostContext.close()
+  await guestContext.close()
+})
+
 test('两个独立会话打完一手：摊牌前不泄露对手底牌，结算后可开下一手', async ({ browser }) => {
   const hostContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
   const guestContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
@@ -68,7 +146,6 @@ test('两个独立会话打完一手：摊牌前不泄露对手底牌，结算�
   // 新流程：建房后直接落在牌桌，房主自己先选座买入
   await takeSeat(host, 1, 1200)
   await expect(host.locator('.seat-slot').first()).toContainText('1200')
-  await host.screenshot({ path: 'artifacts/e2e/01-seat-buyin-1440x900.png' })
 
   await joinRoomByLink(guest, roomId, `客人${Date.now() % 1000}`)
   await takeSeat(guest, 2)
@@ -99,7 +176,7 @@ test('两个独立会话打完一手：摊牌前不泄露对手底牌，结算�
   await guest.reload()
   await guest.waitForURL(/\/table\//)
   await expect(guest.getByText('已连接')).toBeVisible()
-  await expect(guest.locator('.hero-cards [role="img"]')).toHaveCount(2)
+  await expect(guest.locator('.hero-card-face--front [role="img"]')).toHaveCount(2)
   const handAfter = await guest.locator('body').innerText()
   // 顶栏把「第 N 手」拆成多个元素渲染，innerText 里是换行而不是空格。
   if (handNoBefore) expect(handAfter).toMatch(new RegExp(`第\\s*${handNoBefore}\\s*手`))
@@ -108,8 +185,6 @@ test('两个独立会话打完一手：摊牌前不泄露对手底牌，结算�
   // ── 打完这一手 ──
   expect(await playUntilSettled([host, guest])).toBe(true)
   await expect(host.getByRole('button', { name: '知道了' })).toBeVisible()
-  await host.screenshot({ path: 'artifacts/e2e/02-table-settlement-1440x900.png' })
-  await guest.screenshot({ path: 'artifacts/e2e/03-guest-settlement-1440x900.png' })
 
   // 结算叠层里应出现赢家与牌型，且不再显示他人底牌之外的私密信息
   await expect(host.getByText(/本手结算|本手你未赢下底池|你赢得/).first()).toBeVisible()
@@ -121,11 +196,6 @@ test('两个独立会话打完一手：摊牌前不泄露对手底牌，结算�
   await expect
     .poll(async () => /第\s*2\s*手/.test(await host.locator('body').innerText()), { timeout: 10_000 })
     .toBe(true)
-
-  // 手机竖屏尺寸截图（响应式证据；手机版只支持竖屏，见下面的横屏用例）
-  await guest.setViewportSize({ width: 390, height: 844 })
-  await guest.waitForTimeout(300)
-  await guest.screenshot({ path: 'artifacts/e2e/04-table-390x844.png' })
 
   expect(hostErrors).toEqual([])
   expect(guestErrors).toEqual([])
@@ -181,7 +251,6 @@ test('手机只支持竖屏：竖屏两档不横向溢出，横屏给出竖屏�
   expect(landscape.stageShown, '手机横屏不渲染牌桌').toBe(false)
   expect(landscape.heroShown, '手机横屏不渲染底部操作区').toBe(false)
   expect(landscape.overflowX).toBe(0)
-  await page.screenshot({ path: 'artifacts/e2e/35-mobile-landscape-hint.png' })
 
   // ③ 转回竖屏：遮罩消失、牌桌恢复（进度不丢）
   await page.setViewportSize({ width: 390, height: 844 })
@@ -275,7 +344,6 @@ test('牌桌竖屏几何：390×844 与 360×740 无横向溢出且座位不压�
     // 本轮下注改由座位面板右下角的角标给出（盲注已经下过，所以至少有 1 个）。
     await expect(host.locator('.table .bet:visible')).toHaveCount(0)
     expect(await host.locator('.seat-slot .panel-bet:visible').count()).toBeGreaterThan(0)
-    await host.screenshot({ path: `artifacts/e2e/13-table-geometry-${width}x${height}.png` })
   }
 
   /*
@@ -309,7 +377,6 @@ test('牌桌竖屏几何：390×844 与 360×740 无横向溢出且座位不压�
     // 底部操作区（含最后一个动作按钮与额度台）必须完整落在视口内，不能被屏幕切掉。
     expect(fit.heroBottom, `${width}×${height} 底部区应完整可见`).toBeLessThanOrEqual(fit.viewportH)
     expect(fit.actionBottom, `${width}×${height} 操作区应完整可见`).toBeLessThanOrEqual(fit.viewportH)
-    await host.screenshot({ path: `artifacts/e2e/33-portrait-fit-${width}x${height}.png` })
   }
 
   expect(errors).toEqual([])

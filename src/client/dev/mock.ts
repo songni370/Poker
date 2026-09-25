@@ -143,6 +143,7 @@ function buildState(init: StateInit): GameStatePublic {
     nextHandSeconds: TABLE_RULES.nextHandSeconds,
     nextHandDeadlineAt: null,
     seats: init.seats,
+    scores: [],
     buttonSeat: init.buttonSeat,
     actingPlayerId: actingSeat === null ? null : (init.seats[actingSeat]?.playerId ?? null),
     turnDeadlineAt: actingSeat === null ? null : Date.now() + (init.turnDeadlineMs ?? 14_000),

@@ -162,11 +162,6 @@ function applyMin(): void {
   amount.value = minAmount.value
 }
 
-function applyMax(): void {
-  if (!canAct.value) return
-  amount.value = maxAmount.value
-}
-
 const isAtMaxAmount = computed(() => amount.value >= maxAmount.value && maxAmount.value > 0)
 const isAtMinAmount = computed(() => amount.value <= minAmount.value)
 
@@ -1276,4 +1271,3 @@ const liveText = computed(() => {
   }
 }
 </style>
-

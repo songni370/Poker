@@ -185,6 +185,13 @@ let closing = false
 
 /** 建立（或重连）到房间的 WebSocket；同一页面只维护一条连接。 */
 export function connectRoom(credentials: RoomCredentials): void {
+  if (
+    !closing &&
+    activeCredentials?.roomId === credentials.roomId &&
+    activeCredentials.playerId === credentials.playerId &&
+    activeCredentials.reconnectToken === credentials.reconnectToken &&
+    (socket?.readyState === WebSocket.CONNECTING || socket?.readyState === WebSocket.OPEN || reconnectTimer !== null)
+  ) return
   activeCredentials = credentials
   reconnectAttempts = 0
   closing = false
@@ -376,11 +383,14 @@ function handleMessage(text: string): void {
     if (!wasMyTurn && game.isMyTurn) playYourTurn()
     else if (message.type === 'hand.settled') playPing()
   }
-  useRoomStore().setCredentials({
+  const updatedCredentials = {
     ...(useRoomStore().credentials ?? (activeCredentials as RoomCredentials)),
     roomId: message.state.roomId,
     roomName: message.state.roomName,
-  })
+    isHost: message.self.isHost ?? (useRoomStore().credentials ?? activeCredentials)?.isHost ?? false,
+  }
+  if (updatedCredentials.isHost !== useRoomStore().credentials?.isHost) saveCredentials(updatedCredentials)
+  useRoomStore().setCredentials(updatedCredentials)
   session.clearError()
   if (message.notice) session.setNotice(message.notice)
   connection.syncClock(message.serverTime, Date.now(), 0)
