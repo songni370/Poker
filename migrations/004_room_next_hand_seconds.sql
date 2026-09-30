@@ -1,0 +1,1 @@
+ALTER TABLE rooms ADD COLUMN next_hand_seconds INTEGER NOT NULL DEFAULT 0;

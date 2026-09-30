@@ -1,0 +1,380 @@
+/* 全局设计变量：规格书 §3.1 指定色板；8px 间距基线，圆角 8/12/20。 */
+:root {
+  --bg: #10151b;
+  --bg-elevated: #161d25;
+  --felt: #164b40;
+  --felt-deep: #0f3730;
+  --gold: #d4b16a;
+  --text: #f2f1ea;
+  --muted: #aab6be;
+  --action: #3084da;
+  --positive: #176c53;
+  --danger: #c54a50;
+  --line: #26313b;
+
+  --space-1: 8px;
+  --space-2: 16px;
+  --space-3: 24px;
+  --space-4: 32px;
+  --space-5: 40px;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+
+  --font-sans: 'Inter', 'Noto Sans SC', system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+
+  color-scheme: dark;
+}
+
+/* 追加：语义色（只引用上面的原值，不改动任何既有变量数值）。
+   用于牌面红黑、文字反差与游戏状态提示。 */
+:root {
+  --card-face: #f6f3ea;
+  --card-red: #b8332f;
+  --card-black: #15191d;
+  --card-back: #123c53;
+  --card-back-line: #2c6b8c;
+  --gold-soft: rgba(212, 177, 106, 0.42);
+  --gold-dim: rgba(212, 177, 106, 0.18);
+  --gold-gradient: linear-gradient(135deg, #f6e27a 0%, #cb9b51 50%, #d4b16a 100%);
+  --gold-glow: 0 0 24px rgba(212, 177, 106, 0.22);
+  --glass-bg: rgba(22, 29, 37, 0.76);
+  --glass-border: rgba(212, 177, 106, 0.18);
+  --glass-blur: 16px;
+  --table-felt-gradient: radial-gradient(ellipse 75% 65% at 50% 50%, #175447 0%, #103d34 60%, #092620 100%);
+  --table-rail-bg: linear-gradient(180deg, #1d2631 0%, #0f141a 100%);
+  --table-rail-border: rgba(212, 177, 106, 0.28);
+  --acting-glow: 0 0 18px rgba(212, 177, 106, 0.52), inset 0 0 8px rgba(212, 177, 106, 0.3);
+
+  /* 牌桌几何：椭圆桌面与座位槽位的定位尺寸。 */
+  --table-w: min(100%, 1000px);
+  --table-h: min(46vh, 430px);
+  --seat-w: 144px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  min-height: 100dvh;
+  /* 刘海/圆角屏：内容不越出安全区（viewport-fit=cover 时必须自己处理）。 */
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  /* 避免标题在窄屏出现孤字。 */
+  text-wrap: balance;
+}
+
+html {
+  /* 移动端点按高亮统一成品牌金的淡色，而不是系统默认的蓝框。 */
+  -webkit-tap-highlight-color: color-mix(in srgb, var(--gold) 22%, transparent);
+}
+
+/* 触控：去掉 300ms 双击缩放延迟。 */
+button,
+a,
+input,
+select,
+label,
+[role='button'] {
+  touch-action: manipulation;
+}
+
+/* 抽屉/对话框内部滚动不把滚动链传给页面。 */
+.p-drawer,
+.p-dialog,
+.p-drawer-content,
+.p-dialog-content {
+  overscroll-behavior: contain;
+}
+
+/* ═══════════════ 全局弹窗完全不透明黑金风格（杜绝背景穿透扰乱） ═══════════════ */
+.p-dialog {
+  background: #131922 !important;
+  background-color: #131922 !important;
+  border: 1px solid rgba(212, 177, 106, 0.35) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.95), 0 0 30px rgba(0, 0, 0, 0.8) !important;
+  overflow: hidden !important;
+  opacity: 1 !important;
+}
+
+.p-dialog-header {
+  background: #18202c !important;
+  background-color: #18202c !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+  padding: 16px 20px !important;
+  color: #f5f0e1 !important;
+  opacity: 1 !important;
+}
+
+.p-dialog-title {
+  font-size: 1.1rem !important;
+  font-weight: 700 !important;
+  color: #ffd875 !important;
+  letter-spacing: 0.02em !important;
+}
+
+.p-dialog-content {
+  background: #131922 !important;
+  background-color: #131922 !important;
+  color: var(--text) !important;
+  padding: 20px !important;
+  opacity: 1 !important;
+  overscroll-behavior: contain !important;
+}
+
+.p-dialog-footer {
+  background: #18202c !important;
+  background-color: #18202c !important;
+  border-top: 1px solid rgba(255, 255, 255, 0.08) !important;
+  padding: 14px 20px !important;
+  opacity: 1 !important;
+}
+
+.p-dialog-mask,
+.p-overlay-mask {
+  background-color: rgba(4, 7, 11, 0.86) !important;
+  backdrop-filter: blur(5px) !important;
+  -webkit-backdrop-filter: blur(5px) !important;
+}
+
+/* 键盘可达性：所有可交互元素保留可见焦点环。 */
+:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ───────────────────────── 通用工具类 ─────────────────────────
+   只做跨组件复用的最小集合，避免每个组件重复书写。 */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 金额：等宽、不换行，避免动画或数字变化导致布局跳动。 */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 面板 / 卡片：牌桌界面的基础容器，不用阴影堆叠制造层次。 */
+.panel {
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.panel-title {
+  margin: 0 0 var(--space-2);
+  font-size: 1rem;
+  color: var(--gold);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+/* 覆盖 PrimeVue 按钮：保证触控目标 ≥44px、文本不换行、焦点环保留。 */
+.p-button {
+  min-height: 44px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.p-button .p-button-icon {
+  font-size: 0.95rem;
+}
+
+/* 装饰性图标不参与无障碍树（结构图标统一加 aria-hidden）。 */
+.pi[aria-hidden='true'] {
+  pointer-events: none;
+}
+
+/* 允许横向滚动的窄条（规则/历史抽屉内使用），滚动条不抢视觉。 */
+.thin-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+/* ───────────────────────── 动效 ─────────────────────────
+   仅使用 opacity / transform，克制且可被 prefers-reduced-motion 关闭。 */
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes seat-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px var(--gold), 0 0 0 6px var(--gold-dim);
+  }
+  50% {
+    box-shadow: 0 0 0 2px var(--gold), 0 0 0 11px var(--gold-dim);
+  }
+}
+
+@keyframes soft-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* 牌桌入场：一次编排，不做逐元素滚动动画。 */
+.anim-fade {
+  animation: fade-in 0.28s ease-out both;
+}
+
+.anim-rise {
+  animation: rise-in 0.3s ease-out both;
+}
+
+/* 轮到行动：光环 + 文本 + 进度条三重提示（颜色不是唯一手段）。 */
+.is-acting .seat-aura {
+  animation: seat-glow 1.9s ease-in-out infinite;
+}
+
+.is-waiting {
+  animation: soft-pulse 1.6s ease-in-out infinite;
+}
+
+/* 顶栏 / 底栏通用布局。 */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding: var(--space-1) var(--space-2);
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--line);
+}
+
+.bar-title {
+  margin: 0;
+  font-size: 1.02rem;
+  color: var(--text);
+}
+
+.bar-spacer {
+  margin-left: auto;
+}
+
+/* 盲注/底池等元信息：用带标签的数值对，而不是装饰性分隔符。 */
+.stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.stat b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/*
+ * 把 PrimeVue(Aura) 令牌对齐到本项目色板。
+ * 用 `html:root`（特异性 0,1,1）而非 `:root`（0,1,0）：PrimeVue 运行时注入的浅色令牌是 `:root`，
+ * 而它生成的深色规则是 `:where(html)`（特异性 0），压不过 `:root`，所以必须提高特异性才能稳定覆盖。
+ */
+html:root {
+  --p-primary-color: var(--action);
+  --p-primary-contrast-color: #ffffff;
+  --p-primary-hover-color: #2a76c6;
+  --p-primary-active-color: #2367ad;
+
+  --p-content-background: var(--bg-elevated);
+  --p-content-border-color: var(--line);
+  --p-content-color: var(--text);
+  --p-content-hover-background: #1b232c;
+  --p-overlay-popover-background: var(--bg-elevated);
+  --p-overlay-popover-border-color: var(--line);
+  --p-overlay-modal-background: rgba(6, 10, 14, 0.72);
+
+  --p-text-color: var(--text);
+  --p-text-muted-color: var(--muted);
+  --p-text-hover-color: var(--text);
+
+  --p-inputtext-background: #0d1218;
+  --p-inputtext-border-color: var(--line);
+  --p-inputtext-color: var(--text);
+  --p-inputtext-placeholder-color: #6f7d88;
+
+  --p-surface-0: #0d1218;
+  --p-surface-50: var(--bg-elevated);
+  --p-surface-100: #1b232c;
+  --p-surface-200: var(--line);
+  --p-surface-700: #2f3a45;
+  --p-surface-800: #1b232c;
+  --p-surface-900: var(--bg-elevated);
+  --p-surface-950: var(--bg);
+}

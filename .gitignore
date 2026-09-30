@@ -1,0 +1,14 @@
+node_modules/
+dist/
+data/
+.env
+.env.local
+.skill-sources/
+.agents/
+.dsh/
+*.log
+.DS_Store
+.npm-cache/
+test-results/
+playwright-report/
+artifacts/playwright/
