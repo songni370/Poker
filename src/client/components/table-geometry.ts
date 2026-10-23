@@ -73,7 +73,12 @@ export const TABLE_GEOMETRY: readonly TableGeometryTier[] = [
      * 座位椭圆半径：把座位往桌沿推，给中央的底池/公共牌让出净空。
      * 之前 43/44 时，侧边座位面板与公共牌在纵向上几乎贴着（用户反馈「在同一层」）。
      */
-    anchor: { x: 46, y: 47 },
+    /*
+     * 座位椭圆半径。纵向从 47 收到 44：座位面板是固定像素高（~51px），
+     * 锚在下沿时面板中心到桌沿的距离不够，顶部座位的上沿会被桌面裁掉
+     * （实测 seatTop=5px，几乎贴边）；本人座位的下沿则会超出桌面。
+     */
+    anchor: { x: 46, y: 44 },
     /* 座位宽度不能太窄：昵称会被截成「老…」这种，读不出是谁。
        半径推到 46/47 之后，桌沿空间够用，宽度回退到接近原来的值。 */
     seatWidth: 'clamp(80px, 21vw, 92px)',
@@ -85,7 +90,7 @@ export const TABLE_GEOMETRY: readonly TableGeometryTier[] = [
      * centerInset 是「左右各留多少」，所以取值要覆盖 面板半宽 + 锚点偏移：
      * 实测 208px 时中央区左沿仍在 112px、被座位压住 23px，这里加大到 236px。
      */
-    centerInset: 258,
+    centerInset: 176,
     boardCardWidth: 'clamp(24px, calc((100vw - 210px) / 5), 38px)',
     centerTop: '45%',
     centerMaxHeightInset: 86,
@@ -100,7 +105,7 @@ export const TABLE_GEOMETRY: readonly TableGeometryTier[] = [
      * 座位椭圆半径：把座位往桌沿推，给中央的底池/公共牌让出净空。
      * 之前 43/44 时，侧边座位面板与公共牌在纵向上几乎贴着（用户反馈「在同一层」）。
      */
-    anchor: { x: 46, y: 47 },
+    anchor: { x: 46, y: 44 },
     /* 座位宽度不能太窄：昵称会被截成「老…」这种，读不出是谁。
        半径推到 46/47 之后，桌沿空间够用，宽度回退到接近原来的值。 */
     seatWidth: 'clamp(80px, 21vw, 92px)',
@@ -112,7 +117,7 @@ export const TABLE_GEOMETRY: readonly TableGeometryTier[] = [
      * centerInset 是「左右各留多少」，所以取值要覆盖 面板半宽 + 锚点偏移：
      * 实测 208px 时中央区左沿仍在 112px、被座位压住 23px，这里加大到 236px。
      */
-    centerInset: 258,
+    centerInset: 176,
     boardCardWidth: 'clamp(24px, calc((100vw - 210px) / 5), 38px)',
     centerTop: '45%',
     centerMaxHeightInset: 82,

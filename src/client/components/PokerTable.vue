@@ -70,71 +70,39 @@ const props = withDefaults(
  * 坐标以桌面为参照（百分比），left/top 都是「座位中心」。
  * 用 CSS 变量 --seat-anchor-x/y 缩放，以便各档视口复用同一张表。
  */
-/*
- * 对称槽位分三层：
- *   - 上排两个（固定在最上方，绝不动）；
- *   - 左右两侧若干（纵向均分，避开中央块）；
- *   - 本人固定底部中央。
- *
- * 关键：**侧边槽位按实际人数动态均分**，而不是用固定表按顺序取。
- * 固定表在 6 人桌会取到「左 30% / 右 30% / 左 70%」，上下不均、还会压到底池；
- * 动态均分保证左右对称、纵向等距，也不与中央块同高。
- */
-const TOP_SLOTS: readonly { x: number; y: number }[] = [
-  { x: 26, y: 20 }, // 左上
-  { x: 74, y: 20 }, // 右上
-]
-
 /**
- * 计算某个座位该落在哪：上排 → 左右两侧（均分）→ 本人底部。
+ * 环形极坐标：座位按角度围着桌子均匀分布，本人固定在下沿中央（+90°）。
  *
- * 侧边纵向范围刻意避开中央块的 38%–62%：
- * 上段放 y ∈ [32%, 36%]，下段放 y ∈ [64%, 68%]，
- * 中间留空给底池铭牌与公共牌，这样座位面板不会压在牌上。
+ * 这是牌桌最自然的排布——玩家直觉上会沿着桌沿看一圈，
+ * 槽位制（上2/左右各2）在桌面端会变成几块浮在桌面上的方块，完全没有围桌感。
  */
-function slotFor(order: number, totalOthers: number): { x: number; y: number } {
-  // 上排优先占用（最多两个）
-  const topCount = Math.min(TOP_SLOTS.length, totalOthers)
-  if (order < topCount) return TOP_SLOTS[order]!
+function polarFor(index: number): { angle: number } {
+  const total = Math.max(props.maxSeats, 2)
+  const hero = props.heroSeat ?? -1
+  const offset = hero >= 0 ? hero : 0
+  return { angle: ((index - offset) / total) * Math.PI * 2 + Math.PI / 2 }
+}
 
-  const sideIndex = order - topCount
-  const sideCount = Math.max(0, totalOthers - topCount)
-  if (sideCount <= 0) return TOP_SLOTS[0]!
-
-  // 左右交替：偶数在左、奇数在右
-  const isLeft = sideIndex % 2 === 0
-  const rowIndex = Math.floor(sideIndex / 2)
-  const rows = Math.ceil(sideCount / 2)
-
-  /*
-   * 纵向均分，且刻意避开中央块（底池铭牌 + 公共牌）所在的 38%–62%：
-   *   - 只有 1 行（左右各一个）→ 放在 34%（上沿和中央块之上）
-   *   - 多行 → 在 [30%, 70%] 之间等距铺开，中间那行若落在中央块区间就跳过一档
-   * 早先的公式在 rows=1 时算出 y=34，但 rows>1 时把 upperSpan 当成起点，
-   * 结果第一个侧边座位跑到 y≈11%（压在上排座位上）。
-   */
-  const yTop = 26
-  const yBottom = 74
-  const y = rows === 1 ? 30 : yTop + (rowIndex * (yBottom - yTop)) / (rows - 1)
-  return { x: isLeft ? 8 : 92, y }
+/** 除本人外的座位（按入座顺序），compact 布局用。 */
+function otherSeatIndexes(): number[] {
+  const hero = props.heroSeat ?? -1
+  return props.seats.map((_seat, i) => i).filter((i) => i !== hero && props.seats[i])
 }
 
 /**
  * 超短屏（≤360 宽 且 ≤620 高）专用：桌面只有 ~160px 高，
- * 对称槽位放不下 6–9 个座位，改用「左右两列 + 本人桌底」的规整布局。
+ * 6–9 个面板按百分比排必然重叠，改用「左右两列 + 本人桌底」。
  * 只排真正有人的座位，空位不占行。
  */
 function compactSeatStyle(index: number): Record<string, string> {
   const hero = props.heroSeat ?? -1
   if (index === hero) return { left: '50%', top: 'calc(100% - 2px)' }
-  const occupied = props.seats
-    .map((seat, i) => i)
-    .filter((i) => i !== hero && props.seats[i])
+  const occupied = otherSeatIndexes()
   const order = Math.max(0, occupied.indexOf(index))
   const side = order % 2 === 0 ? 'left' : 'right'
   const row = Math.floor(order / 2)
   const rows = Math.max(1, Math.ceil(occupied.length / 2))
-  const top = rows === 1 ? 50 : 10 + (row * 80) / (rows - 1)
+  const top = rows === 1 ? 50 : 14 + (row * 72) / (rows - 1)
   return {
     [side]: '2px',
     top: `${String(Math.round(top))}%`,
@@ -142,37 +110,27 @@ function compactSeatStyle(index: number): Record<string, string> {
 }
 
 /**
- * 把「除本人外的人」按对称槽位排开。
+ * 把座位换算成 CSS。
  *
- * - 本人固定底部中央（y ≈ 96%），这里不参与槽位分配；
- * - 其余座位按入座顺序依次占据槽位，**只排真正有人的座位**，
- *   避免两人桌也按 9 人桌空出 7 个位置。
+ * x 用 clamp 收边：槽位是百分比、面板是固定像素宽，不收边会越出桌面。
+ * 上限写成 `100% - (半宽 + 4px)`，括号不能漏。
  */
-function symmetricSeatStyle(index: number): Record<string, string> {
-  const hero = props.heroSeat ?? -1
-  if (index === hero) return { left: '50%', top: 'calc(100% - 6px)' }
-
-  const others = props.seats
-    .map((_seat, i) => i)
-    .filter((i) => i !== hero && props.seats[i])
-  const order = others.indexOf(index)
-  if (order < 0) return { left: '50%', top: '50%' }
-
-  const slot = slotFor(order, others.length)
+function seatStyle(index: number): Record<string, string> {
+  const { angle } = polarFor(index)
   /*
-   * 左右用 clamp 收边：槽位是百分比（相对桌面），而座位面板是固定像素宽。
-   * 390px 桌面上 13% ≈ 24px，而面板半宽约 40px —— 不收边会直接越出桌面
-   * （实测 x=101%）。上限写成 `100% - (半宽 + 4px)`，括号不能漏。
+   * 锚点 = 椭圆参数方程：x 方向的半径与 y 方向的半径分开控制（CSS 变量），
+   * 这样桌面被拉长成椭圆时座位仍贴着桌沿。
+   * 左右用 clamp 收边：锚点是百分比、面板是固定像素宽，窄屏上最左/最右的座位
+   * 必然顶出桌子。上限写成 `100% - (半宽 + 4px)`，括号不能漏。
    */
   const edge = 'var(--seat-w, 144px) / 2 + 4px'
   return {
-    left: `clamp(calc(${edge}), ${String(slot.x)}%, calc(100% - (${edge})))`,
-    top: `${String(slot.y)}%`,
+    left: `clamp(calc(${edge}), calc(50% + var(--seat-anchor-x, ${String(RX)}%) * ${String(Math.cos(angle))}), calc(100% - (${edge})))`,
+    top: `calc(50% + var(--seat-anchor-y, ${String(RY)}%) * ${String(Math.sin(angle))})`,
   }
 }
 
 /**
- * 紧凑牌桌：超短屏（宽度 ≤360 且高度 ≤620）时桌面只有 ~160px 高，/**
  * 紧凑牌桌：超短屏（宽度 ≤360 且高度 ≤620）时桌面只有 ~160px 高，
  * 环状 9 人座必然压住公共牌，因此改用「左右两列 + 本人桌底」的规整布局。
  */
@@ -205,83 +163,27 @@ onBeforeUnmount(() => {
 const RX = 47
 const RY = 41
 
-/** 座位相对桌心的极角：偏移半桌，使本人落在 90°（椭圆下沿中央）。 */
-function polarFor(index: number): { angle: number } {
-  const total = Math.max(props.maxSeats, 2)
-  const hero = props.heroSeat ?? -1
-  // 本人固定在下沿中央（angle = +90°）：以本人座位为起点排序，其余人顺时针铺开。
-  // 早先写成 hero + total / 2，实际把本人放到了上沿中央（与注释不符，也让本人的下注筹码
-  // 落在自己的座位面板上）；现在按注释修正。
-  const offset = hero >= 0 ? hero : 0
-  return { angle: ((index - offset) / total) * Math.PI * 2 + Math.PI / 2 }
-}
-
-function seatStyle(index: number): Record<string, string> {
-  const { angle } = polarFor(index)
-  // y 方向的半径由 CSS 变量控制，小屏时自动收窄，避免座位越出桌面。
-  // x 方向额外用 clamp 按「座位面板自身宽度的一半」收边：锚点是百分比而面板是固定宽度，
-  // 窄屏时最左/最右的座位必然顶出桌子，造成横向溢出。
-  // 注意括号：上限必须是 100% - (半宽 + 4px)，漏掉括号会退化成 100% - 半宽 + 4px（多出 4px）。
-  const edge = 'var(--seat-w, 144px) / 2 + 4px'
-  return {
-    left: `clamp(calc(${edge}), calc(50% + var(--seat-anchor-x, ${String(RX)}%) * ${String(Math.cos(angle))}), calc(100% - (${edge})))`,
-    top: `calc(50% + var(--seat-anchor-y, ${String(RY)}%) * ${String(Math.sin(angle))})`,
-  }
-}
-
-/**
- * 紧凑牌桌（超短屏）下的座位定位：
- * 桌面只有 ~160px 高时 9 人环放不下，改成「整齐两列」——
- * 左右两列各 4 个对手座位，纵向按序号均分桌面高度，本人座位单独落在桌底中央。
- * 这样任何两排座位都不会与中央公共牌区在横向上相交（中央列左右各留出 150px）。
- */
-
-/**
- * 下注筹码位置：贴在座位面板朝桌心的内侧，而不是画在牌桌内圈。
- *
- * 用户反馈「下注金额不要放在内圈」——内圈是公共牌与底池的地盘，
- * 筹码挂在那里既压公共牌，也和底池铭牌抢注意力。
- * 现在按座位所在的槽位方向，往桌心推一小段，紧贴座位面板的里侧。
- */
-/**
- * 下注筹码位置：贴在座位面板朝桌心的内侧，而不是画在牌桌内圈。
- *
- * 用户反馈「下注金额不要放在内圈」——内圈是公共牌与底池的地盘，
- * 筹码挂在那里既压公共牌，也和底池铭牌抢注意力。
- *
- * 注意：这里**不能用 symmetricSeatStyle 的返回值**做运算——
- * 它给的是 `clamp(...)` 字符串（为了防越界），解析成数字会失败并回退到 50%，
- * 结果所有筹码都堆在桌子正中央（踩过）。这里直接从槽位表取原始百分比。
- */
 function chipStyle(index: number): Record<string, string> {
-  const hero = props.heroSeat ?? -1
-  let x = 50
-  let y = 96
-  if (index !== hero) {
-    const others = props.seats.map((_seat, i) => i).filter((i) => i !== hero && props.seats[i])
-    const order = others.indexOf(index)
-    const slot = slotFor(order, others.length)
-    x = slot.x
-    y = slot.y
-  }
+  const { angle } = polarFor(index)
+  const seatX = Math.cos(angle)
+  const seatY = Math.sin(angle)
   /*
-   * 从座位指向桌心的单位向量，向内推一段。
-   *
-   * 侧边座位（x 贴边 8/92）面板宽 ~82px，横向要推得足够远才不会盖住自己的卡片：
-   * 原来只推 9% × 桌宽 ≈ 34px，而面板半宽 41px —— 筹码正好压在卡片上（实测）。
-   * 这里按方向区分：横向为主（侧边）多推，纵向为主（上下排）少推。
+   * 座位锚点半径与筹码锚点半径的差，就是筹码到座位的距离。
+   * 半径用百分比（与 CSS 变量同单位），筹码再额外按面板半宽让开一段，
+   * 保证筹码矩形不压到座位矩形上。
    */
-  const dx = x - 50
-  const dy = y - 50
-  const length = Math.hypot(dx, dy) || 1
-  const ux = dx / length
-  const uy = dy / length
-  // 侧边座位以横向位移为主：推 56px 等效（≈15% 桌宽）
-  const inwardX = ux * (Math.abs(ux) > 0.7 ? 15 : 9)
-  const inwardY = uy * 11
+  /*
+   * 筹码半径要比座位的锚点半径小一截：座位在桌沿（RX 47% / RY 41%），
+   * 筹码在它内侧。两者差得不够就会压在一起（实测 2–14px 重叠）。
+   * 取 30/30 让筹码落在「座位与中央块之间」的空档上。
+   */
+  const chipRX = 29
+  const chipRY = 24
+  const left = `calc(50% + ${String(chipRX)}% * ${String(seatX)})`
+  const top = `calc(50% + ${String(chipRY)}% * ${String(seatY)})`
   return {
-    left: `${String(Math.round((x - inwardX) * 10) / 10)}%`,
-    top: `${String(Math.round((y - inwardY) * 10) / 10)}%`,
+    left: `clamp(28px, ${left}, calc(100% - 28px))`,
+    top: `clamp(20px, ${top}, calc(100% - 20px))`,
   }
 }
 
@@ -300,6 +202,7 @@ const potBreakdownText = computed(() =>
  * 竖屏窄屏上它们正好落在公共牌所在的水平带上，需要单独收窄面板（见 .is-side-seat 样式）。
  */
 function isSideSeat(index: number): boolean {
+  /* 「侧边座位」= 环上最左/最右的两个（角度接近 0° 或 180°），面板需要收窄。 */
   return Math.abs(Math.cos(polarFor(index).angle)) >= 0.85
 }
 
@@ -374,7 +277,7 @@ const tableStatus = computed(() => {
             'is-side-seat': isSideSeat(index),
             'is-center-top': isCenterTop(index),
           }"
-          :style="compact ? compactSeatStyle(index) : symmetricSeatStyle(index)"
+          :style="compact ? compactSeatStyle(index) : seatStyle(index)"
         >
           <PlayerSeat
             :seat="seat"
@@ -790,6 +693,15 @@ const tableStatus = computed(() => {
 }
 
 /* 本人座位压在桌沿下沿，视觉上最靠近底部操作区。 */
+/*
+ * 本人座位：面积极大半宽拉长（含「你」标签 + 庄家徽标），
+ * 锚在椭圆下沿时下沿会超出桌面 7px 被裁。这里整体上提半个面板高度，
+ * 让它完整落在桌面内。
+ */
+.is-hero-slot :deep(article) {
+  transform: translateY(-6px);
+}
+
 .is-hero-slot {
   z-index: 3;
 }
@@ -913,7 +825,10 @@ const tableStatus = computed(() => {
   .center {
     top: var(--center-top, 45%);
     /* 侧边座位面板左右各占一段宽度，中央列只能落在中间净宽里，否则会与侧边座位相碰。 */
-    max-width: calc(100% - var(--center-inset, 190px));
+    /* 中央块宽度 = 桌面宽度 - 两侧座位占位（各一张侧边面板 + 8px 缝隙）。
+       写了固定值 176–258px 都试过：桌面 360 时侧边面板 74px，两倍 148 + 缝隙 16
+       已经 164，留给中央块的只剩不到 200px —— 用变量表达比硬编码准。 */
+    max-width: calc(100% - (var(--seat-w-side, 74px) + 8px) * 2);
     /* 纵向安全边距：中央列最多占「桌面高 - 2×inset」，给上下两排座位留净空 */
     max-height: calc(100% - var(--center-max-height-inset, 0px) * 2);
   }

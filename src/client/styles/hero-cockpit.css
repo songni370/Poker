@@ -777,29 +777,57 @@
  * 超短屏（320×568 这类）：桌面只剩 ~110px，座舱必须让高度。
  * 底牌缩到 --cw 36px，操作区与横幅去掉多余留白，把省下的高度全部给牌桌。
  */
+/*
+ * 超短屏（高度 ≤620）：英雄区必须狠压缩，否则牌桌只剩不到 200px。
+ *
+ * 预算（320×568 实测）：
+ *   顶栏 43 + HUD 胶囊 31 + 舞台留白 + 英雄区 + 操作区 ≈ 屏幕高度
+ *   英雄区原来要 247px，牌桌只剩 198px —— 座位（每个 ~51px 高）根本排不开，
+ *   必然互相重叠。这里把英雄区压到 ~190px，让牌桌拿到 250px+。
+ */
 @media (max-height: 620px) {
   .hero {
-    padding: 4px 6px 6px;
+    padding: 2px 6px 4px;
   }
 
   .hero-cockpit {
-    padding: 4px 8px;
-    gap: 6px;
+    padding: 3px 6px;
+    gap: 4px;
   }
 
   .cockpit-wing--hero {
-    column-gap: 8px;
-    row-gap: 4px;
+    column-gap: 6px;
+    row-gap: 2px;
   }
 
+  /* 手牌再小一档：320 宽下两张牌并排也不至于把整行撑高 */
   .hero-cockpit .card--lg,
   .hero-cockpit :where(.card--lg) {
-    --cw: 36px;
+    --cw: 30px;
   }
 
+  /* 筹码/底牌文字行收窄 */
+  .hero-stack {
+    padding: 1px 5px;
+    gap: 3px;
+  }
+
+  .stack-num {
+    font-size: 0.95rem;
+  }
+
+  .hero-bet {
+    font-size: 0.68rem;
+  }
+
+  /* 操作区：按钮矮一档、间距收一点 */
   .cockpit-wing--action {
-    padding: 6px 8px;
-    border-radius: 12px;
+    padding: 4px 6px;
+    border-radius: 10px;
+  }
+
+  .action-console {
+    gap: 3px;
   }
 
   .hero-spectator .spectator-card {
