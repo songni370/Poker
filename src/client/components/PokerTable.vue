@@ -27,6 +27,8 @@ const props = withDefaults(
     turnSeconds?: number
     /** 本手牌赢家 playerId 集合（结算时高亮）。 */
     winnerPlayerIds?: readonly string[]
+    /** 本手每个赢家赢得的筹码（playerId → 金额）。 */
+    winAmounts?: Readonly<Record<string, number>>
     /** 结算高亮的最佳五张。 */
     highlightCards?: readonly Card[]
     /** 公共牌轮次文案。 */
@@ -49,6 +51,7 @@ const props = withDefaults(
     remainingSeconds: 0,
     turnSeconds: 20,
     winnerPlayerIds: () => [],
+    winAmounts: () => ({}),
     highlightCards: () => [],
     street: null,
     canPickSeat: false,
@@ -257,6 +260,7 @@ const tableStatus = computed(() => {
             :is-hero="seat.playerId === heroPlayerId"
             :is-acting="seat.playerId === actingPlayerId"
             :is-winner="winnerPlayerIds.includes(seat.playerId)"
+            :win-amount="winAmounts[seat.playerId] ?? 0"
             :remaining-ratio="seat.playerId === actingPlayerId ? remainingRatio : 1"
             :remaining-seconds="seat.playerId === actingPlayerId ? remainingSeconds : 0"
             :turn-seconds="turnSeconds"

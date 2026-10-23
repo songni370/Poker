@@ -290,3 +290,16 @@
     min-width: 34px;
   }
 }
+
+/* 顶栏图标按钮：离座 / 退出 用 SVG 图标，比文字省宽 */
+.bar-icon {
+  display: block;
+}
+
+.bar-sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 2px;
+  background: linear-gradient(180deg, transparent, rgba(138, 106, 50, 0.6), transparent);
+  flex: none;
+}

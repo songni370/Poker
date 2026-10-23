@@ -26,6 +26,8 @@ const emit = defineEmits<{
   (event: 'configure'): void
   (event: 'share'): void
   (event: 'members'): void
+  (event: 'leave'): void
+  (event: 'exit'): void
 }>()
 
 // 声音控制状态与行为在 composable 里；顶栏自己持有实例即可（只有这里用）。
@@ -156,6 +158,42 @@ const {
             </div>
           </Transition>
         </div>
+
+        <!--
+          席位操作：离座（保留座位）与退出房间（释放座位）。
+          原先放在底部操作区，会挤占「开始牌局」那一排；移到顶栏后操作区只剩核心动作。
+          仅图标 + 分隔线，避免窄屏把顶栏撑宽。
+        -->
+        <span class="bar-sep" aria-hidden="true" />
+        <Button
+          size="small"
+          text
+          class="bar-btn bar-btn--leave"
+          aria-label="离座"
+          title="离座（座位与筹码为你保留）"
+          @click="emit('leave')"
+        >
+          <svg class="bar-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="13" cy="4" r="1.8" />
+            <line x1="7" y1="21" x2="10" y2="17" />
+            <path d="M16 21l-2-4-3-3 1-6" />
+            <path d="M6 12l2-3 4-1 3 3 3 1" />
+          </svg>
+        </Button>
+        <Button
+          size="small"
+          text
+          class="bar-btn bar-btn--exit"
+          aria-label="退出房间"
+          title="退出房间（释放座位）"
+          @click="emit('exit')"
+        >
+          <svg class="bar-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+            <polyline points="16 17 21 12 16 7" />
+            <line x1="21" y1="12" x2="9" y2="12" />
+          </svg>
+        </Button>
 
         <!-- 分享按钮：快捷桌牌与复制入口 -->
         <Button

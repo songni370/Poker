@@ -144,80 +144,12 @@ function makeResult(handId: string) {
   }
 }
 
-test('结算叠层：进入结算阶段且有结果时才弹', async () => {
-  const handNo = ref(1)
-  const phase = ref<string>('flop')
-  const lastResult = ref<ReturnType<typeof makeResult> | null>(null)
-  const heroCards = ref([])
-
-  const { value } = inScope(() =>
-    useHandResult({
-      roomId: () => 'room-1',
-      lastResult: () => lastResult.value,
-      handNo: () => handNo.value,
-      phase: () => phase.value,
-      heroCards: () => heroCards.value,
-    }),
-  )
-
-  assert.equal(value.overlayVisible.value, false)
-
-  // 牌局进行中拿到 lastResult：还没到结算阶段，不该弹。
-  lastResult.value = makeResult('h-1')
-  await nextTick()
-  assert.equal(value.overlayVisible.value, false)
-
-  // 进入结算阶段：弹。
-  phase.value = 'settlement'
-  await nextTick()
-  assert.equal(value.overlayVisible.value, true)
-})
-
-test('结算叠层：点「知道了」后关闭，且同一手不会被任何广播重新弹出来', async () => {
-  sessionStorage.clear()
-  const handNo = ref(1)
-  const phase = ref<string>('settlement')
-  const broadcastTick = ref(0)
-  const heroCards = ref([])
-
-  const { value } = inScope(() =>
-    useHandResult({
-      roomId: () => 'room-broadcast',
-      // 每次广播都返回「内容相同、引用不同」的新对象，模拟服务端整体替换快照。
-      lastResult: () => {
-        void broadcastTick.value
-        return makeResult('h-42')
-      },
-      handNo: () => handNo.value,
-      phase: () => phase.value,
-      heroCards: () => heroCards.value,
-    }),
-  )
-
-  assert.equal(value.overlayVisible.value, true)
-  value.closeResult()
-  await nextTick()
-  assert.equal(value.overlayVisible.value, false)
-
+test('结算展示：不再弹窗——结果由牌桌上的赢家徽记表达', async () => {
   /*
-   * 模拟「别人加入 / 断线重连」这类与结算无关的广播。
-   *
-   * 服务端每推一次快照都会**整体替换** state 对象，于是 lastResult 拿到的是
-   * 一个内容相同、引用不同的新对象。这里用版本号 ref 驱动、每次返回全新对象，
-   * 保证走的是「快照被替换」这条真实路径。
-   *
-   * 守住的不变量：确认过的那一手，不会因为后续无关广播再次弹出。
-   * （注意：当前实现里两个 watch 的 getter 都返回字符串，所以这条其实有两道防线——
-   *   ① getter 是原始值比较；② 第一个 watch 只在 handNo/phase 真变时才重置 resultDismissed。
-   *   哪天有人把 getter 改成返回对象，这条用例会提醒他：那是行不通的。）
+   * 设计变更（用户要求）：结算不再用弹窗，改为在赢家座位上画王冠 + 金额 + 金币特效。
+   * 所以 overlayVisible 必须恒为 false，即使已经进入结算阶段、有结算结果。
+   * 这条用例守的就是「不要哪天又悄悄把弹窗塞回来」。
    */
-  broadcastTick.value += 1
-  await nextTick()
-  assert.equal(value.overlayVisible.value, false, '同一手不应该因为广播重新弹出')
-})
-
-test('结算叠层：进入下一手后，新一手的结算要能正常弹出', async () => {
-  sessionStorage.clear()
   const handNo = ref(1)
   const phase = ref<string>('settlement')
   const lastResult = ref<ReturnType<typeof makeResult> | null>(makeResult('h-1'))
@@ -225,29 +157,42 @@ test('结算叠层：进入下一手后，新一手的结算要能正常弹出',
 
   const { value } = inScope(() =>
     useHandResult({
-      roomId: () => 'room-next',
+      roomId: () => 'room-no-overlay',
       lastResult: () => lastResult.value,
       handNo: () => handNo.value,
       phase: () => phase.value,
       heroCards: () => heroCards.value,
     }),
   )
-  value.closeResult()
-  await nextTick()
-  assert.equal(value.overlayVisible.value, false)
 
-  // 下一手：手数 +1、阶段回到翻牌前、结果清空。
+  assert.equal(value.overlayVisible.value, false, '结算阶段也不应弹窗')
+  // 但 result 仍然可读——牌桌用它算赢家金额与王冠。
+  assert.ok(value.result.value, '结算结果本身仍要能拿到，供牌桌渲染赢家徽记')
+})
+
+test('结算展示：换到下一手后 result 会切换（赢家徽记跟着换人）', async () => {
+  const handNo = ref(1)
+  const phase = ref<string>('settlement')
+  const lastResult = ref<ReturnType<typeof makeResult> | null>(makeResult('h-1'))
+  const heroCards = ref([])
+
+  const { value } = inScope(() =>
+    useHandResult({
+      roomId: () => 'room-next-hand',
+      lastResult: () => lastResult.value,
+      handNo: () => handNo.value,
+      phase: () => phase.value,
+      heroCards: () => heroCards.value,
+    }),
+  )
+  assert.equal(value.result.value?.handId, 'h-1')
+
+  // 下一手结算：牌桌读到的 result 必须换成新的一手。
   handNo.value = 2
-  phase.value = 'preflop'
-  lastResult.value = null
-  await nextTick()
-  assert.equal(value.overlayVisible.value, false)
-
-  // 第二手结算：必须弹（不能因为上一手确认过就再也不弹）。
-  phase.value = 'settlement'
   lastResult.value = makeResult('h-2')
   await nextTick()
-  assert.equal(value.overlayVisible.value, true)
+  assert.equal(value.result.value?.handId, 'h-2')
+  assert.equal(value.overlayVisible.value, false)
 })
 
 test('结算叠层：局末底牌被清空时，展示回退到本手缓存', async () => {

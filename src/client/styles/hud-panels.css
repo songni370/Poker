@@ -258,6 +258,70 @@
   width: clamp(310px, 26vw, 390px);
 }
 
+/*
+ * H5（≤560px 竖屏）：手牌历史改成「底部抽屉式」而不是右上角小浮层。
+ *
+ * 原来的小浮层在手机上只有 ~340px 宽、且贴在右侧，一张战报卡片里要塞
+ * 公共牌 + 摊牌明细 + 赢家行，横向被压得很紧、读起来费劲。
+ * 改成通栏抽屉后：宽度吃满、每张卡片按「局号 → 公共牌 → 摊牌」纵向排，
+ * 并且固定在底部（拇指够得到、不遮住牌桌主体的底池与公共牌）。
+ */
+@media (max-width: 560px) and (orientation: portrait) {
+  .hud-history-anchor {
+    position: static;
+  }
+
+  .hud-history-popover {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    top: auto;
+    width: 100vw;
+    max-width: 100vw;
+    border-radius: 16px 16px 0 0;
+    /* 别把整张牌桌盖住：最多占屏幕 62%，上方仍能看到牌桌 */
+    max-height: 62vh;
+    z-index: 60;
+  }
+
+  .hud-history-list {
+    max-height: calc(62vh - 44px);
+    padding: 10px 12px 16px;
+    gap: 10px;
+  }
+
+  /* 抽屉里的战报卡片：通栏、字号放大一档，摊牌明细纵排 */
+  .hud-history-popover .history-card {
+    padding: 12px 14px;
+    gap: 10px;
+    border-radius: 12px;
+  }
+
+  .hud-history-popover .history-card-header {
+    padding-bottom: 10px;
+  }
+
+  .hud-history-popover .history-hand-tag {
+    font-size: 0.95rem;
+    padding: 3px 10px;
+  }
+
+  .hud-history-popover .history-pot-value {
+    font-size: 1rem;
+  }
+
+  .hud-history-popover .history-cards-line {
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .hud-history-popover .history-revealed-row {
+    padding: 8px 10px;
+    gap: 8px;
+  }
+}
+
 .hud-score-popover { left: 50%; transform: translateX(-50%); width: min(470px, calc(100vw - 20px)); }
 .hud-score-popover-enter-active, .hud-score-popover-leave-active { transition: opacity .18s ease, transform .18s ease; }
 .hud-score-popover-enter-from, .hud-score-popover-leave-to { opacity: 0; transform: translate(-50%, -8px) scale(.96); }
@@ -578,9 +642,10 @@
   .hud-chat-popover {
     width: min(290px, calc(100vw - 20px));
   }
-  .hud-history-popover {
-    width: min(340px, calc(100vw - 20px));
-  }
+  /*
+   * 手牌历史的宽度由上面的「竖屏底部抽屉」规则统一接管（100vw 通栏）。
+   * 这里不要再写 width——同优先级下后出现的会盖掉抽屉规则（踩过一次）。
+   */
   .hud-chat-list {
     height: 120px;
   }

@@ -285,6 +285,17 @@ const { occupiedCount, maxSeats, emptyCount, isTableFull, firstAvailableSeat, ca
 /** 赢家 id（座位高亮用）。 */
 const winnerPlayerIds = computed(() => game.state?.lastResult?.winners.map((winner) => winner.playerId) ?? [])
 
+/** 本手每个赢家赢得的筹码（同一人可能同时赢主池与边池，需要累加）。 */
+const winAmounts = computed<Record<string, number>>(() => {
+  const result = game.state?.lastResult
+  if (!result) return {}
+  const map: Record<string, number> = {}
+  for (const winner of result.winners) {
+    map[winner.playerId] = (map[winner.playerId] ?? 0) + winner.amount
+  }
+  return map
+})
+
 /** 赢家的最佳五张（桌面高亮用）。 */
 const highlightCards = computed<readonly Card[]>(() => {
   if (!isHandActive.value) return []
@@ -456,6 +467,8 @@ onBeforeUnmount(() => {
       @configure="configDialogOpen = true"
       @share="openInviteDialog"
       @members="kickOpen = true"
+      @leave="requestLeaveSeat"
+      @exit="exitRoomOpen = true"
     />
 
     <!-- 屏幕阅读器公告区：超时、断线、轮到自己。 -->
@@ -517,6 +530,7 @@ onBeforeUnmount(() => {
         :remaining-seconds="remainingSeconds"
         :turn-seconds="turnSeconds"
         :winner-player-ids="winnerPlayerIds"
+        :win-amounts="winAmounts"
         :highlight-cards="highlightCards"
         :street="displayStreet"
         :can-pick-seat="canPickSeat"

@@ -1,7 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import {
   createRoom,
-  dismissResult,
   joinRoomByLink,
   playUntilSettled,
   readHoleCards,
@@ -121,12 +120,11 @@ test('手机端开局、离座和退出按钮保持同一排，开局文字不�
       }
     })
     /*
-     * 房主的操作行是 3 个按钮：开始牌局 / 离座 / 退出房间。
-     * 「加机器人」已收进「配置」弹窗——320px 是最窄的一档，
-     * 这一行必须保持单排、不换行。
+     * 底部操作区只剩「开始牌局」一个按钮：离座 / 退出房间已移到顶栏，
+     * 加机器人收进「配置」弹窗——手机上这一行给核心动作独占。
      */
     expect(layout, `${width}px 手机端开局按钮布局`).toEqual({
-      buttonCount: 3,
+      buttonCount: 1,
       sameRow: true,
       insideRow: true,
       startLabelLines: 1,
@@ -189,21 +187,19 @@ test('两个独立会话打完一手：摊牌前不泄露对手底牌，结算�
 
   // ── 打完这一手 ──
   expect(await playUntilSettled([host, guest])).toBe(true)
-  await expect(host.getByRole('button', { name: '知道了' })).toBeVisible()
 
-  // 结算叠层里应出现战报标题与赢家结论，且不再显示他人底牌之外的私密信息。
-  // 文案随「战局结算战报」设计稿更新过，这里按当前界面真实的三种结论匹配：
-  //   本人赢：恭喜获胜！赢得 +N 筹码 / 对手赢：XXX 赢得底池 / 全员弃牌：全员弃牌，XXX 获胜。
-  const settlement = host.getByRole('dialog').filter({ hasText: '战局结算战报' })
-  await expect(settlement).toBeVisible()
-  await expect(
-    settlement.getByText(/恭喜获胜！赢得|赢得底池|全员弃牌，.+获胜|无人获胜/).first(),
-  ).toBeVisible()
+  /*
+   * 结算改为画在牌桌上：赢家座位出现王冠 + 赢得金额，不再弹窗。
+   * 这里守住「打完之后牌桌上确实标出了赢家」这条契约。
+   */
+  const winBadges = host.locator('.win-badge')
+  await expect(winBadges.first()).toBeVisible()
+  await expect(winBadges.first()).toContainText(/\+\d+/)
+  await expect(host.locator('.result-dialog')).toHaveCount(0)
 
   // ── 开始下一手 ──
-  await dismissResult(host)
   await startHand(host)
-  await expect(host.getByRole('button', { name: '知道了' })).toBeHidden()
+  await expect(host.getByRole('button', { name: '知道了' })).toHaveCount(0)
   await expect
     .poll(async () => /第\s*2\s*手/.test(await host.locator('body').innerText()), { timeout: 10_000 })
     .toBe(true)

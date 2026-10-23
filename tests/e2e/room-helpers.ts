@@ -141,6 +141,17 @@ export async function playUntilSettled(pages: Page[], timeoutMs = 45_000): Promi
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     for (const page of pages) {
+      /*
+       * 结算的判据改成「牌桌上出现赢家徽记」：结算不再弹窗，
+       * 而是在赢家座位上画王冠 + 赢得金额（见 PlayerSeat 的 .win-badge）。
+       * 兜底保留旧的「知道了」按钮检测，以防某些分支仍走弹窗。
+       */
+      const settledOnTable = await page.evaluate(() => {
+        if (document.querySelector('.win-badge')) return true
+        // 全员弃牌也可能只是回到等待态：再看一眼是否已进入结算阶段。
+        return Boolean(document.querySelector('.next-hand-notice'))
+      })
+      if (settledOnTable) return true
       if (await page.getByRole('button', { name: '知道了' }).isVisible().catch(() => false)) return true
       // 动作按钮改成「英文主 + 中文辅」后，可访问名称是「CHECK 过牌」/「CALL 跟注 20」，
       // 所以这里不能再锚定开头，只按中文子串匹配。
@@ -158,7 +169,12 @@ export async function playUntilSettled(pages: Page[], timeoutMs = 45_000): Promi
   return false
 }
 
-/** 关掉结算叠层，让底部与顶栏恢复可点。 */
+/**
+ * 关掉结算叠层（若存在）。
+ *
+ * 结算已改为「牌桌上展示赢家」，正常情况下没有弹窗要关；
+ * 保留这个函数是为了兼容可能仍走弹窗的分支，调用点不必改动。
+ */
 export async function dismissResult(page: Page): Promise<void> {
   const known = page.getByRole('button', { name: '知道了' })
   if (await known.isVisible().catch(() => false)) {

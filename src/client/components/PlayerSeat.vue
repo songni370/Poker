@@ -11,6 +11,8 @@ const props = withDefaults(
     /** 是否正在行动（光环 + YOUR TURN + 进度条三重提示）。 */
     isActing?: boolean
     /** 本手牌赢家（叠加金色标记，不是唯一提示手段）。 */
+    /** 本手赢得的筹码（0 表示没赢；>0 时座位显示王冠与金额）。 */
+    winAmount?: number
     isWinner?: boolean
     /** 剩余时间比例 0–1；仅行动中需要。 */
     remainingRatio?: number
@@ -23,6 +25,7 @@ const props = withDefaults(
     isHero: false,
     isActing: false,
     isWinner: false,
+    winAmount: 0,
     remainingRatio: 1,
     remainingSeconds: 0,
     turnSeconds: 20,
@@ -83,27 +86,26 @@ const roleBadges = computed(() => {
  */
 const actionLabel = computed<string>(() => {
   const action = props.seat.lastAction
-  const street = props.seat.committedStreet
   if (props.seat.folded) return '弃牌'
-  if (props.seat.allIn) {
-    const hand = props.seat.committedHand
-    return hand > 0 ? `全下 ${String(hand)}` : '全下'
-  }
-  const withAmount = (label: string, amount: number): string =>
-    amount > 0 ? `${label} ${String(amount)}` : label
+  /*
+   * 动作标签只写「做了什么」，**不重复金额**：
+   * 本轮下注的数额已经由桌面上的浮动筹码（PokerTable 的 .bet）显示了，
+   * 两处都写会让人一眼看到两个一样的数字。
+   * 加注这类需要知道目标额的动作由浮动筹码 + 底部操作区的数字共同表达。
+   */
   switch (action) {
     case 'raise':
-      return withAmount('加注到', street)
+      return '加注'
     case 'bet':
-      return withAmount('下注', street)
+      return '下注'
     case 'call':
-      return withAmount('跟注', street)
+      return '跟注'
     case 'check':
       return '过牌'
     default:
-      // 没有动作时退回盲注说明：它同样是「已投入多少」的信息
-      if (props.seat.isSmallBlind) return withAmount('小盲', street)
-      if (props.seat.isBigBlind) return withAmount('大盲', street)
+      // 没有动作时退回盲注说明（盲注本身就是本轮投入，金额由浮动筹码表达）
+      if (props.seat.isSmallBlind) return '小盲'
+      if (props.seat.isBigBlind) return '大盲'
       return ''
   }
 })
@@ -216,6 +218,19 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
         两处同时显示会重复（一个在卡右下角、一个朝桌心），这里只保留桌面那一处。
         无效信息不删干净：`spoken` 摘要里仍会读出「本轮下注 N」，读屏用户不缺信息。
       -->
+    </div>
+
+    <!--
+      本手赢家：王冠 + 赢得金额 + 金币闪光。
+      从「结算弹窗」改成「画在牌桌上」后，谁赢了、赢多少一眼就能看到，
+      也不打断玩家继续操作（不用先关弹窗才能开下一手）。
+    -->
+    <div v-if="winAmount > 0" class="win-badge" :aria-label="`赢得 ${winAmount} 筹码`">
+      <span class="win-crown" aria-hidden="true">👑</span>
+      <span class="win-amount num">+{{ winAmount }}</span>
+      <span class="win-coins" aria-hidden="true">
+        <i v-for="coin in 5" :key="coin" :class="`win-coin win-coin--${coin}`" />
+      </span>
     </div>
 
     <!-- 倒计时进度条与时间一体化胶囊：轮到该玩家行动时出现 -->
@@ -525,6 +540,78 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
 .is-hero .status,
 .is-hero .seat-timer-capsule {
   display: none;
+}
+
+/* ───────────── 本手赢家：王冠 + 金额 + 金币 ───────────── */
+.win-badge {
+  position: absolute;
+  left: 50%;
+  top: -6px;
+  transform: translate(-50%, -100%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px 1px 4px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #3a2c15 0%, #241a0e 100%);
+  border: 1px solid #c39a4f;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 230, 170, 0.35),
+    0 0 12px rgba(255, 200, 90, 0.45),
+    0 2px 6px rgba(0, 0, 0, 0.7);
+  white-space: nowrap;
+  z-index: 7;
+  pointer-events: none;
+  animation: win-badge-pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.win-crown {
+  font-size: 0.8rem;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.8));
+}
+
+.win-amount {
+  color: #ffe9ac;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-shadow: 0 1px 0 #000, 0 0 8px rgba(255, 190, 90, 0.6);
+}
+
+/* 金币：从赢家座位向上飘散，纯 CSS 动画，不引入任何素材 */
+.win-coins {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: 0;
+  height: 0;
+}
+
+.win-coin {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #ffe9ac 0%, #f0c668 45%, #a8761f 100%);
+  box-shadow: 0 0 4px rgba(255, 200, 90, 0.8);
+  opacity: 0;
+  animation: win-coin-rise 1.1s ease-out forwards;
+}
+
+.win-coin--1 { left: -14px; animation-delay: 0.05s; --drift: -10px; }
+.win-coin--2 { left: -6px; animation-delay: 0.15s; --drift: -4px; }
+.win-coin--3 { left: 0; animation-delay: 0s; --drift: 2px; }
+.win-coin--4 { left: 6px; animation-delay: 0.2s; --drift: 8px; }
+.win-coin--5 { left: 13px; animation-delay: 0.1s; --drift: 13px; }
+
+@keyframes win-badge-pop {
+  from { transform: translate(-50%, -60%) scale(0.6); opacity: 0; }
+  to { transform: translate(-50%, -100%) scale(1); opacity: 1; }
+}
+
+@keyframes win-coin-rise {
+  0% { transform: translate(0, 0) scale(0.6); opacity: 0; }
+  25% { opacity: 1; }
+  100% { transform: translate(var(--drift, 0), -26px) scale(1); opacity: 0; }
 }
 
 /* 动作标签：刚做了什么 + 多少；弃牌压暗，加注/全下提亮 */

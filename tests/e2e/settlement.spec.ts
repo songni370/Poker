@@ -1,7 +1,6 @@
 import { expect, test } from '@playwright/test'
 import {
   createRoom,
-  dismissResult,
   joinRoomByLink,
   playUntilSettled,
   startHand,
@@ -24,7 +23,7 @@ import {
  * 现在 getter 返回字符串，并且本人确认过的 handId 记在 sessionStorage，刷新后不再弹。
  */
 
-test('结算叠层：一人刷新不会让全桌重弹，本人已确认过的那一手刷新后也不再弹', async ({ browser }) => {
+test('结算展示：一人刷新不会影响全桌的赢家徽记状态', async ({ browser }) => {
   test.setTimeout(120_000)
   const aCtx = await browser.newContext({ viewport: { width: 1280, height: 720 } })
   const bCtx = await browser.newContext({ viewport: { width: 1280, height: 720 } })
@@ -38,20 +37,31 @@ test('结算叠层：一人刷新不会让全桌重弹，本人已确认过的�
   await startHand(a)
   expect(await playUntilSettled([a, b])).toBe(true)
 
-  // 双方都确认过结算，此时任何状态广播都不该重开叠层
-  await dismissResult(a)
-  await dismissResult(b)
+  // 结算现在画在牌桌上：双方都应看到赢家徽记。
+  await expect(a.locator('.win-badge').first()).toBeVisible()
+  await expect(b.locator('.win-badge').first()).toBeVisible()
 
-  // A 刷新页面
+  // A 刷新页面（这一动作以前会让全桌重弹结算弹窗）
   await a.reload()
   await a.waitForURL(/\/table\//)
   await expect(a.getByText('已连接')).toBeVisible()
   await a.waitForTimeout(1500)
 
-  const aVisible = await a.getByRole('button', { name: '知道了' }).isVisible().catch(() => false)
-  const bVisible = await b.getByRole('button', { name: '知道了' }).isVisible().catch(() => false)
-  expect(bVisible, 'B 不应因为 A 刷新而再弹结算叠层').toBe(false)
-  expect(aVisible, 'A 刷新前已确认过这一手，刷新后也不应再弹').toBe(false)
+  /*
+   * 刷新后：
+   *   · A 应从快照恢复出同一手的赢家徽记（结算结果随快照下发）；
+   *   · B 的徽记不受影响，且双方都不该弹出任何结算弹窗。
+   */
+  await expect(a.locator('.win-badge').first()).toBeVisible()
+  await expect(b.locator('.win-badge').first()).toBeVisible()
+  expect(
+    await b.getByRole('button', { name: '知道了' }).isVisible().catch(() => false),
+    'B 不应因为 A 刷新而弹出结算',
+  ).toBe(false)
+  expect(
+    await a.getByRole('button', { name: '知道了' }).isVisible().catch(() => false),
+    'A 刷新后也不应弹出结算',
+  ).toBe(false)
 
   await aCtx.close()
   await bCtx.close()

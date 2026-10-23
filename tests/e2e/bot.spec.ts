@@ -56,12 +56,17 @@ test('机器人陪练：单人加机器人后能自动打完一手并结算', as
    */
   expect(await playUntilSettled([host], 60_000), '机器人与本人应能打完一手并结算').toBe(true)
 
-  // 结算战报里应能读到结果（赢家 / 底池 / 全员弃牌 三种文案之一）。
-  const settlement = host.getByRole('dialog').filter({ hasText: '战局结算战报' })
-  await expect(settlement).toBeVisible()
-  await expect(
-    settlement.getByText(/恭喜获胜！赢得|赢得底池|全员弃牌，.+获胜|无人获胜/).first(),
-  ).toBeVisible()
+  /*
+   * 结算展示在牌桌上：赢家座位出现王冠 + 赢得金额（不再弹窗）。
+   * 至少要有一个人拿到徽记；徽记里应带「+数字」。
+   */
+  const winBadges = host.locator('.win-badge')
+  await expect(winBadges.first()).toBeVisible()
+  await expect(winBadges.first()).toContainText(/\+\d+/)
+  // 王冠与金币特效也在（纯 CSS，不需要素材）。
+  await expect(host.locator('.win-crown').first()).toBeAttached()
+  // 确认没有再弹旧的结算弹窗。
+  await expect(host.locator('.result-dialog')).toHaveCount(0)
 
   expect(errors).toEqual([])
   await context.close()

@@ -31,7 +31,6 @@ function seenKey(roomId: string): string {
 }
 
 export function useHandResult(options: HandResultOptions) {
-  const overlayVisible = ref(false)
   const resultDismissed = ref(false)
 
   const result = computed(() => options.lastResult() ?? null)
@@ -71,26 +70,16 @@ export function useHandResult(options: HandResultOptions) {
    * （别人加入、断线、重连、甚至超时提示）都会重跑回调：
    * 结算被标记成「未确认」、叠层重新弹出。实测：一个人刷新页面，全桌都再弹一次。
    */
-  watch(
-    () => `${String(options.handNo() ?? -1)}:${options.phase() ?? ''}`,
-    () => {
-      resultDismissed.value = false
-    },
-  )
-
-  watch(
-    () => `${String(options.handNo() ?? -1)}:${options.phase() ?? ''}:${String(Boolean(options.lastResult()))}`,
-    () => {
-      const hasResult = Boolean(options.lastResult())
-      const handId = options.lastResult()?.handId ?? null
-      const phase = options.phase()
-      const settled = phase === 'showdown' || phase === 'settlement'
-      // 本人已经确认过这一手的结算（例如刷新前点过「知道了」）就不再弹。
-      const alreadySeen = handId !== null && handId === seenResultHandId.value
-      overlayVisible.value = hasResult && settled && !resultDismissed.value && !alreadySeen
-    },
-    { immediate: true },
-  )
+  /*
+   * 结算改为**完全在牌桌上表达**：赢家的座位上出现王冠 + 赢得金额 + 金币特效
+   * （见 PlayerSeat 的 .win-badge）。不再弹窗的理由：
+   *   · 弹窗挡住牌桌，玩家想看的「谁还有牌、亮的是什么」正好被盖住；
+   *   · 必须先手动关掉才能开下一手，打断节奏；
+   *   · 「谁赢了多少」本来就是牌桌上最该直接看到的信息。
+   *
+   * overlayVisible 保留（恒为 false）是为了以后想恢复弹窗时不必推翻整个 composable。
+   */
+  const overlayVisible = ref(false)
 
   /** 用户点了「知道了」：记下这一手，刷新后不再弹。 */
   function closeResult(): void {
