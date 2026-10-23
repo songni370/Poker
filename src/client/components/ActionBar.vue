@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Button from 'primevue/button'
 import Dialog from 'primevue/dialog'
 import type { LegalAction } from '../../shared/protocol.ts'
 import { clampAmount, quickSizes, type QuickSize } from './action-bar-sizing.ts'
+import TurnTimerBar from './TurnTimerBar.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -209,54 +210,7 @@ function confirmAllInAction(): void {
   sendAction('all_in')
 }
 
-const timerFillRef = shallowRef<HTMLElement | null>(null)
-let timerRafId = 0
 
-function updateTimer(): void {
-  if (!props.isMyTurn) {
-    if (timerFillRef.value) {
-      timerFillRef.value.style.transform = 'scaleX(0)'
-    }
-    return
-  }
-
-  let ratio = props.remainingRatio ?? 1
-  if (props.turnDeadlineAt) {
-    const now = Date.now() + props.clockOffsetMs
-    const rem = Math.max(0, props.turnDeadlineAt - now)
-    const total = Math.max(1, props.turnSeconds * 1000)
-    ratio = Math.max(0, Math.min(1, rem / total))
-  }
-
-  if (timerFillRef.value) {
-    timerFillRef.value.style.transform = `scaleX(${ratio})`
-  }
-
-  if (props.isMyTurn && (ratio > 0 || (props.remainingSeconds ?? 0) > 0)) {
-    timerRafId = requestAnimationFrame(updateTimer)
-  }
-}
-
-watch(
-  () => [props.isMyTurn, props.turnDeadlineAt, props.turnSeconds],
-  async () => {
-    cancelAnimationFrame(timerRafId)
-    timerRafId = 0
-    if (props.isMyTurn) {
-      await nextTick()
-      updateTimer()
-    } else if (timerFillRef.value) {
-      timerFillRef.value.style.transform = 'scaleX(0)'
-    }
-  },
-  { immediate: true },
-)
-
-onBeforeUnmount(() => {
-  cancelAnimationFrame(timerRafId)
-})
-
-const isUrgentTimer = computed(() => props.isMyTurn && props.remainingSeconds <= 5)
 
 /** 针对无障碍读屏的提示文本 */
 const liveText = computed(() => {
@@ -272,39 +226,13 @@ const liveText = computed(() => {
   <section class="action-console" aria-label="Action Console">
     <p class="sr-only" aria-live="polite" aria-atomic="true">{{ liveText }}</p>
 
-    <!-- 1. 一体化竞技倒计时舱（进度条与时间深度融铸在同一胶囊跑道内） -->
-    <div
+    <!-- 1. 一体化竞技倒计时舱（组件：TurnTimerBar） -->
+    <TurnTimerBar
       v-if="isMyTurn"
-      class="turn-timer-integrated"
-      :class="{ 'is-urgent': isUrgentTimer }"
-      role="progressbar"
-      :aria-valuenow="remainingSeconds"
-      aria-valuemin="0"
-      :aria-valuemax="turnSeconds"
-      :aria-label="`行动倒计时，剩余 ${remainingSeconds} 秒`"
-    >
-      <!-- 进度条底槽与平滑硬件加速填充层 -->
-      <div class="timer-track-bar">
-        <div
-          ref="timerFillRef"
-          class="timer-progress-fill"
-          :style="{ transform: `scaleX(${remainingRatio ?? 1})` }"
-        />
-        <div class="timer-ambient-glow" />
-      </div>
-
-      <!-- 居中内嵌倒计时信息：行动提示与醒目时间数字 -->
-      <div class="timer-overlay-content">
-        <div class="timer-lead">
-          <i class="pi pi-clock timer-lead-icon" aria-hidden="true" />
-          <span class="timer-lead-title">轮到你行动</span>
-        </div>
-        <div class="timer-time-box num">
-          <span class="timer-digits">{{ remainingSeconds }}</span>
-          <span class="timer-unit">S</span>
-        </div>
-      </div>
-    </div>
+      :remaining-seconds="remainingSeconds"
+      :turn-seconds="turnSeconds"
+      :remaining-ratio="remainingRatio"
+    />
 
     <!-- 竖屏紧凑操作区：一行注码控制 + 一行四个动作，替代竖屏下的双舱布局。 -->
     <div v-if="isCompact" class="compact-dock">
@@ -672,143 +600,6 @@ const liveText = computed(() => {
   position: relative;
   user-select: none;
   box-sizing: border-box;
-}
-
-/* ───────────── 1. 一体化竞技倒计时舱 (进度条与时间深度融铸) ───────────── */
-.turn-timer-integrated {
-  position: relative;
-  width: 100%;
-  height: 26px;
-  border-radius: 999px;
-  overflow: hidden;
-  /* 拟物：内凹金属凹槽 + 黄铜细框，填充层带顶部高光 */
-  background: #0c0906;
-  border: 1px solid rgba(165, 128, 60, 0.75);
-  box-shadow:
-    inset 0 2px 5px rgba(0, 0, 0, 0.9),
-    0 1px 0 rgba(255, 255, 255, 0.08),
-    0 3px 8px rgba(0, 0, 0, 0.55);
-  display: flex;
-  align-items: center;
-  user-select: none;
-  box-sizing: border-box;
-}
-
-.turn-timer-integrated.is-urgent {
-  border-color: rgba(239, 68, 68, 0.85);
-  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.8), 0 0 14px rgba(239, 68, 68, 0.65);
-  animation: timer-pulse-urgent 0.8s infinite alternate ease-in-out;
-}
-
-@keyframes timer-pulse-urgent {
-  0% {
-    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.8), 0 0 6px rgba(239, 68, 68, 0.3);
-  }
-  100% {
-    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.8), 0 0 16px rgba(239, 68, 68, 0.85);
-  }
-}
-
-.timer-track-bar {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  border-radius: inherit;
-  pointer-events: none;
-}
-
-.timer-progress-fill {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  transform-origin: left center;
-  background: linear-gradient(180deg, #9af0a9 0%, #4fbf67 55%, #2d8243 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
-  border-radius: inherit;
-  will-change: transform;
-}
-
-.turn-timer-integrated.is-urgent .timer-progress-fill {
-  background: linear-gradient(180deg, #ff8a8a 0%, #d63a3a 55%, #9e1f1f 100%);
-}
-
-.timer-ambient-glow {
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.08) 0%, transparent 80%);
-  pointer-events: none;
-}
-
-.timer-overlay-content {
-  position: relative;
-  z-index: 2;
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 14px;
-  pointer-events: none;
-  box-sizing: border-box;
-}
-
-.timer-lead {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.72rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  color: #f6ecd8;
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.95);
-}
-
-.timer-lead-icon {
-  font-size: 0.8rem;
-  color: #ffdf9a;
-  filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.8));
-}
-
-.is-urgent .timer-lead-icon {
-  color: #fca5a5;
-  animation: timer-spin 1.5s linear infinite;
-}
-
-@keyframes timer-spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
-}
-
-.timer-time-box {
-  display: flex;
-  align-items: baseline;
-  gap: 2px;
-  font-weight: 900;
-  color: #ffffff;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95), 0 0 8px rgba(0, 0, 0, 0.9);
-  font-variant-numeric: tabular-nums;
-}
-
-.timer-digits {
-  font-size: 0.98rem;
-  letter-spacing: 0.02em;
-  color: #ffdf9a;
-  text-shadow: 0 1px 0 #000;
-}
-
-.is-urgent .timer-digits {
-  color: #fee2e2;
-  text-shadow: 0 0 8px rgba(239, 68, 68, 0.8);
-}
-
-.timer-unit {
-  font-size: 0.68rem;
-  font-weight: 700;
-  opacity: 0.9;
-  color: #f8fafc;
 }
 
 /* ───────────── 2. 核心双舱协同布局 ───────────── */
