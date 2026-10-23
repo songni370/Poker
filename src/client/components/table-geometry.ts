@@ -69,11 +69,17 @@ export const TABLE_GEOMETRY: readonly TableGeometryTier[] = [
     query: '(max-width: 560px) and (orientation: portrait)',
     width: 'calc(100vw - 16px)',
     height: '100%',
-    anchor: { x: 43, y: 44 },
-    seatWidth: 'clamp(80px, 22vw, 94px)',
+    /*
+     * 座位椭圆半径：把座位往桌沿推，给中央的底池/公共牌让出净空。
+     * 之前 43/44 时，侧边座位面板与公共牌在纵向上几乎贴着（用户反馈「在同一层」）。
+     */
+    anchor: { x: 46, y: 47 },
+    /* 座位宽度不能太窄：昵称会被截成「老…」这种，读不出是谁。
+       半径推到 46/47 之后，桌沿空间够用，宽度回退到接近原来的值。 */
+    seatWidth: 'clamp(80px, 21vw, 92px)',
     sideSeatWidth: 'clamp(74px, 19vw, 84px)',
     seatPaddingBlock: '4px',
-    centerInset: 190,
+    centerInset: 176,
     boardCardWidth: 'clamp(24px, calc((100vw - 210px) / 5), 38px)',
     centerTop: '45%',
     centerMaxHeightInset: 86,
@@ -84,11 +90,17 @@ export const TABLE_GEOMETRY: readonly TableGeometryTier[] = [
     query: '(max-width: 560px) and (orientation: portrait) and (max-height: 780px)',
     width: 'calc(100vw - 16px)',
     height: '100%',
-    anchor: { x: 43, y: 44 },
-    seatWidth: 'clamp(80px, 22vw, 94px)',
+    /*
+     * 座位椭圆半径：把座位往桌沿推，给中央的底池/公共牌让出净空。
+     * 之前 43/44 时，侧边座位面板与公共牌在纵向上几乎贴着（用户反馈「在同一层」）。
+     */
+    anchor: { x: 46, y: 47 },
+    /* 座位宽度不能太窄：昵称会被截成「老…」这种，读不出是谁。
+       半径推到 46/47 之后，桌沿空间够用，宽度回退到接近原来的值。 */
+    seatWidth: 'clamp(80px, 21vw, 92px)',
     sideSeatWidth: 'clamp(74px, 19vw, 84px)',
     seatPaddingBlock: '3px',
-    centerInset: 190,
+    centerInset: 176,
     boardCardWidth: 'clamp(24px, calc((100vw - 210px) / 5), 38px)',
     centerTop: '45%',
     centerMaxHeightInset: 82,
@@ -122,7 +134,12 @@ export const TABLE_BASE: TableBaseGeometry = {
 }
 
 /** 竖屏舞台留白：上方给 HUD 浮动胶囊让位，下方给本人座位与英雄手牌区留呼吸空间。 */
-export const STAGE_PADDING_PORTRAIT = { top: 50, right: 8, bottom: 38, left: 8 }
+/*
+ * 竖屏舞台留白。
+ * 顶部 50px 给 HUD 浮动胶囊；底部 38px 原来留给「本人座位 + 英雄手牌」的呼吸空间，
+ * 现在操作区的离座/退出已改到座舱右上角、不再占一行，底部可以再收 10px 给牌桌。
+ */
+export const STAGE_PADDING_PORTRAIT = { top: 48, right: 8, bottom: 28, left: 8 }
 /** 超短屏舞台留白：把纵向空间让给牌桌。 */
 export const STAGE_PADDING_COMPACT = { top: 30, right: 6, bottom: 24, left: 6 }
 /** 低于这个高度用紧凑舞台留白。 */

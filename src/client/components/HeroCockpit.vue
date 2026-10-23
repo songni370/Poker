@@ -154,7 +154,42 @@ const emit = defineEmits<{
           </div>
 
           <!--
-            开局控制与席位操作。
+            席位操作放座舱右上角（绝对定位，不参与流布局）：
+            放在操作行里会额外占一行，把牌桌压得更矮。
+          -->
+          <div class="cockpit-corner-actions">
+            <button
+              v-if="!away"
+              type="button"
+              class="seat-corner-btn"
+              aria-label="离座"
+              title="离座（座位与筹码为你保留）"
+              @click="emit('leave')"
+            >
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="13" cy="4" r="1.8" />
+                <line x1="7" y1="21" x2="10" y2="17" />
+                <path d="M16 21l-2-4-3-3 1-6" />
+                <path d="M6 12l2-3 4-1 3 3 3 1" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              class="seat-corner-btn"
+              aria-label="退出房间"
+              title="退出房间（释放座位）"
+              @click="emit('exit')"
+            >
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+            </button>
+          </div>
+
+          <!--
+            开局控制。
             离座 / 退出房间放这里而不是顶栏：顶栏在 390px 下已经有 4 个图标按钮，
             再塞两个会直接把牌桌挤出屏幕（踩过）。这一行放在座舱内，宽度由座舱保证。
             两者用小图标 + 极短文字，不抢「开始牌局」的视觉重量。
@@ -170,34 +205,6 @@ const emit = defineEmits<{
             >
               <i class="pi pi-play" aria-hidden="true" />
               <span>{{ hasPlayedHand ? '开始下一手' : '开始牌局' }}</span>
-            </Button>
-            <Button
-              v-if="!away"
-              size="small"
-              class="seat-mini-btn"
-              aria-label="离座"
-              title="离座（座位与筹码为你保留）"
-              @click="emit('leave')"
-            >
-              <svg class="btn-action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <circle cx="13" cy="4" r="1.8" />
-                <line x1="7" y1="21" x2="10" y2="17" />
-                <path d="M16 21l-2-4-3-3 1-6" />
-                <path d="M6 12l2-3 4-1 3 3 3 1" />
-              </svg>
-            </Button>
-            <Button
-              size="small"
-              class="seat-mini-btn"
-              aria-label="退出房间"
-              title="退出房间（释放座位）"
-              @click="emit('exit')"
-            >
-              <svg class="btn-action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-                <polyline points="16 17 21 12 16 7" />
-                <line x1="21" y1="12" x2="9" y2="12" />
-              </svg>
             </Button>
           </div>
         </div>

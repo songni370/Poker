@@ -72,7 +72,8 @@ const roleBadges = computed(() => {
   if (props.seat.isSmallBlind) badges.push({ key: 'sb', label: 'SB', tone: 'blind' })
   if (props.seat.isBigBlind) badges.push({ key: 'bb', label: 'BB', tone: 'blind' })
   // 机器人标记：一眼看出这个位置不是真人，避免误以为有人在跟你打。
-  if (props.seat.isBot) badges.push({ key: 'bot', label: 'BOT', tone: 'bot' })
+  // 机器人徽章用单个 B：座位面板很窄，'BOT' 三个字符会把昵称挤成「老…」。
+  if (props.seat.isBot) badges.push({ key: 'bot', label: 'B', tone: 'bot' })
   return badges
 })
 

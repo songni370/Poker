@@ -92,7 +92,7 @@ test('手机观战栏承载空桌提示，说明和按钮不互相遮挡', async
   await guestContext.close()
 })
 
-test('手机端开局、离座和退出按钮保持同一排，开局文字不换行', async ({ browser }) => {
+test('手机端开局按钮单行不换行，离座/退出收在座舱右上角不占位', async ({ browser }) => {
   const hostContext = await browser.newContext({ viewport: { width: 320, height: 740 } })
   const guestContext = await browser.newContext()
   const host = await hostContext.newPage()
@@ -107,26 +107,35 @@ test('手机端开局、离座和退出按钮保持同一排，开局文字不�
     await host.setViewportSize({ width, height: 740 })
     const layout = await host.locator('.hero-seat-actions').evaluate((actions) => {
       const buttons = [...actions.querySelectorAll('button')]
-      const boxes = buttons.map((button) => button.getBoundingClientRect())
       const label = actions.querySelector('.hero-start-btn span')!
       const labelRange = document.createRange()
       labelRange.selectNodeContents(label)
+      const hero = document.querySelector('.hero-cockpit')!.getBoundingClientRect()
+      const corners = [...document.querySelectorAll('.seat-corner-btn')].map((button) => {
+        const box = button.getBoundingClientRect()
+        return {
+          insideHero: box.left >= hero.left - 1 && box.right <= hero.right + 1,
+          inTopRight: box.left > hero.left + hero.width / 2 && box.top < hero.top + hero.height / 2,
+        }
+      })
       return {
+        // 操作行只剩「开始牌局」一个按钮
         buttonCount: buttons.length,
-        sameRow: boxes.every((box) => Math.abs(box.top - boxes[0]!.top) < 1),
-        insideRow: boxes.every((box) => box.right <= actions.getBoundingClientRect().right + 1),
+        // 离座 / 退出在座舱右上角，且都在座舱内
+        cornerCount: corners.length,
+        cornersInTopRight: corners.every((c) => c.insideHero && c.inTopRight),
         startLabelLines: labelRange.getClientRects().length,
         overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
       }
     })
     /*
-     * 底部操作区 3 个按钮：开始牌局 + 离座 + 退出房间（后两个是小图标按钮）。
-     * 加机器人收进「配置」弹窗；这一行在 320px 下也必须保持单排、不换行。
+     * 底部操作行只放「开始牌局」；离座 / 退出房间改为座舱右上角的小图标按钮
+     * （绝对定位、不参与流布局），这样手机竖屏下不会多占一行、把牌桌压矮。
      */
-    expect(layout, `${width}px 手机端开局按钮布局`).toEqual({
-      buttonCount: 3,
-      sameRow: true,
-      insideRow: true,
+    expect(layout, `${width}px 手机端操作区布局`).toEqual({
+      buttonCount: 1,
+      cornerCount: 2,
+      cornersInTopRight: true,
       startLabelLines: 1,
       overflowX: 0,
     })

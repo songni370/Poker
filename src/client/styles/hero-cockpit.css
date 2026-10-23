@@ -799,53 +799,53 @@
 }
 
 /*
- * 座舱里的次级小按钮（离座 / 退出房间）。
- * 只放图标：这两个是低频操作，不该和「开始牌局」抢注意力，
- * 也不该在 390px 下把这一行撑到换行。
+ * 座舱右上角的席位操作（离座 / 退出房间）。
+ *
+ * 绝对定位贴右上角、不参与流布局：放进操作行会额外占一行高度，
+ * 而竖屏下每 30px 高度都是从牌桌那里抢来的。
+ * 用半透明底 + 模糊，避免和底下的牌型/筹码文字打架。
  */
-.seat-mini-btn {
-  flex: none;
-  width: 34px;
-  min-width: 34px;
-  /* 与「开始牌局」同高（34px）：PrimeVue 的 size="small" 自带 min-height，必须一起压掉，
-     否则两者高度不一致、垂直中心对不齐，看起来像错行。 */
-  height: 34px !important;
-  min-height: 34px !important;
-  max-height: 34px !important;
-  padding: 0 !important;
-  border-radius: 10px !important;
-  background: linear-gradient(180deg, #3b2f22 0%, #241b12 100%) !important;
-  border: 1px solid rgba(0, 0, 0, 0.75) !important;
-  color: #cbbd9f !important;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.14),
-    inset 0 -2px 4px rgba(0, 0, 0, 0.6),
-    0 2px 4px rgba(0, 0, 0, 0.5) !important;
-}
-
-.seat-mini-btn:hover {
-  color: #ffdf9a !important;
-}
-
-.seat-mini-btn .btn-action-icon {
-  width: 15px;
-  height: 15px;
-}
-
-/* 操作行统一单排、垂直居中，按钮之间留一点呼吸 */
-.hero-seat-actions {
+.cockpit-corner-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
   display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: nowrap;
+  gap: 4px;
+  z-index: 3;
 }
 
-/* 统一这一行所有按钮的高度，避免不同 size 带来 34/44 混排 */
-.hero-seat-actions .p-button {
-  height: 34px;
-  min-height: 34px;
-  max-height: 34px;
-  align-items: center;
+.seat-corner-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 8px;
+  background: rgba(20, 14, 9, 0.72);
+  border: 1px solid rgba(138, 106, 50, 0.55);
+  color: #cbbd9f;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 2px 5px rgba(0, 0, 0, 0.5);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.seat-corner-btn:hover {
+  color: #ffdf9a;
+  border-color: #c39a4f;
+}
+
+.seat-corner-btn:active {
+  transform: translateY(1px);
+}
+
+/* 座舱需要成为定位上下文；同时给右上角留出按钮的宽度，避免内容压到按钮下面 */
+.hero-cockpit {
+  position: relative;
+  padding-right: 72px;
 }
 
 /*
@@ -862,6 +862,10 @@
     flex: 1 1 auto;
     min-width: 0;
     padding-inline: 8px !important;
+  }
+
+  .hero-cockpit {
+    padding-right: 68px;
   }
 
   .hero-seat-actions .hero-start-btn span {
