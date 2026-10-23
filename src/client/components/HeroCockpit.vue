@@ -16,58 +16,70 @@ import type { LegalAction } from '../../shared/protocol.ts'
  * 纯展示 + 事件上抛：所有状态由 `game` store 与父组件算好后传入，
  * 动作（下注/开局/离座/坐回/入座）一律 emit 给父组件发命令。
  */
-defineProps<{
-  /** 当前是否在座（未离座）。 */
-  seated: boolean
-  /** 已离座但座位保留。 */
-  away: boolean
-  /** 本人筹码。 */
-  stack: number
-  /** 本人本轮已投入（用于「本轮 N」提示）。 */
-  committedStreet: number
-  /** 本人底牌翻面后的展示牌（翻牌动画用）。 */
-  displayHeroCards: readonly Card[]
-  /** 本人底牌（数据源）。 */
-  myCards: readonly Card[]
-  /** 这一手是否在进行（决定底牌是否翻面）。 */
-  handActive: boolean
-  /** 本人是否已弃牌。 */
-  folded: boolean
-  /** 当前牌型名（如「一对 A」），无牌型时为空。 */
-  handName: string | null
-  /** 待入账筹码（本手结束后可用）。 */
-  pendingBuyIn: number
-  /** 操作区需要的状态。 */
-  legalActions: readonly LegalAction[]
-  potTotal: number
-  currentBet: number
-  isMyTurn: boolean
-  remainingSeconds: number
-  turnSeconds: number
-  remainingRatio: number
-  turnDeadlineAt: number | null
-  clockOffsetMs: number
-  blockedReason: string
-  online: boolean
-  canStartHand: boolean
-  hasPlayedHand: boolean
-  /** 座位概况（观战态用）。 */
-  occupiedCount: number
-  maxSeats: number
-  emptyCount: number
-  isTableFull: boolean
-  firstAvailableSeat: number | null
-  canSitDown: boolean
-  /** 房主是否需要「开始/下一手」按钮（由操作区内部判断）。 */
-  isHost: boolean
-  /** 是否可重新买入（在座 + 已连接）。 */
-  canRebuy: boolean
-}>()
+withDefaults(
+  defineProps<{
+    /** 当前是否在座（未离座）。 */
+    seated: boolean
+    /** 已离座但座位保留。 */
+    away: boolean
+    /** 本人筹码。 */
+    stack: number
+    /** 本人本轮已投入（用于「本轮 N」提示）。 */
+    committedStreet: number
+    /** 本人底牌翻面后的展示牌（翻牌动画用）。 */
+    displayHeroCards: readonly Card[]
+    /** 本人底牌（数据源）。 */
+    myCards: readonly Card[]
+    /** 这一手是否在进行（决定底牌是否翻面）。 */
+    handActive: boolean
+    /** 本人是否已弃牌。 */
+    folded: boolean
+    /** 当前牌型名（如「一对 A」），无牌型时为空。 */
+    handName: string | null
+    /** 待入账筹码（本手结束后可用）。 */
+    pendingBuyIn: number
+    /** 操作区需要的状态。 */
+    legalActions: readonly LegalAction[]
+    potTotal: number
+    currentBet: number
+    isMyTurn: boolean
+    remainingSeconds: number
+    turnSeconds: number
+    remainingRatio: number
+    turnDeadlineAt: number | null
+    clockOffsetMs: number
+    blockedReason: string
+    online: boolean
+    canStartHand: boolean
+    hasPlayedHand: boolean
+    /**
+     * 房间是否会由服务端倒计时自动开下一手（nextHandSeconds > 0）。
+     * 默认 true：默认房间不显示「开始下一手」；只有 0 秒手动开局房（false）
+     * 才保留继续按钮兜底，否则房主永远开不了下一手。
+     */
+    autoNextHand?: boolean
+    /** 座位概况（观战态用）。 */
+    occupiedCount: number
+    maxSeats: number
+    emptyCount: number
+    isTableFull: boolean
+    firstAvailableSeat: number | null
+    canSitDown: boolean
+    /** 房主是否需要「开始/下一手」按钮（由操作区内部判断）。 */
+    isHost: boolean
+    /** 是否可重新买入（在座 + 已连接）。 */
+    canRebuy: boolean
+    /** 本手是否为赢家（结算时给本人两张底牌加金色高亮，输家不加）。 */
+    heroWinner?: boolean
+  }>(),
+  {
+    autoNextHand: true,
+  },
+)
 
 const emit = defineEmits<{
   (event: 'action', payload: { action: LegalAction['action']; amount?: number }): void
   (event: 'start'): void
-  (event: 'leave'): void
   (event: 'exit'): void
   (event: 'rebuy'): void
   (event: 'resit'): void
@@ -96,6 +108,7 @@ const emit = defineEmits<{
                 {
                   'is-flipped': handActive && Boolean(displayHeroCards[cardIdx]),
                   'is-dim': Boolean(folded),
+                  'is-winner': Boolean(heroWinner),
                 },
               ]"
             >
@@ -154,14 +167,14 @@ const emit = defineEmits<{
           </div>
 
           <!--
-            开局控制。
-            离座 / 退出房间放这里而不是顶栏：顶栏在 390px 下已经有 4 个图标按钮，
-            再塞两个会直接把牌桌挤出屏幕（踩过）。这一行放在座舱内，宽度由座舱保证。
-            两者用小图标 + 极短文字，不抢「开始牌局」的视觉重量。
+            开局控制：
+              - 没开过手 → 显示「开始牌局」；
+              - 开过手后，只有 0 秒手动开局房（autoNextHand=false）才显示「开始下一手」兜底；
+                默认自动开局房由服务端倒计时开下一手（顶部通知条提示 N 秒后开始）。
           -->
           <div class="hero-seat-actions">
             <Button
-              v-if="canStartHand"
+              v-if="canStartHand && (!hasPlayedHand || !autoNextHand)"
               severity="success"
               class="hero-start-btn"
               :title="hasPlayedHand ? '开始下一手牌' : '开始第一手牌'"
@@ -193,13 +206,7 @@ const emit = defineEmits<{
           :clock-offset-ms="clockOffsetMs"
           :blocked-reason="blockedReason"
           :enabled="online"
-          :can-start-hand="canStartHand"
-          :has-played-hand="hasPlayedHand"
-          :seated="seated"
           @action="(payload) => emit('action', payload)"
-          @start="emit('start')"
-          @leave="emit('leave')"
-          @exit="emit('exit')"
         />
       </div>
     </div>

@@ -155,6 +155,47 @@
   filter: grayscale(0.5) drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5));
 }
 
+/* 结算赢家高亮：本人两张底牌金色描边 + 外发光（输家不加）。 */
+.hero-card-flipper.is-winner {
+  position: relative;
+  z-index: 2;
+}
+
+.hero-card-flipper.is-winner .hero-card-face {
+  box-shadow:
+    0 0 0 2px rgba(255, 216, 117, 0.92),
+    0 0 12px rgba(255, 196, 82, 0.72),
+    0 0 26px rgba(212, 177, 106, 0.46);
+}
+
+/* 亮面朝上时做一次呼吸式金辉（纯 GPU 合成属性之外只用 box-shadow，成本可接受） */
+.hero-card-flipper.is-winner .hero-card-face--front {
+  animation: winner-card-glow 1.8s ease-in-out infinite;
+}
+
+@keyframes winner-card-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 2px rgba(255, 216, 117, 0.82),
+      0 0 10px rgba(255, 196, 82, 0.58),
+      0 0 20px rgba(212, 177, 106, 0.36);
+  }
+
+  50% {
+    box-shadow:
+      0 0 0 2px rgba(255, 228, 152, 1),
+      0 0 18px rgba(255, 205, 100, 0.92),
+      0 0 34px rgba(255, 176, 48, 0.6);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-card-flipper.is-winner .hero-card-face--front {
+    animation: none;
+  }
+}
+
 .fan-card--0 {
   transform: rotate(-8deg) translateX(3px) translateY(-2px);
   transform-origin: 50% 100%;
@@ -369,9 +410,11 @@
   align-items: center;
 }
 
-.hero-actions {
-  width: 100%;
-}
+/*
+ * ActionBar 的根节点 .action-console 自带 width:100%（scoped 样式），
+ * 这里不要再写 `:deep(.action-console)` —— 全局 CSS 文件里的 :deep 不是 Vue 编译期语法，
+ * 是一条无效选择器，写了也不会生效，只会误导后来的人。
+ */
 
 /* ═══════════════ 贵宾观战与离座座舱 ═══════════════ */
 .hero-spectator {
@@ -837,21 +880,12 @@
 }
 
 /*
- * 座舱右上角的席位操作（离座 / 退出房间）。
+ * 席位操作小按钮（离座 / 退出房间）。
  *
- * 绝对定位贴右上角、不参与流布局：放进操作行会额外占一行高度，
- * 而竖屏下每 30px 高度都是从牌桌那里抢来的。
- * 用半透明底 + 模糊，避免和底下的牌型/筹码文字打架。
+ * 按钮已移入 ActionBar 的顶框（.console-top-actions），由 HeroCockpit 通过
+ * #seat-actions 插槽传入；这里只保留按钮皮肤（全局样式，slot 内容吃不到
+ * 子组件 scoped 样式）。
  */
-.cockpit-corner-actions {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  display: flex;
-  gap: 4px;
-  z-index: 3;
-}
-
 .seat-corner-btn {
   display: grid;
   place-items: center;
@@ -880,12 +914,6 @@
   transform: translateY(1px);
 }
 
-/* 座舱需要成为定位上下文；同时给右上角留出按钮的宽度，避免内容压到按钮下面 */
-.hero-cockpit {
-  position: relative;
-  padding-right: 72px;
-}
-
 /*
  * 超短屏（320px）：三个按钮（开始牌局 + 离座 + 退出）必须挤在一排，
  * 否则座舱会多出一行、把牌桌压得更矮。这里让「开始牌局」可以收缩，
@@ -902,13 +930,88 @@
     padding-inline: 8px !important;
   }
 
-  .hero-cockpit {
-    padding-right: 68px;
-  }
-
   .hero-seat-actions .hero-start-btn span {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+}
+
+/*
+ * 手机竖屏：座舱左右内边距保持 8px。
+ * 上面 ≤560px 竖屏块里的 padding: 4px 8px 会被更靠后的 ≤768px 块
+ * （同优先级、后声明生效）覆盖成 12px；这里把左右内边距补回手机档，
+ * 保证操作区右缘只剩正常留白，而不是 72px 的条状空白。
+ */
+@media (orientation: portrait) and (max-width: 560px) {
+  .hero-cockpit {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+}
+
+/*
+ * 手机竖屏（高度 > 620px，排除 320×568 这类超短屏，超短屏另有更狠的压缩规则）：
+ *
+ * 1) 牌型 / 筹码固定两行：竖向 column、左对齐，无论是否弃牌结构一致；
+ *    两行总高 ≤ 扇形底牌高度，不额外撑高英雄区。
+ * 2) 再压一档底部高度，把省下来的高度全部让给牌桌：
+ *    座舱上下内边距 8→6、两翼间距 10→5、操作翼内边距 7→4/6、
+ *    扇形底牌 --cw 58→46（配合 .card--lg 的字号同步缩小）、fan 内边距 4→2。
+ *    高度预算（390×844，实测）：hero ≈ 211px（改前 271px / 228px 两态）。
+ */
+@media (orientation: portrait) and (max-width: 560px) and (min-height: 621px) {
+  .hero-cockpit {
+    padding-top: 6px;
+    padding-bottom: 6px;
+    gap: 5px;
+  }
+
+  .cockpit-wing--action {
+    padding: 4px 6px;
+  }
+
+  /* 开始牌局按钮不存在时整行收起，别让空的 grid 行 + row-gap 白占高度 */
+  .hero-seat-actions:empty {
+    display: none;
+  }
+
+  .cockpit-wing--hero {
+    column-gap: 10px;
+    row-gap: 6px;
+  }
+
+  /* 底牌统一缩一档：flipper 尺寸与内部字号都跟着 --cw 走 */
+  .fan-cards {
+    --cw: 46px;
+    padding: 2px 4px;
+  }
+
+  .hero-cockpit .card--lg {
+    --cw: 46px;
+  }
+
+  /* 牌型在上、筹码在下，永远两行（旧的 ≤768 规则是横向 wrap） */
+  .cockpit-badge-row {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 4px;
+    width: 100%;
+  }
+
+  .hero-hand,
+  .hero-stack {
+    align-self: flex-start;
+    max-width: 100%;
+  }
+
+  .hero-stack {
+    padding: 2px 6px;
+    gap: 4px;
+  }
+
+  .hero-stack .rebuy-btn {
+    min-height: 24px;
   }
 }

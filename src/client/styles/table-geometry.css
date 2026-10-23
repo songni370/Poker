@@ -18,18 +18,20 @@
     --stage-pad-left: 8px;
   }
   .table {
-    --table-width: calc(100vw - 16px);
-    --table-height: 100%;
+    --table-width: min(calc(100vw - 78px), 312px);
+    --table-height: min(380px, calc(100% - 88px));
     --table-max-height: 460px;
-    --seat-anchor-x: 46%;
-    --seat-anchor-y: 44%;
-    --seat-w: clamp(80px, 21vw, 92px);
-    --seat-w-side: clamp(74px, 19vw, 84px);
+    --seat-anchor-x: 50%;
+    --seat-anchor-y: 50%;
+    --seat-w: clamp(62px, 17vw, 68px);
+    --seat-w-side: clamp(54px, 15vw, 60px);
     --seat-padding-block: 4px;
-    --center-inset: 176px;
-    --board-cw: clamp(24px, calc((100vw - 210px) / 5), 38px);
+    --center-inset: 120px;
+    --board-cw: clamp(34px, 9.3vw, 36px);
     --center-top: 45%;
-    --center-max-height-inset: 86px;
+    --center-max-height-inset: 52px;
+    --table-shift-y: 12px;
+    --seat-side-shift-y: 8px;
   }
 }
 
@@ -41,18 +43,20 @@
     --stage-pad-left: 8px;
   }
   .table {
-    --table-width: calc(100vw - 16px);
-    --table-height: 100%;
+    --table-width: min(calc(100vw - 60px), 300px);
+    --table-height: min(292px, calc(100% - 88px));
     --table-max-height: 460px;
-    --seat-anchor-x: 46%;
-    --seat-anchor-y: 44%;
-    --seat-w: clamp(80px, 21vw, 92px);
-    --seat-w-side: clamp(74px, 19vw, 84px);
+    --seat-anchor-x: 50%;
+    --seat-anchor-y: 50%;
+    --seat-w: clamp(56px, 16.5vw, 62px);
+    --seat-w-side: clamp(50px, 14.5vw, 56px);
     --seat-padding-block: 3px;
-    --center-inset: 176px;
-    --board-cw: clamp(24px, calc((100vw - 210px) / 5), 38px);
+    --center-inset: 108px;
+    --board-cw: clamp(28px, 8.9vw, 32px);
     --center-top: 45%;
-    --center-max-height-inset: 82px;
+    --center-max-height-inset: 40px;
+    --table-shift-y: 12px;
+    --seat-side-shift-y: 8px;
   }
 }
 
@@ -76,5 +80,7 @@
     --board-cw: clamp(20px, calc((100vw - 200px) / 5), 28px);
     --center-top: 36%;
     --center-max-height-inset: 0px;
+    --table-shift-y: 0px;
+    --seat-side-shift-y: 0px;
   }
 }

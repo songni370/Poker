@@ -103,12 +103,13 @@ export async function takeAnyFreeSeat(page: Page, index = 0, buyIn?: number): Pr
 }
 
 /**
- * 主持人开局（第一手叫「开始牌局」，之后叫「开始下一手」）。
+ * 主持人开**第一手**（按钮文案「开始牌局」）。
+ * 之后不再有「开始下一手」手动按钮：服务端按 nextHandSeconds 自动开下一手。
  * 点完必须等它消失：牌局进行中这个按钮是隐藏的，等它隐藏就等于「本手真的开了」，
  * 否则紧接着读底牌会读到开局前的快照。
  */
 export async function startHand(page: Page): Promise<void> {
-  const button = page.getByRole('button', { name: /^开始(牌局|下一手)$/ }).first()
+  const button = page.getByRole('button', { name: '开始牌局' }).first()
   await expect(button).toBeEnabled()
   await button.click()
   await expect(button).toBeHidden({ timeout: 15_000 })

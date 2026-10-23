@@ -15,7 +15,7 @@ import {
  *   2. 两个**独立浏览器上下文**（各自独立 localStorage）建房入座并打完一手；
  *   3. 摊牌之前，主机页面里不得出现对手的底牌；
  *   4. 对局中刷新页面能自动重连并恢复同一手牌；
- *   5. 结算后可以开始下一手。
+ *   5. 结算后服务端自动开下一手（不再有手动「开始下一手」按钮）。
  */
 
 test.describe.configure({ mode: 'serial' })
@@ -92,7 +92,7 @@ test('手机观战栏承载空桌提示，说明和按钮不互相遮挡', async
   await guestContext.close()
 })
 
-test('手机端开局按钮单行不换行，离座/退出收在座舱右上角不占位', async ({ browser }) => {
+test('手机端开局按钮单行不换行，离座/退出固定在牌桌区域右下角', async ({ browser }) => {
   const hostContext = await browser.newContext({ viewport: { width: 320, height: 740 } })
   const guestContext = await browser.newContext()
   const host = await hostContext.newPage()
@@ -102,6 +102,8 @@ test('手机端开局按钮单行不换行，离座/退出收在座舱右上角�
   await joinRoomByLink(guest, roomId, `客人${Date.now() % 1000}`)
   await takeSeat(guest, 2)
   await expect(host.locator('.hero-start-btn')).toBeVisible()
+  // 只保留初始「开始牌局」；不存在「开始下一手」按钮（之后由服务端自动开局）。
+  await expect(host.getByRole('button', { name: '开始下一手' })).toHaveCount(0)
 
   for (const width of [320, 360, 390]) {
     await host.setViewportSize({ width, height: 740 })
@@ -110,42 +112,63 @@ test('手机端开局按钮单行不换行，离座/退出收在座舱右上角�
       const label = actions.querySelector('.hero-start-btn span')!
       const labelRange = document.createRange()
       labelRange.selectNodeContents(label)
-      const hero = document.querySelector('.hero-cockpit')!.getBoundingClientRect()
-      const corners = [...document.querySelectorAll('.seat-corner-btn')].map((button) => {
-        const box = button.getBoundingClientRect()
-        return {
-          insideHero: box.left >= hero.left - 1 && box.right <= hero.right + 1,
-          inTopRight: box.left > hero.left + hero.width / 2 && box.top < hero.top + hero.height / 2,
-        }
-      })
+      const stage = document.querySelector('.stage')!.getBoundingClientRect()
+      const hero = document.querySelector('.hero')!.getBoundingClientRect()
+      const table = document.querySelector('.table')!.getBoundingClientRect()
+      const wrap = document.querySelector('.stage-corner-actions')!
+      const wrapBox = wrap.getBoundingClientRect()
+      const corners = [...wrap.querySelectorAll<HTMLElement>('.seat-corner-btn')].map((b) =>
+        b.getBoundingClientRect(),
+      )
+      const overlap = (a: DOMRect, b: DOMRect) =>
+        Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1 &&
+        Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1
       return {
         // 操作行只剩「开始牌局」一个按钮
         buttonCount: buttons.length,
-        // 离座 / 退出在座舱右上角，且都在座舱内
+        startLabel: (label.textContent ?? '').trim(),
+        // 离座 / 退出在牌桌区域（.stage）右下角、底部座舱正上方
         cornerCount: corners.length,
-        cornersInTopRight: corners.every((c) => c.insideHero && c.inTopRight),
+        cornersInStage: corners.every(
+          (c) =>
+            c.left >= stage.left - 1 &&
+            c.right <= stage.right + 1 &&
+            c.top >= stage.top - 1 &&
+            c.bottom <= stage.bottom + 1,
+        ),
+        // 最靠右按钮到牌桌区域右缘的距离：取最小值（= 最右那枚按钮的间距）
+        cornerRightGap: Math.round(Math.min(...corners.map((c) => stage.right - c.right))),
+        cornerAboveHero: Math.round(hero.top - wrapBox.bottom),
+        overlapsTable: corners.some((c) => overlap(c, table)),
         startLabelLines: labelRange.getClientRects().length,
         overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
       }
     })
     /*
-     * 底部操作行只放「开始牌局」；离座 / 退出房间改为座舱右上角的小图标按钮
-     * （绝对定位、不参与流布局），这样手机竖屏下不会多占一行、把牌桌压矮。
+     * 底部操作行只放「开始牌局」；离座 / 退出房间改成贴在牌桌区域右下角
+     * （`.stage-corner-actions`），就在木纹座舱顶边上方，不再占用操作区顶行。
      */
-    expect(layout, `${width}px 手机端操作区布局`).toEqual({
+    expect(layout, `${width}px 手机端操作区布局`).toMatchObject({
       buttonCount: 1,
+      startLabel: '开始牌局',
       cornerCount: 2,
-      cornersInTopRight: true,
+      cornersInStage: true,
+      overlapsTable: false,
       startLabelLines: 1,
       overflowX: 0,
     })
+    expect(layout.cornerRightGap, `${width}px 离座/退出应贴牌桌区域右缘`).toBeGreaterThanOrEqual(0)
+    expect(layout.cornerRightGap, `${width}px 离座/退出应贴牌桌区域右缘`).toBeLessThanOrEqual(16)
+    // 按钮组位于座舱顶边上方，且不压进座舱（允许 0–8px 呼吸）
+    expect(layout.cornerAboveHero, `${width}px 离座/退出应在座舱上方`).toBeGreaterThanOrEqual(0)
+    expect(layout.cornerAboveHero, `${width}px 离座/退出应在座舱上方`).toBeLessThanOrEqual(10)
   }
 
   await hostContext.close()
   await guestContext.close()
 })
 
-test('两个独立会话打完一手：摊牌前不泄露对手底牌，结算后可开下一手', async ({ browser }) => {
+test('两个独立会话打完一手：摊牌前不泄露对手底牌，结算后自动开下一手', async ({ browser }) => {
   const hostContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
   const guestContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
   const host = await hostContext.newPage()
@@ -206,11 +229,11 @@ test('两个独立会话打完一手：摊牌前不泄露对手底牌，结算�
   await expect(winBadges.first()).toContainText(/\+\d+/)
   await expect(host.locator('.result-dialog')).toHaveCount(0)
 
-  // ── 开始下一手 ──
-  await startHand(host)
+  // ── 下一手由服务端自动开始：不再有「开始下一手」手动按钮 ──
+  await expect(host.getByRole('button', { name: '开始下一手' })).toHaveCount(0)
   await expect(host.getByRole('button', { name: '知道了' })).toHaveCount(0)
   await expect
-    .poll(async () => /第\s*2\s*手/.test(await host.locator('body').innerText()), { timeout: 10_000 })
+    .poll(async () => /第\s*2\s*手/.test(await host.locator('body').innerText()), { timeout: 20_000 })
     .toBe(true)
 
   expect(hostErrors).toEqual([])
@@ -398,7 +421,9 @@ test('牌桌竖屏几何：390×844 与 360×740 无横向溢出且座位不压�
         return el ? el.getBoundingClientRect() : null
       }
       const hero = rect('.hero')
-      const actionBar = rect('.hero-actions')
+      // ActionBar 的根节点是 .action-console；旧的 .hero-actions 已不存在，
+      // 用空 rect 会让这条断言变成永真，起不到「操作区不被切掉」的保护作用。
+      const actionBar = rect('.action-console')
       return {
         overflowY: document.documentElement.scrollHeight - document.documentElement.clientHeight,
         heroBottom: Math.round(hero?.bottom ?? 0),

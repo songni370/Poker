@@ -31,12 +31,6 @@ const props = withDefaults(
     blockedReason?: string
     /** 链路异常时禁止提交。 */
     enabled?: boolean
-    /** 主持人现在能不能开下一手（等待中或已结算）。 */
-    canStartHand?: boolean
-    /** 是否已经开过手：决定按钮写「开始牌局」还是「开始下一手」。 */
-    hasPlayedHand?: boolean
-    /** 本人是否在座（在座才显示「离座」）。 */
-    seated?: boolean
   }>(),
   {
     potTotal: 0,
@@ -50,21 +44,12 @@ const props = withDefaults(
     clockOffsetMs: 0,
     blockedReason: '',
     enabled: true,
-    canStartHand: false,
-    hasPlayedHand: false,
-    seated: false,
   },
 )
 
 const emit = defineEmits<{
   /** 提交一个动作；amount 语义与协议一致：call=补筹码，bet/raise=目标总额。 */
   (event: 'action', payload: { action: LegalAction['action']; amount?: number }): void
-  /** 主持人开始（下一）手。 */
-  (event: 'start'): void
-  /** 离座（座位与筹码保留，随时可坐回）。 */
-  (event: 'leave'): void
-  /** 退出房间（释放座位）。 */
-  (event: 'exit'): void
 }>()
 
 const byAction = computed(() => {
@@ -226,13 +211,19 @@ const liveText = computed(() => {
   <section class="action-console" aria-label="Action Console">
     <p class="sr-only" aria-live="polite" aria-atomic="true">{{ liveText }}</p>
 
-    <!-- 1. 一体化竞技倒计时舱（组件：TurnTimerBar） -->
-    <TurnTimerBar
-      v-if="isMyTurn"
-      :remaining-seconds="remainingSeconds"
-      :turn-seconds="turnSeconds"
-      :remaining-ratio="remainingRatio"
-    />
+    <!--
+      操作区顶框：只承载倒计时舱（离座 / 退出房间已移到牌桌区域右下角）。
+      不轮到自己时倒计时舱不渲染，但 .console-top 保留 28px 最小高度，
+      保证「三态等高」不会被这一行破坏。
+    -->
+    <div class="console-top">
+      <TurnTimerBar
+        v-if="isMyTurn"
+        :remaining-seconds="remainingSeconds"
+        :turn-seconds="turnSeconds"
+        :remaining-ratio="remainingRatio"
+      />
+    </div>
 
     <!-- 竖屏紧凑操作区：一行注码控制 + 一行四个动作，替代竖屏下的双舱布局。 -->
     <div v-if="isCompact" class="compact-dock">
@@ -592,6 +583,25 @@ const liveText = computed(() => {
 
 <style scoped>
 /* ───────────── 顶层容器 ───────────── */
+/*
+ * 操作区顶行：只放倒计时舱（转牌/河牌等非本人行动时为空行）。
+ * 保留 min-height:28px，任何状态下这一行高度一致，操作区整体高度才不会跳动
+ * （离座 / 退出房间按钮已移到牌桌区域右下角，不占这一行）。
+ */
+.console-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+}
+
+.console-top > :deep(.turn-timer-integrated) {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .action-console {
   display: flex;
   flex-direction: column;
@@ -1580,6 +1590,80 @@ const liveText = computed(() => {
 
   .action-btn--allin {
     flex: 0 0 74px;
+  }
+
+  /*
+   * 竖屏定高：轮到自己（下注行 + 动作行）与弃牌/等待/结算（standby）必须同高，
+   * 否则操作区会随状态上下跳。高度预算 77 = sizing 28 + gap 5 + actions 44；
+   * 再叠加顶行 28 + console gap 4，整个 .action-console 恒为 109px。
+   */
+  .action-console {
+    --compact-dock-h: 77px;
+    gap: 4px;
+  }
+
+  .compact-dock {
+    gap: 5px;
+    height: var(--compact-dock-h);
+    min-height: var(--compact-dock-h);
+  }
+
+  .compact-sizing-row {
+    gap: 6px;
+  }
+
+  .compact-stepper {
+    height: 28px;
+  }
+
+  .compact-stepper-btn {
+    width: 28px;
+    height: 26px;
+  }
+
+  .compact-amount {
+    width: 54px;
+    height: 26px;
+    font-size: 0.95rem;
+  }
+
+  .compact-chip {
+    height: 28px;
+    padding: 0 10px;
+  }
+
+  .compact-actions {
+    height: 44px;
+    gap: 6px;
+  }
+
+  .compact-btn {
+    height: 44px !important;
+    min-height: 44px !important;
+    border-radius: 10px !important;
+  }
+
+  .compact-btn-title {
+    font-size: 0.88rem;
+  }
+
+  .compact-btn-title b {
+    font-size: 1rem;
+  }
+
+  .compact-btn small {
+    font-size: 0.5rem;
+  }
+
+  .compact-btn--allin {
+    flex: 0 0 60px;
+  }
+
+  /* standby 撑满定高下注坞并垂直居中，保证弃牌/等待态与行动态等高 */
+  .compact-standby {
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
   }
 }
 </style>

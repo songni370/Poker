@@ -20,7 +20,16 @@
   align-items: center;
   /* 覆盖 theme.css 里 .bar 的全局 flex-wrap: wrap——顶栏必须在任何宽度下都只有一行。 */
   flex-wrap: nowrap;
-  z-index: 10;
+  /*
+   * 顶栏是 .table-view 的 flex 子项，z-index 会形成独立层叠上下文：
+   *   声音浮层 .sound-popover 在顶栏内部，无论内部 z-index 多高，
+   *   整块顶栏都不能低于 HUD 胶囊（.hud-anchor z25）、HUD 浮层（z30）
+   *   和手机端手牌历史抽屉（z60），否则浮层会被它们压住。
+   * 顶栏与 HUD 区域在垂直方向不重叠（顶栏 0~43px，HUD 从 y≈77 起），
+   * 因此把顶栏层叠上下文抬到 70 只影响「声音浮层置顶」，不遮挡 HUD。
+   * 上一版是 10，实测浮层中段被计分板/手牌历史胶囊命中的 bug。
+   */
+  z-index: 70;
 }
 
 .hud-left {
@@ -253,13 +262,51 @@
 }
 /* 竖屏窄屏：顶栏压缩为单行——隐藏阶段/手数胶囊与按钮文字，只留图标 */
 @media (orientation: portrait) and (max-width: 560px) {
+  /*
+   * H5 用户反馈：390 竖屏顶栏里「房间名 + 你是房主 + 盲注 10/20 + 连接状态图标」与
+   * 右侧 4 个工具按钮挤在一行互相压住（截图 user4-topbar.png）。
+   *
+   * 处理策略：竖屏不展示房间名（用户原话「其实不需要展示房间名的」），
+   * 房间名保留在 document.title 与下面 sr-only 的 h1 里，读屏和浏览器标签页都还能看到。
+   * 这样左侧只剩「盲注胶囊 + 连接状态图标」，右侧 4 个图标按钮，任何 320–390 宽度都不会重叠。
+   */
   .bar {
     gap: 6px;
     padding: 4px 8px;
   }
 
-  .bar-title {
-    font-size: 0.92rem;
+  /* 铭牌不再占宽度：去掉底板、边框、内边距，让出整段空间给盲注胶囊与右侧按钮 */
+  .room-badge {
+    flex: 0 0 auto;
+    min-width: 0;
+    padding: 0;
+    gap: 0;
+    background: none;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  /* 盾牌图标与「你是房主」标签在竖屏不再显示 */
+  .room-badge-icon,
+  .host-label {
+    display: none;
+  }
+
+  /* h1 用标准 sr-only：视觉不可见（1×1），但仍在无障碍树里，读屏可读房间名 */
+  .room-badge .bar-title {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    min-width: 0;
+    min-inline-size: 0;
   }
 
   .meta-pill--stage,
@@ -267,7 +314,7 @@
     display: none;
   }
 
-  /* 盲注胶囊只留数字（「10/20」），把省下的宽度让给房间名 */
+  /* 盲注胶囊只留数字（「10/20」）——右侧 4 个按钮 + 连接图标占宽，标签会让 320 档变挤 */
   .meta-pill--blind .meta-label {
     display: none;
   }
@@ -282,14 +329,8 @@
     flex: none;
   }
 
-  /* 房间名与盲注胶囊之间留出明确的间隙，避免视觉上粘成「我 的牌10/20」 */
   .hud-left {
     gap: 6px;
-  }
-
-  .room-badge {
-    flex: 1 1 auto;
-    min-width: 0;
   }
 
   .meta-capsules {

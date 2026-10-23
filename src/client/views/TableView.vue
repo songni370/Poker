@@ -38,7 +38,7 @@ import RoomConfigDialog from '../components/RoomConfigDialog.vue'
 import { useConnectionStore } from '../stores/connection.ts'
 import { useGameStore } from '../stores/game.ts'
 import { useRoomStore } from '../stores/room.ts'
-import { resumeAudio } from '../sound/index.ts'
+import { isAudioRunning, playTick, resumeAudio, unlockAudio } from '../sound/index.ts'
 
 /**
  * 核心牌桌（路由 /table/:roomId）。
@@ -132,6 +132,34 @@ function handleVisibilityChange(): void {
   if (document.visibilityState === 'visible') resumeAudio()
 }
 
+/**
+ * 首次用户手势解锁音频。
+ *
+ * 浏览器要求 AudioContext 必须在用户手势的同步调用栈里创建/恢复，否则一直 suspended。
+ * 之前只有点「声音」浮层里的开关才解锁，普通玩家从头到尾听不到对局音效（用户反馈）。
+ * 现在牌桌页监听 pointerdown / keydown（任意位置），上下文真正 running 后移除监听；
+ * 若第一次手势没被浏览器算作用户激活（例如只按修饰键），会保留监听等下一次手势重试。
+ * unlockAudio() 自带幂等保护，重复调用也安全。
+ */
+let audioUnlocked = false
+
+function unlockAudioOnFirstGesture(): void {
+  if (audioUnlocked) return
+  unlockAudio()
+  if (!isAudioRunning()) {
+    // 有些手势（例如只按修饰键、或合成事件）不算用户激活，上下文仍是 suspended。
+    // 保留监听，等下一个真正的手势再 resume 一次，直到 running 才摘掉监听。
+    return
+  }
+  audioUnlocked = true
+  removeAudioGestureListeners()
+}
+
+function removeAudioGestureListeners(): void {
+  window.removeEventListener('pointerdown', unlockAudioOnFirstGesture, true)
+  window.removeEventListener('keydown', unlockAudioOnFirstGesture, true)
+}
+
 /* ───────────── HUD 浮层（聊天 / 计分板 / 手牌历史） ─────────────
  * 状态与交互全部收敛在 useHudPanels，并用 provideHudPanels 提供唯一实例给三个子组件。
  * 页面自身只需要展开状态、收起逻辑与外部点击收起。 */
@@ -158,11 +186,38 @@ function openInviteDialog(): void {
   inviteDialogOpen.value = true
 }
 
-/** 这一手是否在进行（决定底牌是否翻面、状态文案）。 */
+/** 这一手是否在进行（决定状态文案）。 */
 const isHandActive = computed(() => {
   const state = game.state
   if (!state) return false
   return state.phase !== 'waiting' && state.phase !== 'settlement'
+})
+
+/**
+ * 是否展示本手牌：进行中，或本手刚结束、等待下一手的结算阶段。
+ *
+ * 结算时用户最想看的正是「谁亮牌、亮的是什么、谁赢了」，所以公共牌、本人底牌、
+ * 赢家的最佳五张都要留在桌上，而不是立刻清空。下一手真正开始后（phase 离开
+ * settlement）这个值自然为 true 并切换到新一手的牌，不做任何上一手的缓存。
+ */
+const showHand = computed(() => {
+  const state = game.state
+  if (!state) return false
+  return isHandActive.value || state.phase === 'settlement'
+})
+
+/**
+ * 当前这一手的结算结果：只认与 state.handId 匹配的 lastResult。
+ * 服务端在下一手开始后可能仍保留上一手的 lastResult，直接使用会让赢家光环、
+ * 最佳五张高亮「缓存」到下一手；handId 不一致时一律视为没有结算。
+ * （state.handId 为空时不做限制，交给服务端决定。）
+ */
+const handResult = computed(() => {
+  const state = game.state
+  const result = state?.lastResult
+  if (!state || !result) return null
+  if (state.handId && result.handId !== state.handId) return null
+  return result
 })
 
 /* ───────────── 接入（凭证/WebSocket/进桌表单，实现在 useTableSession） ───────────── */
@@ -198,9 +253,12 @@ const {
   },
 })
 
-// 页面级副作用：点击空白收起 HUD 面板、切回前台恢复音频。
+// 页面级副作用：点击空白收起 HUD 面板、切回前台恢复音频、首次手势解锁音效。
 onMounted(() => {
   window.addEventListener('pointerdown', handleHudPointerDown)
+  // capture 阶段：即使某个子组件在冒泡阶段调用了 stopPropagation，第一下点击也一定能解锁音频。
+  window.addEventListener('pointerdown', unlockAudioOnFirstGesture, true)
+  window.addEventListener('keydown', unlockAudioOnFirstGesture, true)
   document.addEventListener('visibilitychange', handleVisibilityChange)
 })
 onMountedCleanup(() => {
@@ -224,6 +282,19 @@ const {
   isSettlement: () => game.state?.phase === 'settlement',
 })
 
+/**
+ * 思考时间滴答：轮到自己行动、剩余 5→4→…→1 秒时每秒响一声。
+ *
+ * remainingSeconds 只在秒数真的变化时才写（见 useTurnTimer），所以每次触发正好对应一秒；
+ * 这里只读倒计时、不改计时逻辑。回合结束 isMyTurn 变 false、倒计时归 0 或跳出 1–5 区间，
+ * 都自然停止，不需要额外的「离开回合」清理。限流在 sound/index 的 allowed('tick') 里。
+ */
+watch(remainingSeconds, (seconds) => {
+  if (!game.isMyTurn) return
+  if (seconds < 1 || seconds > 5) return
+  playTick()
+})
+
 /** 当前玩家 id。 */
 const myPlayerId = computed(() => game.self?.playerId ?? null)
 
@@ -234,24 +305,22 @@ const displaySeats = computed(() => game.seats)
 const myCards = computed<readonly Card[]>(() => game.myHoleCards)
 const myStack = computed(() => game.mySeat?.stack ?? 0)
 
-/** 本人底牌翻面用：非本手时为空（露出背面）。 */
-const displayHeroCards = computed<readonly Card[]>(() => (isHandActive.value ? myCards.value : []))
-
-/** 桌面公共牌：一手结束后清空，呈现空牌槽。 */
-const displayBoard = computed<readonly Card[]>(() => (isHandActive.value ? game.board : []))
+/**
+ * 桌面公共牌：结算阶段保留本手公共牌，等待下一手时呈现空牌槽。
+ * 若服务端在结算时已清空 state.board，退回用 lastResult.board（同一手的数据）。
+ */
+const displayBoard = computed<readonly Card[]>(() => {
+  if (!showHand.value) return []
+  const board = game.board
+  if (board.length > 0) return board
+  return handResult.value?.board ?? []
+})
 
 /** 桌面阶段（PokerTable 用；等待态传 null）。 */
-const displayStreet = computed(() => (isHandActive.value ? (game.state?.street ?? null) : null))
+const displayStreet = computed(() => (showHand.value ? (game.state?.street ?? null) : null))
 
 /** 当前底池。 */
 const potTotal = computed(() => game.state?.potTotal ?? 0)
-
-/** 当前牌型名（如「一对 A」），无牌型时为空。 */
-const currentHandName = computed(() =>
-  isHandActive.value && displayHeroCards.value.length === 2
-    ? describeHand([...displayHeroCards.value, ...displayBoard.value])
-    : '',
-)
 
 /** 操作区为什么不可用（空串表示可以操作）。 */
 const blockedReason = computed(() => {
@@ -283,11 +352,11 @@ const { occupiedCount, maxSeats, emptyCount, isTableFull, firstAvailableSeat, ca
 })
 
 /** 赢家 id（座位高亮用）。 */
-const winnerPlayerIds = computed(() => game.state?.lastResult?.winners.map((winner) => winner.playerId) ?? [])
+const winnerPlayerIds = computed(() => handResult.value?.winners.map((winner) => winner.playerId) ?? [])
 
 /** 本手每个赢家赢得的筹码（同一人可能同时赢主池与边池，需要累加）。 */
 const winAmounts = computed<Record<string, number>>(() => {
-  const result = game.state?.lastResult
+  const result = handResult.value
   if (!result) return {}
   const map: Record<string, number> = {}
   for (const winner of result.winners) {
@@ -296,12 +365,36 @@ const winAmounts = computed<Record<string, number>>(() => {
   return map
 })
 
-/** 赢家的最佳五张（桌面高亮用）。 */
+/** 赢家的最佳五张（桌面高亮用）；结算阶段保留到下一手开始。 */
 const highlightCards = computed<readonly Card[]>(() => {
-  if (!isHandActive.value) return []
-  const result = game.state?.lastResult
+  if (!showHand.value) return []
+  const result = handResult.value
   if (!result || !result.showdown) return []
   return result.winners.flatMap((winner) => winner.bestFive)
+})
+
+/**
+ * 摊牌时每个亮牌玩家的牌型名（playerId → 牌型），供座位卡展示「输家牌型」。
+ * 只在摊牌（showdown）且本手结果与 state.handId 匹配时才有值；下一手开始自动清空。
+ */
+const revealedHandNames = computed<Record<string, string>>(() => {
+  if (!showHand.value) return {}
+  const result = handResult.value
+  if (!result || !result.showdown) return {}
+  const names: Record<string, string> = {}
+  for (const entry of result.revealed) names[entry.playerId] = entry.handName
+  return names
+})
+
+/** 赢家牌型名（去重后并列展示在公共牌下方）；非摊牌为空。 */
+const winnerHandNames = computed<string[]>(() => {
+  if (!showHand.value) return []
+  const result = handResult.value
+  if (!result || !result.showdown) return []
+  const names = result.winners
+    .map((winner) => winner.handName)
+    .filter((name): name is string => Boolean(name))
+  return [...new Set(names)]
 })
 
 /* ───────────── 结算叠层（实现在 useHandResult） ───────────── */
@@ -312,6 +405,32 @@ const { result, overlayVisible, activeHeroCards, closeResult } = useHandResult({
   handNo: () => game.state?.handNo,
   phase: () => game.state?.phase,
   heroCards: () => game.myHoleCards,
+})
+
+/**
+ * 本人底牌翻面用：非本手且非结算时为空（露出背面）。
+ * 结算时服务端可能已清空 myHoleCards，此时用 useHandResult 缓存的 activeHeroCards 兜底，
+ * 保证「本手有牌可看」的玩家在结算画面里手牌仍然正面可见。
+ */
+const displayHeroCards = computed<readonly Card[]>(() => {
+  if (!showHand.value) return []
+  const cards = myCards.value
+  if (cards.length > 0) return cards
+  return activeHeroCards.value
+})
+
+/** 当前牌型名（如「一对 A」），无牌型时为空；结算阶段保留本手牌型。 */
+const currentHandName = computed(() =>
+  showHand.value && displayHeroCards.value.length === 2
+    ? describeHand([...displayHeroCards.value, ...displayBoard.value])
+    : '',
+)
+
+/** 本人是否本手赢家（座舱底牌高亮用），与赢家座位使用同一份 handResult。 */
+const heroIsWinner = computed(() => {
+  const playerId = game.self?.playerId
+  if (!playerId) return false
+  return handResult.value?.winners.some((winner) => winner.playerId === playerId) ?? false
 })
 
 /* ───────────── 界面派生状态与播报 ───────────── */
@@ -414,6 +533,7 @@ onFatalRoomError((error) => {
 onBeforeUnmount(() => {
   onFatalRoomError(null)
   window.removeEventListener('pointerdown', handleHudPointerDown)
+  removeAudioGestureListeners()
 })
 
 </script>
@@ -532,43 +652,13 @@ onBeforeUnmount(() => {
         :winner-player-ids="winnerPlayerIds"
         :win-amounts="winAmounts"
         :highlight-cards="highlightCards"
+        :revealed-hand-names="revealedHandNames"
+        :winner-hand-names="winnerHandNames"
         :street="displayStreet"
         :can-pick-seat="canPickSeat"
         :reserved-seat="myReservedSeat"
         @pick-seat="onPickSeat"
-      >
-        <!-- 牌桌右下角的席位操作：离座 / 退出房间 -->
-        <template #corner-actions>
-          <button
-            v-if="!mySeatAway"
-            type="button"
-            class="seat-corner-btn"
-            aria-label="离座"
-            title="离座（座位与筹码为你保留）"
-            @click="requestLeaveSeat"
-          >
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <circle cx="13" cy="4" r="1.8" />
-              <line x1="7" y1="21" x2="10" y2="17" />
-              <path d="M16 21l-2-4-3-3 1-6" />
-              <path d="M6 12l2-3 4-1 3 3 3 1" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            class="seat-corner-btn"
-            aria-label="退出房间"
-            title="退出房间（释放座位）"
-            @click="exitRoomOpen = true"
-          >
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-              <polyline points="16 17 21 12 16 7" />
-              <line x1="21" y1="12" x2="9" y2="12" />
-            </svg>
-          </button>
-        </template>
-      </PokerTable>
+      />
       <!-- 加载中 / 场景不可用。 -->
       <p v-else-if="!unavailable" class="loading" role="status">
         <i class="pi pi-spin pi-spinner" aria-hidden="true" />
@@ -578,6 +668,41 @@ onBeforeUnmount(() => {
         <i class="pi pi-exclamation-triangle" aria-hidden="true" />
         <span>当前牌局不可用，正在打开提示页…</span>
       </p>
+
+      <!--
+        离座 / 退出房间：贴在牌桌区域右下角、木纹座舱面板顶边之上。
+        按钮不再占操作区顶框（H5 反馈：放到牌桌右下角更顺手），
+        绝对定位不参与牌桌布局，也不影响操作区三态等高。
+      -->
+      <div v-if="game.isSeated && !mySeatAway" class="stage-corner-actions">
+        <button
+          type="button"
+          class="seat-corner-btn"
+          aria-label="离座"
+          title="离座（座位与筹码为你保留）"
+          @click="requestLeaveSeat"
+        >
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="13" cy="4" r="1.8" />
+            <line x1="7" y1="21" x2="10" y2="17" />
+            <path d="M16 21l-2-4-3-3 1-6" />
+            <path d="M6 12l2-3 4-1 3 3 3 1" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          class="seat-corner-btn"
+          aria-label="退出房间"
+          title="退出房间（释放座位）"
+          @click="exitRoomOpen = true"
+        >
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+            <polyline points="16 17 21 12 16 7" />
+            <line x1="21" y1="12" x2="9" y2="12" />
+          </svg>
+        </button>
+      </div>
     </main>
 
     <!-- 底部：一体化沉浸式玩家座舱（Hero Cockpit） -->
@@ -590,7 +715,8 @@ onBeforeUnmount(() => {
       :committed-street="myCommittedStreet"
       :display-hero-cards="displayHeroCards"
       :my-cards="myCards"
-      :hand-active="isHandActive"
+      :hand-active="showHand"
+      :hero-winner="heroIsWinner"
       :folded="Boolean(game.mySeat?.folded)"
       :hand-name="currentHandName"
       :pending-buy-in="game.mySeat?.pendingBuyIn ?? 0"
@@ -607,6 +733,7 @@ onBeforeUnmount(() => {
       :online="connection.isOnline"
       :can-start-hand="canStartNextHand"
       :has-played-hand="hasPlayedHand"
+      :auto-next-hand="((game.state?.nextHandSeconds ?? 5) > 0)"
       :is-host="room.isHost"
       :can-rebuy="canRebuy"
       :occupied-count="occupiedCount"
@@ -617,7 +744,6 @@ onBeforeUnmount(() => {
       :can-sit-down="canSitDown"
       @action="submitAction"
       @start="startNextHand"
-      @leave="requestLeaveSeat"
       @exit="exitRoomOpen = true"
       @rebuy="openRebuy"
       @resit="resit"
@@ -745,6 +871,21 @@ onBeforeUnmount(() => {
     var(--stage-pad-left, 16px);
   min-height: 0;
   position: relative;
+}
+
+/*
+ * 牌桌区域右下角的席位操作（离座 / 退出房间）。
+ * 贴 stage 右下角、位于木纹座舱面板顶边之上；absolute 不占牌桌/操作区布局。
+ * 按钮皮肤沿用全局 hero-cockpit.css 的 .seat-corner-btn。
+ */
+.stage-corner-actions {
+  position: absolute;
+  right: 10px;
+  bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  z-index: 8;
 }
 
 .loading {

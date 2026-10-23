@@ -253,3 +253,15 @@ test('音效判定：结算时赢家有胜利音，输家只有普通提示', ()
   assert.ok(!loserCues.includes('win'), '输家不应听到胜利音')
   assert.ok(loserCues.includes('ping'), '输家应听到普通结算提示')
 })
+
+/*
+ * 音效开关默认值：用户反馈「没有音效」，根因是 soundEnabled 默认 false。
+ * 默认值策略抽成纯函数 resolveSoundDefault()，直接断言，不启动 Web Audio。
+ */
+test('音效默认开启、BGM 默认关闭；用户手动关过则尊重持久化选择', async () => {
+  const { resolveSoundDefault } = await import('../src/client/sound/index.ts')
+
+  assert.equal(resolveSoundDefault(null), true, '首次访问（localStorage 无记录）音效默认开启')
+  assert.equal(resolveSoundDefault('on'), true, '用户手动打开过则保持开启')
+  assert.equal(resolveSoundDefault('off'), false, '用户手动关过要保持关闭，不能强制打开')
+})

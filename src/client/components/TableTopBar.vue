@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { watch } from 'vue'
 import Button from 'primevue/button'
 import { useSoundControl } from '../composables/useSoundControl.ts'
 
@@ -9,7 +10,7 @@ import { useSoundControl } from '../composables/useSoundControl.ts'
  * 二次操作（聊天、计分板、手牌历史）已迁到桌面上的 HUD 胶囊，不再塞进顶栏，
  * 这样 1440→600px 全程单行。
  */
-defineProps<{
+const props = defineProps<{
   roomName: string
   isHost: boolean
   smallBlind: number
@@ -21,6 +22,24 @@ defineProps<{
   street: string
   online: boolean
 }>()
+
+/**
+ * 房间名不再占 H5 顶栏宽度：390px 竖屏下「房间名 + 你是房主 + 盲注 + 连接状态 + 4 个工具图标」
+ * 放不进一行，是用户反馈的互相压住。视觉上交给 table-top-bar.css 在竖屏隐藏，
+ * 名字保留两处：
+ *   1. 浏览器标签页标题（document.title）：「XX 的牌局 · 牌桌」；
+ *   2. 顶栏 h1 用 sr-only 呈现，读屏仍能读到。
+ * 路由 afterEach 只在导航时写 title；这里 watch 房间名，进入真实房间后覆盖为具体房间名。
+ */
+watch(
+  () => props.roomName,
+  (roomName) => {
+    // TableView 在牌局快照到达前传的是占位文案「牌桌」，此时不改标题，避免出现「牌桌 · 牌桌」。
+    if (!roomName || roomName === '牌桌') return
+    document.title = `${roomName} · 牌桌`
+  },
+  { immediate: true },
+)
 
 const emit = defineEmits<{
   (event: 'configure'): void

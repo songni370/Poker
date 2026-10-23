@@ -8,8 +8,8 @@ import { createRoom, joinRoomByLink, startHand, takeSeat, watchErrors } from './
  *   - 他这一轮已经放进底池多少（本轮下注）；
  *   - 他刚做了什么动作（过牌/跟注/下注/加注/全下）。
  *
- * 竖屏（≤560px）上用座位面板里的角标 + 动作标签；
- * 桌面档另有一枚贴在座位与桌心之间的浮动筹码。
+ * 本轮下注统一画在**各自座位卡片正上方**的金色徽章里（`.table .bet`，用 data-seat 关联座位），
+ * 座位卡片右下角不再重复显示同一金额；动作标签只写动作名（跟注/加注…）。
  */
 test('牌局中展示本轮下注：每个在局玩家都能看到自己这一轮的投入', async ({ browser }) => {
   const hostContext = await browser.newContext({ viewport: { width: 1440, height: 900 } })
@@ -27,7 +27,7 @@ test('牌局中展示本轮下注：每个在局玩家都能看到自己这一�
   /**
    * 采集每个座位的：昵称、本轮下注、动作标签。
    *
-   * 本轮下注现在只画在**桌面浮动筹码**上（`.table .bet`，用 data-seat 关联座位），
+   * 本轮下注现在只画在**座位卡片正上方**的金色徽章里（`.table .bet`，用 data-seat 关联座位），
    * 座位卡片右下角不再重复显示同一金额。
    */
   async function readSeats(page: typeof host) {

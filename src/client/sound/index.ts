@@ -4,29 +4,53 @@
  * 状态：`soundEnabled`（音效）与 `bgmEnabled`（背景音乐）分开存、分开控制，
  * 因为很多人想留音效但不想听 BGM。两个开关都持久化到 localStorage。
  *
+ * 默认值（用户反馈「没有音效」的根因就是默认关闭）：
+ * - 音效默认开启：首次访问没有 `poker.sound` 记录时为 true；
+ *   用户手动关过（记录为 'off'）则尊重选择，不强制打开。
+ * - 背景音乐默认关闭：避免一进房间就被音乐打扰。
+ *
  * 播放约束：
- * - 必须由用户手势调用 `unlockAudio()` 后才能出声（浏览器策略）。
+ * - 必须由用户手势调用 `unlockAudio()` 后才能出声（浏览器策略）；
+ *   牌桌页会在第一次 pointerdown / keydown 时自动解锁一次。
  * - 同一种音效在极短时间内重复触发会被限流，避免多人快速动作时糊成一团。
  */
 
 import { ref, watch } from 'vue'
-import { resumeIfNeeded, unlock } from './engine.ts'
+import { getContext, resumeIfNeeded, unlock } from './engine.ts'
 import { isBgmPlaying, startBgm, stopBgm } from './bgm.ts'
 import * as synth from './synth.ts'
 
 const SOUND_KEY = 'poker.sound'
 const BGM_KEY = 'poker.bgm'
 
-function readFlag(key: string): boolean {
+/**
+ * 音效开关的默认值策略（纯函数，便于单测）：
+ * - 没有记录：首次访问，默认开启；
+ * - 'on' / 'off'：尊重用户的显式选择。
+ */
+export function resolveSoundDefault(stored: string | null): boolean {
+  return stored === null ? true : stored === 'on'
+}
+
+function readSoundEnabled(): boolean {
   try {
-    return localStorage.getItem(key) === 'on'
+    return resolveSoundDefault(localStorage.getItem(SOUND_KEY))
+  } catch {
+    // 隐私模式等场景读不到 localStorage：默认开启，至少本次会话有声音。
+    return true
+  }
+}
+
+function readBgmEnabled(): boolean {
+  try {
+    return localStorage.getItem(BGM_KEY) === 'on'
   } catch {
     return false
   }
 }
 
-export const soundEnabled = ref(readFlag(SOUND_KEY))
-export const bgmEnabled = ref(readFlag(BGM_KEY))
+export const soundEnabled = ref(readSoundEnabled())
+export const bgmEnabled = ref(readBgmEnabled())
 
 function persist(key: string, value: boolean): void {
   try {
@@ -75,6 +99,15 @@ export function resumeAudio(): void {
   syncBgm()
 }
 
+/**
+ * 音频上下文是否已经真正跑起来。
+ * 用于首次手势解锁：某些手势（例如只按修饰键）不算用户激活，上下文仍会 suspended，
+ * 此时调用方应保留监听，等下一个真正的手势再试一次。
+ */
+export function isAudioRunning(): boolean {
+  return getContext()?.state === 'running'
+}
+
 /* ───────────────────────────── 限流 ───────────────────────────── */
 
 /** 每种音效的最小触发间隔（毫秒），防止密集事件叠加成噪音。 */
@@ -108,14 +141,17 @@ export function playDeal(): void {
   if (allowed('deal')) synth.deal()
 }
 
-/** 下注、跟注、加注：金额越大，筹码越多、音调越低。 */
+/** 下注、跟注、加注：金额越大，筹码越多、音调越低；all-in 级大注再多一声沉响。 */
 export function playChips(amount: number): void {
   if (!allowed('chip')) return
+  const huge = amount >= 1000
   const count = amount >= 400 ? 4 : amount >= 200 ? 3 : amount >= 80 ? 2 : 1
   // 大额下注用更低的音色，听感上"更重"。
-  const baseHz = amount >= 400 ? 2200 : amount >= 200 ? 2400 : 2700
-  synth.chip(baseHz, 0.9)
+  const baseHz = huge ? 2000 : amount >= 400 ? 2200 : amount >= 200 ? 2400 : 2700
+  synth.chip(baseHz, huge ? 1.05 : 0.9)
   if (count > 1) setTimeout(() => synth.chips(count - 1), 40)
+  // all-in / 超池级大注：补一声更低、更沉的落袋音，与普通加注区分开。
+  if (huge) setTimeout(() => synth.chip(1500, 1.1), 130)
 }
 
 /** 过牌敲桌。 */

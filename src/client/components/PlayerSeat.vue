@@ -20,6 +20,8 @@ const props = withDefaults(
     remainingSeconds?: number
     /** 每轮行动总秒数，用于进度条的无障碍范围。 */
     turnSeconds?: number
+    /** 摊牌时这名玩家的牌型名（如「同花」）；只有输家显示在亮牌上方，赢家去中央展示。 */
+    handName?: string
   }>(),
   {
     isHero: false,
@@ -29,6 +31,7 @@ const props = withDefaults(
     remainingRatio: 1,
     remainingSeconds: 0,
     turnSeconds: 20,
+    handName: '',
   },
 )
 
@@ -38,6 +41,25 @@ const props = withDefaults(
  * 也避免同一份底牌在屏幕上出现两次。
  */
 const cardCount = computed(() => (props.isHero ? 0 : props.seat.holeCardCount))
+
+/**
+ * 已公开的底牌。服务端只在摊牌/结算时下发 revealedCards，
+ * 未摊牌时为空数组 —— 这里直接用，前端不自行推断，避免泄露。
+ */
+const revealedCards = computed(() => props.seat.revealedCards ?? [])
+
+/** 是否有需要占第 2 行的状态标（已弃牌 / ALL IN / 已断线 / 已离座）。 */
+const hasStatusFlag = computed(() => {
+  if (!props.seat.connected && !props.seat.isBot) return true
+  return Boolean(props.seat.allIn || props.seat.away || props.seat.folded)
+})
+
+/**
+ * 第 2 行只在有内容时渲染（角色徽标或状态标）。
+ * 用户反馈「并不是所有玩家都要展示第二行」：没有角色/状态的玩家只显示 2 行，
+ * 卡片更矮，环上空间更松。
+ */
+const hasMiddleRow = computed(() => roleBadges.value.length > 0 || hasStatusFlag.value)
 
 const statusText = computed(() => {
   // 「已离座」优先于弃牌/全下：座位还占着、筹码还留着，但人已经离开牌桌
@@ -78,21 +100,17 @@ const roleBadges = computed(() => {
 })
 
 /**
- * 动作标签：把「刚做了什么 + 多少」写在座位面板上。
- * 这是牌局里判断对手范围与决定加注的主要依据，所以：
- *   - 有小盲/大盲时显示「小盲 10 / 大盲 20」（盲注就是他们的本轮投入）；
- *   - 有具体动作时显示「跟注 20 / 加注到 120 / 下注 60 / 全下 500」；
- *   - 已弃牌优先显示「弃牌」。
- * 金额取 committedStreet（本轮投入），全下时取 committedHand（整手投入）。
+ * 动作标签：只写「刚做了什么」的动作名（加注/下注/跟注/过牌/弃牌，盲注位写小盲/大盲）。
+ * 具体金额不在这里重复：本轮投入由 PokerTable 渲染在**座位卡片正上方**的 `.bet`
+ * 下注徽章展示（金色数字 + 筹码圆片），玩家一眼能看到「谁下了多少」。
  */
 const actionLabel = computed<string>(() => {
   const action = props.seat.lastAction
   if (props.seat.folded) return '弃牌'
   /*
    * 动作标签只写「做了什么」，**不重复金额**：
-   * 本轮下注的数额已经由桌面上的浮动筹码（PokerTable 的 .bet）显示了，
+   * 本轮下注的数额已经由 PokerTable 渲染在座位卡片正上方的 `.bet` 徽章展示了，
    * 两处都写会让人一眼看到两个一样的数字。
-   * 加注这类需要知道目标额的动作由浮动筹码 + 底部操作区的数字共同表达。
    */
   switch (action) {
     case 'raise':
@@ -104,7 +122,7 @@ const actionLabel = computed<string>(() => {
     case 'check':
       return '过牌'
     default:
-      // 没有动作时退回盲注说明（盲注本身就是本轮投入，金额由浮动筹码表达）
+      // 没有动作时退回盲注说明（盲注本身的金额由卡片上方的 .bet 徽章表达）
       if (props.seat.isSmallBlind) return '小盲'
       if (props.seat.isBigBlind) return '大盲'
       return ''
@@ -157,18 +175,50 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
     }"
     :aria-label="spoken"
   >
-    <!-- 底牌：本人正面在底部操作区看大图，其他人按手牌张数画背面 -->
-    <div v-if="cardCount > 0" class="cards">
-      <PlayingCard
-        v-for="index in cardCount"
-        :key="`back-${String(index)}`"
-        size="sm"
-        hidden
-        :dimmed="seat.folded"
-      />
+    <!--
+      输家的牌型名：放在亮牌正上方（座位卡内最上面）。
+      赢家不在座位重复展示（牌型名统一放到中央公共牌下方），只保留金色高亮。
+    -->
+    <p v-if="handName && !isWinner && revealedCards.length > 0" class="hand-label">
+      {{ handName }}
+    </p>
+
+    <!--
+      底牌展示：
+        · 未摊牌 → 画背面（不能泄露他人底牌）；
+        · 摊牌/结算 → 服务端在 seat.revealedCards 里下发了真实牌面，画正面。
+      赢家的牌加 .is-winning 做高亮（金色描边 + 外发光 + 轻微上浮），
+      输家的牌不高亮并略降亮度，但牌面保持可读。
+    -->
+    <div v-if="cardCount > 0" class="cards" :class="{ 'is-revealed': revealedCards.length > 0 }">
+      <template v-if="revealedCards.length > 0">
+        <PlayingCard
+          v-for="(card, index) in revealedCards"
+          :key="`face-${String(index)}`"
+          :card="card"
+          size="sm"
+          :class="{ 'is-winning': isWinner }"
+          :dimmed="seat.folded"
+        />
+      </template>
+      <template v-else>
+        <PlayingCard
+          v-for="index in cardCount"
+          :key="`back-${String(index)}`"
+          size="sm"
+          hidden
+          :dimmed="seat.folded"
+        />
+      </template>
     </div>
 
-    <!-- 紧凑自适应玩家卡片（轻巧双行结构，彻底告别臃肿厚重，尺寸随屏幕流式缩放） -->
+    <!--
+      玩家信息卡片（窄 3 行结构）：
+        第 1 行 座位号 + 昵称（+「你」标签）；
+        第 2 行 牌局角色（D/SB/BB/B）与状态标（已弃牌/ALL IN/断线/已离座）；
+        第 3 行 筹码数字。
+      卡片变窄后公共牌才能放大；筹码独占一行，4 位数永远不会被徽章挤成「1…」。
+    -->
     <div class="panel" :data-initial="initial">
       <!-- 第一行：座位号 + 完整昵称（含自己标） + 右侧角色徽标（D/SB/BB） -->
       <div class="seat-row seat-row--top">
@@ -185,19 +235,8 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
         </div>
       </div>
 
-      <!--
-        第二行：筹码 + 角色徽章 + 状态标。
-        角色徽章（D/SB/BB/B）放在这一行而不是昵称行：
-        座位面板只有 ~80px 宽，徽章挤在昵称旁边会把「小美」压成「小…」。
-      -->
-      <div class="seat-row seat-row--bottom">
-        <span
-          class="stack num"
-          :class="fitClass(String(seat.stack))"
-          :title="`筹码：${seat.stack}`"
-        >
-          {{ seat.stack }}
-        </span>
+      <!-- 第二行：牌局角色（D/SB/BB/B）+ 状态标（已弃牌/ALL IN/断线/已离座）；没有内容时不渲染。 -->
+      <div v-if="hasMiddleRow" class="seat-row seat-row--mid">
         <div v-if="roleBadges.length > 0" class="roles" aria-hidden="true">
           <span
             v-for="badge in roleBadges"
@@ -222,9 +261,20 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
         </div>
       </div>
 
+      <!-- 第三行：筹码数字独占一行（窄卡片下保证 4 位数完整显示）。 -->
+      <div class="seat-row seat-row--bottom">
+        <span
+          class="stack num"
+          :class="fitClass(String(seat.stack))"
+          :title="`筹码：${seat.stack}`"
+        >
+          {{ seat.stack }}
+        </span>
+      </div>
+
       <!--
-        本轮下注**不在这里画**：桌面上的浮动筹码（PokerTable 的 .bet）已经显示了同样的金额。
-        两处同时显示会重复（一个在卡右下角、一个朝桌心），这里只保留桌面那一处。
+        本轮下注**不在这里画**：PokerTable 把 `.bet` 徽章贴在整张座位卡片正上方，
+        已经显示同样的金额；两处同时显示会重复。
         无效信息不删干净：`spoken` 摘要里仍会读出「本轮下注 N」，读屏用户不缺信息。
       -->
     </div>
@@ -281,13 +331,74 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+/* 输家牌型名：亮牌正上方的小号金框胶囊 */
+.hand-label {
+  margin: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(58, 44, 21, 0.95) 0%, rgba(30, 22, 12, 0.95) 100%);
+  border: 1px solid rgba(195, 154, 79, 0.85);
+  color: #ffe9ac;
+  font-size: 0.56rem;
+  font-weight: 800;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 230, 170, 0.28),
+    0 2px 6px rgba(0, 0, 0, 0.55);
+  text-shadow: 0 1px 0 #000;
+}
+
 .cards {
   display: flex;
   gap: 2px;
   margin-bottom: -1px;
 }
 
-.cards :deep(.card--sm) {
+/*
+ * 赢家的底牌高亮：金色描边 + 外发光 + 轻微上浮。
+ * 输家的牌不做高亮并略降亮度（见下面的 :not(.is-winning) 规则），
+ * 这样摊牌时「谁赢了」一眼可辨，同时输家的牌面仍然清晰可读。
+ */
+.cards.is-revealed :deep(.is-winning) {
+  outline: 2px solid #ffd875;
+  outline-offset: 1px;
+  border-radius: 3px;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.65),
+    0 0 3px rgba(255, 240, 190, 0.95),
+    0 0 12px rgba(255, 200, 90, 0.9),
+    0 3px 8px rgba(0, 0, 0, 0.7);
+  transform: translateY(-3px);
+  z-index: 2;
+  animation: winning-card-glow 1.8s ease-in-out infinite;
+}
+
+/* 摊牌后的输家：只降一点亮度，保持牌面可读（不做任何金色装饰）。 */
+.cards.is-revealed :deep(.card--sm:not(.is-winning)) {
+  filter: brightness(0.86);
+}
+
+@keyframes winning-card-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(0, 0, 0, 0.65),
+      0 0 3px rgba(255, 240, 190, 0.95),
+      0 0 12px rgba(255, 200, 90, 0.9),
+      0 3px 8px rgba(0, 0, 0, 0.7);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px rgba(0, 0, 0, 0.65),
+      0 0 5px rgba(255, 245, 205, 1),
+      0 0 18px rgba(255, 205, 100, 1),
+      0 3px 8px rgba(0, 0, 0, 0.7);
+  }
+}
+
+.cards.is-revealed :deep(.card--sm) {
   --cw: clamp(19px, 2.2vw, 24px);
 }
 
@@ -459,15 +570,31 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   font-weight: 700;
 }
 
+/*
+ * 第 2 行（角色/状态行）：D/SB/BB 与「已弃牌/ALL IN/已离座」并排居中；
+ * 窄卡片（52–66px）放不下时允许换行，平时固定占一行高度，三行结构稳定。
+ */
+.seat-row--mid {
+  justify-content: center;
+  gap: 2px;
+  row-gap: 1px;
+  flex-wrap: wrap;
+  min-height: 10px;
+}
+
+/* 第 3 行：筹码数字独占一行，居中。 */
+.seat-row--bottom {
+  justify-content: center;
+}
+
 /* 角色徽标 */
 .roles {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 1px;
-  /* 徽章让位给筹码数字：数字是玩家最关心的信息，被截成「498」就没意义了 */
   flex: 0 1 auto;
   min-width: 0;
-  overflow: hidden;
 }
 
 .role-badge {
@@ -733,9 +860,71 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
 
 /* 竖屏窄屏自适应规则 */
 @media (max-width: 560px) and (orientation: portrait) {
-  .seat .cards,
+  /*
+   * 竖屏下座位里的小底牌背面一律不画（省高度）。
+   * 但**摊牌/结算时必须展示**：.cards.is-revealed 例外。
+   * 漏掉这个例外会导致结算时看不到任何人的底牌（踩过）。
+   */
+  .seat .cards:not(.is-revealed),
   .seat .status.is-action-only {
     display: none;
+  }
+
+  /*
+   * 摊牌亮牌要看清：座位底牌从 19–24px 放大到 390≈30px / 360≈28px
+   * （高亮描边 + 外发光样式在上方 .cards.is-revealed 规则里保持不变）。
+   * 牌宽用 vw 流式缩放，避免更宽/更窄的手机上溢出。
+   */
+  .cards.is-revealed :deep(.card--sm) {
+    --cw: clamp(28px, 7.7vw, 36px);
+  }
+
+  /*
+   * 座位卡改窄 3 行（390 普通 66.3 / 侧边 58.5；360 再小一档），
+   * 同步收字号与内边距：第 1 行昵称、第 3 行 4 位筹码都不能被截断。
+   */
+  .panel {
+    padding: 2px 3px;
+    gap: 1px;
+    border-radius: 5px;
+  }
+
+  .seat-row {
+    gap: 2px;
+  }
+
+  .seat-row--mid {
+    min-height: 10px;
+  }
+
+  .seat-no {
+    min-width: 10px;
+    padding: 0 1px;
+    font-size: 0.46rem;
+  }
+
+  .name {
+    font-size: 0.62rem;
+  }
+
+  .tag {
+    padding: 0 1px;
+    font-size: 0.44rem;
+  }
+
+  .role-badge {
+    min-width: 8px;
+    padding: 0 1.5px;
+    font-size: 0.44rem;
+  }
+
+  .stack {
+    font-size: 0.68rem;
+  }
+
+  .flag {
+    padding: 0 2px;
+    font-size: 0.44rem;
   }
 
   /* 竖屏座位更矮：动作标签压到单行。 */
@@ -743,17 +932,22 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
     padding: 0 4px;
     font-size: 0.55rem;
   }
-}
 
-/*
- * 窄座位（侧边）：筹码数字优先。
- * 座位上同时有「筹码 + D/SB/BB + B + 状态标」时，80px 内放不下，
- * 结果是筹码被截成「4…」。这里按重要性取舍：D（庄家位）保留，
- * 盲注与机器人标记在窄座位隐藏——它们不影响判断怎么打，筹码数字影响。
- */
-.is-side-seat .role-badge--blind,
-.is-side-seat .role-badge--bot {
-  display: none;
+  /* 牌型标签：窄座位上再收一档，避免把座位卡撑太高 */
+  .hand-label {
+    padding: 0 6px;
+    font-size: 0.52rem;
+  }
+
+  /*
+   * 顶部正对本人那个座位（is-center-top）摊牌亮牌 + 成为赢家时，
+   * 卡片已抬到 HUD 附近；赢家徽章再往上抬 6px 会蹭到 HUD 胶囊（360 档约 5px）。
+   * 这一档把赢家徽章贴住卡片上沿（top: 0），仍完整在卡片上方、但离 HUD 更远。
+   * 实测 360：徽章顶 107.75 > HUD 底 107。
+   */
+  .is-center-top .win-badge {
+    top: 0;
+  }
 }
 
 /* 竖屏窄座位：不画黄铜徽章，把宽度全部留给昵称与筹码。 */
