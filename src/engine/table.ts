@@ -24,6 +24,7 @@ export interface TableConfig {
 
 /** 引擎的公开座位视图：**不含任何未公开底牌**。 */
 export interface EngineSeatPublic {
+  pendingBuyIn?: number
   playerId: string
   seat: number
   nickname: string
@@ -69,6 +70,7 @@ interface Seat extends Omit<EngineSeatPublic, 'revealedCards'> {
 export const TABLE_SNAPSHOT_VERSION = 1
 
 export interface SeatSnapshot {
+  pendingBuyIn?: number
   playerId: string
   nickname: string
   seat: number
@@ -193,6 +195,21 @@ export class HoldemTable {
   /** 已入座且在座（未离座）的人数。 */
   presentSeatCount(): number {
     return this.seats.filter((seat) => !seat.away).length
+  }
+
+  /** 随时追加买入；本手参与者的新增筹码在结算后可用。 */
+  rebuy(playerId: string, amount: number): void {
+    const seat = this.seatOf(playerId)
+    if (!seat || seat.pendingRemoval) throw new EngineError('not_seated', '请先入座')
+    if (!Number.isSafeInteger(amount) || amount <= 0 ||
+      !Number.isSafeInteger(seat.stack + (seat.pendingBuyIn ?? 0) + amount)) {
+      throw new EngineError('bad_state', '买入金额无效')
+    }
+    if (this.isHandRunning() && seat.inHand) {
+      seat.pendingBuyIn = (seat.pendingBuyIn ?? 0) + amount
+    } else {
+      seat.stack += amount
+    }
   }
 
   sit(playerId: string, nickname: string, seat: number, stack = this.config.startingStack): void {
@@ -322,7 +339,7 @@ export class HoldemTable {
   }
 
   totalChips(): number {
-    return this.seats.reduce((sum, seat) => sum + seat.stack + seat.committedHand, 0)
+    return this.seats.reduce((sum, seat) => sum + seat.stack + (seat.pendingBuyIn ?? 0) + seat.committedHand, 0)
   }
 
   /* ───────────────────────── 开局 ───────────────────────── */
@@ -654,6 +671,10 @@ export class HoldemTable {
   }
 
   private finishHand(): void {
+    for (const seat of this.seats) {
+      seat.stack += seat.pendingBuyIn ?? 0
+      seat.pendingBuyIn = 0
+    }
     this.phase = 'settlement'
     this.street = null
     this.actingSeat = null
@@ -762,6 +783,7 @@ export class HoldemTable {
         seat: seat.seat,
         nickname: seat.nickname,
         stack: seat.stack,
+        pendingBuyIn: seat.pendingBuyIn ?? 0,
         committedStreet: seat.committedStreet,
         committedHand: seat.committedHand,
         folded: seat.folded,
@@ -790,6 +812,7 @@ export class HoldemTable {
         nickname: seat.nickname,
         seat: seat.seat,
         stack: seat.stack,
+        pendingBuyIn: seat.pendingBuyIn ?? 0,
         inHand: seat.inHand,
         folded: seat.folded,
         allIn: seat.allIn,
@@ -870,6 +893,9 @@ export class HoldemTable {
       if (seenPlayerIds.has(entry.playerId)) throw new EngineError('bad_state', '快照玩家重复')
       seenSeatNumbers.add(entry.seat)
       seenPlayerIds.add(entry.playerId)
+      if (!Number.isSafeInteger(entry.pendingBuyIn ?? 0) || (entry.pendingBuyIn ?? 0) < 0) {
+        throw new EngineError('bad_state', '快照待入账筹码无效')
+      }
       if (entry.stack < 0 || entry.committedStreet < 0 || entry.committedHand < 0) {
         throw new EngineError('bad_state', '快照出现负筹码')
       }
@@ -883,6 +909,7 @@ export class HoldemTable {
         nickname: entry.nickname,
         seat: entry.seat,
         stack: entry.stack,
+        pendingBuyIn: entry.pendingBuyIn ?? 0,
         inHand: entry.inHand,
         folded: entry.folded,
         allIn: entry.allIn,

@@ -32,7 +32,12 @@ export default defineConfig({
   webServer: {
     // MAX_ROOMS 放宽：整个 e2e 轮次共用这一个服务端，多个用例各自建房会撞上「最多 3 桌」的
     // 产品上限（该上限本身由 tests/features.test.ts 单独覆盖）。
-    command: `HOST=127.0.0.1 PORT=${PORT} DATABASE_PATH=./data/e2e.sqlite NODE_ENV=production MAX_ROOMS=20 node dist/server/index.js`,
+    /*
+     * 起服务前先清库：e2e 建的房间不会在用例结束时关闭，残留会在下一轮被「从快照恢复」，
+     * 于是撞上 MAX_ROOMS 或带进上一轮的牌局状态（曾导致 14 条里随机挂 1 条）。
+     * 放在 webServer.command 里，直接跑 `npx playwright test` 也能清干净。
+     */
+    command: `node scripts/reset-e2e-db.mjs && HOST=127.0.0.1 PORT=${PORT} DATABASE_PATH=./data/e2e.sqlite NODE_ENV=production MAX_ROOMS=20 node dist/server/index.js`,
     url: `${BASE_URL}/api/health`,
     reuseExistingServer: false,
     timeout: 30_000,

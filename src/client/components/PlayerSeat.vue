@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { ACTION_NAMES } from '../../shared/poker.ts'
 import type { SeatPublic } from '../../shared/protocol.ts'
 import PlayingCard from './PlayingCard.vue'
 
@@ -48,7 +47,6 @@ const statusText = computed(() => {
   return ''
 })
 
-const lastActionText = computed(() => (props.seat.lastAction ? ACTION_NAMES[props.seat.lastAction] : ''))
 
 const roleText = computed(() => {
   if (props.seat.isDealer) return '庄家位'
@@ -73,6 +71,54 @@ const roleBadges = computed(() => {
   return badges
 })
 
+/**
+ * 动作标签：把「刚做了什么 + 多少」写在座位面板上。
+ * 这是牌局里判断对手范围与决定加注的主要依据，所以：
+ *   - 有小盲/大盲时显示「小盲 10 / 大盲 20」（盲注就是他们的本轮投入）；
+ *   - 有具体动作时显示「跟注 20 / 加注到 120 / 下注 60 / 全下 500」；
+ *   - 已弃牌优先显示「弃牌」。
+ * 金额取 committedStreet（本轮投入），全下时取 committedHand（整手投入）。
+ */
+const actionLabel = computed<string>(() => {
+  const action = props.seat.lastAction
+  const street = props.seat.committedStreet
+  if (props.seat.folded) return '弃牌'
+  if (props.seat.allIn) {
+    const hand = props.seat.committedHand
+    return hand > 0 ? `全下 ${String(hand)}` : '全下'
+  }
+  const withAmount = (label: string, amount: number): string =>
+    amount > 0 ? `${label} ${String(amount)}` : label
+  switch (action) {
+    case 'raise':
+      return withAmount('加注到', street)
+    case 'bet':
+      return withAmount('下注', street)
+    case 'call':
+      return withAmount('跟注', street)
+    case 'check':
+      return '过牌'
+    default:
+      // 没有动作时退回盲注说明：它同样是「已投入多少」的信息
+      if (props.seat.isSmallBlind) return withAmount('小盲', street)
+      if (props.seat.isBigBlind) return withAmount('大盲', street)
+      return ''
+  }
+})
+
+/**
+ * 根据文本长度选一档缩字号（昵称、筹码、动作标签共用）。
+ *
+ * 之前是三处手写的 `length >= 5 && length < 8` 判断，改文案时容易漏改。
+ * 这里按字符数分三档，CSS 侧统一用 `.fit-2 / .fit-3` 控制字号与字距。
+ */
+function fitClass(text: string): string {
+  const length = Array.from(text).length
+  if (length >= 8) return 'fit-3'
+  if (length >= 5) return 'fit-2'
+  return 'fit-1'
+}
+
 /** 屏幕阅读器摘要：昵称、筹码、当前状态，一次读完。 */
 const spoken = computed(() => {
   const parts = [`座位 ${String(props.seat.seat + 1)}`, props.seat.nickname, `筹码 ${String(props.seat.stack)}`]
@@ -81,6 +127,12 @@ const spoken = computed(() => {
   if (statusText.value) parts.push(statusText.value)
   if (props.isActing) parts.push('正在行动')
   return parts.join('，')
+})
+
+/** 黄铜徽章上的首字：取昵称第一个字符（中文取字、英文取首字母大写）。 */
+const initial = computed(() => {
+  const first = Array.from(props.seat.nickname ?? '')[0] ?? '?'
+  return first.toUpperCase()
 })
 
 const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainingRatio)) * 100))
@@ -112,17 +164,14 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
     </div>
 
     <!-- 紧凑自适应玩家卡片（轻巧双行结构，彻底告别臃肿厚重，尺寸随屏幕流式缩放） -->
-    <div class="panel">
+    <div class="panel" :data-initial="initial">
       <!-- 第一行：座位号 + 完整昵称（含自己标） + 右侧角色徽标（D/SB/BB） -->
       <div class="seat-row seat-row--top">
         <div class="seat-identity">
           <span class="seat-no num" aria-hidden="true">{{ seat.seat + 1 }}</span>
           <span
             class="name"
-            :class="{
-              'name--compact': seat.nickname.length >= 5 && seat.nickname.length < 8,
-              'name--tight': seat.nickname.length >= 8,
-            }"
+            :class="fitClass(seat.nickname)"
             :title="seat.nickname"
           >
             {{ seat.nickname }}
@@ -145,10 +194,7 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
       <div class="seat-row seat-row--bottom">
         <span
           class="stack num"
-          :class="{
-            'stack--compact': String(seat.stack).length >= 6 && String(seat.stack).length < 8,
-            'stack--tight': String(seat.stack).length >= 8,
-          }"
+          :class="fitClass(String(seat.stack))"
           :title="`筹码：${seat.stack}`"
         >
           {{ seat.stack }}
@@ -163,10 +209,11 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
         </div>
       </div>
 
-      <!-- 本轮下注面板角标（在小屏无桌面浮动筹码时显示） -->
-      <span v-if="seat.committedStreet > 0" class="panel-bet num" aria-hidden="true">
-        {{ seat.committedStreet }}
-      </span>
+      <!--
+        本轮下注**不在这里画**：桌面上的浮动筹码（PokerTable 的 .bet）已经显示了同样的金额。
+        两处同时显示会重复（一个在卡右下角、一个朝桌心），这里只保留桌面那一处。
+        无效信息不删干净：`spoken` 摘要里仍会读出「本轮下注 N」，读屏用户不缺信息。
+      -->
     </div>
 
     <!-- 倒计时进度条与时间一体化胶囊：轮到该玩家行动时出现 -->
@@ -187,13 +234,13 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
       </span>
     </div>
 
-    <!-- 非行动态的状态行（动作反馈） -->
+    <!-- 动作标签：刚做了什么、多少（弃牌/跟注 20/加注到 120/全下 500） -->
     <p
-      v-else-if="statusText || lastActionText"
-      class="status"
-      :class="{ 'is-action-only': !statusText && Boolean(lastActionText) }"
+      v-else-if="actionLabel"
+      class="action-label"
+      :class="[`action-label--${seat.lastAction ?? 'blind'}`, fitClass(actionLabel)]"
     >
-      <span class="state">{{ statusText || lastActionText }}</span>
+      {{ actionLabel }}
     </p>
   </article>
 </template>
@@ -218,7 +265,7 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   --cw: clamp(19px, 2.2vw, 24px);
 }
 
-/* 核心面板：极其轻巧扁平的两行架构，内边距与圆角流式自适应 */
+/* 核心面板：拟物皮革铭牌——深棕渐变 + 顶部高光 + 底部内阴影 + 硬投影。 */
 .panel {
   position: relative;
   display: flex;
@@ -228,31 +275,66 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   width: 100%;
   min-width: 0;
   padding: clamp(2px, 0.4vw, 4px) clamp(4px, 0.6vw, 7px);
-  border-radius: clamp(4px, 0.5vw, 6px);
-  border: 1px solid rgba(212, 177, 106, 0.22);
-  background: linear-gradient(180deg, rgba(24, 32, 42, 0.94) 0%, rgba(14, 19, 26, 0.97) 100%);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border-radius: clamp(5px, 0.6vw, 8px);
+  border: 1px solid rgba(0, 0, 0, 0.8);
+  background:
+    repeating-linear-gradient(105deg, rgba(255, 255, 255, 0.015) 0 2px, transparent 2px 6px),
+    linear-gradient(180deg, #2b231a 0%, #1b150f 60%, #120e0a 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.7),
+    0 6px 14px rgba(0, 0, 0, 0.65);
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   box-sizing: border-box;
 }
 
+/* 行首黄铜徽章：昵称首字，径向渐变模拟金属反光。
+   竖屏座位面板只有 80–96px 宽，徽章会压住昵称与筹码，因此在 ≤560px 竖屏隐藏（见文末媒体查询）。 */
+.panel::before {
+  content: attr(data-initial);
+  position: absolute;
+  left: -12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 0.58rem;
+  font-weight: 800;
+  color: #3a2a12;
+  background: radial-gradient(circle at 32% 26%, #f6e2b4 0%, #d3b070 45%, #8c6c33 100%);
+  border: 1px solid #6d5325;
+  box-shadow:
+    inset 0 -2px 3px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
 .is-acting .panel {
-  border-color: #ffd875;
-  box-shadow: 0 0 16px rgba(212, 177, 106, 0.65), inset 0 0 8px rgba(212, 177, 106, 0.35);
+  border-color: #a5803c;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    0 0 0 1px rgba(255, 210, 130, 0.35),
+    0 0 26px rgba(255, 190, 90, 0.28),
+    0 6px 14px rgba(0, 0, 0, 0.7);
   animation: seat-glow 1.8s ease-in-out infinite;
 }
 
 .is-hero .panel {
-  border-color: rgba(212, 177, 106, 0.65);
-  background: linear-gradient(180deg, rgba(28, 38, 50, 0.96) 0%, rgba(18, 24, 32, 0.98) 100%);
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(212, 177, 106, 0.25);
+  border-color: rgba(165, 128, 60, 0.9);
+  background:
+    repeating-linear-gradient(105deg, rgba(255, 255, 255, 0.02) 0 2px, transparent 2px 6px),
+    linear-gradient(180deg, #3a2e21 0%, #241b12 60%, #150f0a 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 6px 16px rgba(0, 0, 0, 0.7);
 }
 
 .is-folded {
   opacity: 0.42;
-  filter: grayscale(0.4);
+  filter: saturate(0.45);
 }
 
 .is-out .panel {
@@ -311,25 +393,35 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   font-size: clamp(0.66rem, 0.8vw, 0.76rem);
   font-weight: 600;
   line-height: 1.15;
-  word-break: break-all;
-  white-space: normal;
-  overflow: visible;
   letter-spacing: -0.01em;
+  /*
+   * 昵称过长（真实房间常见 6–8 个字）时：
+   *   - 不换行、单行省略——换行会把面板撑高，在 9 人竖屏环里立刻压到邻座；
+   *   - flex 收缩 + min-width:0 让省略号真正生效，而不是把右边的徽章挤变形。
+   */
+  min-width: 0;
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.name--compact {
-  font-size: clamp(0.60rem, 0.72vw, 0.68rem);
+/* 统一缩字号分档：fit-1 = 短文本，fit-2 = 中等，fit-3 = 长文本。
+   昵称、筹码、动作标签共用同一套规则，改档位只需改这里。 */
+.fit-2 {
+  font-size: 0.92em;
   letter-spacing: -0.02em;
 }
 
-.name--tight {
-  font-size: clamp(0.54rem, 0.65vw, 0.62rem);
+.fit-3 {
+  font-size: 0.84em;
   letter-spacing: -0.03em;
 }
 
 .tag {
   flex: none;
   padding: 0 2px;
+  white-space: nowrap;
   border-radius: 2px;
   font-size: clamp(0.48rem, 0.55vw, 0.54rem);
   line-height: 1.2;
@@ -370,29 +462,19 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   color: #ffffff;
 }
 
-/* 筹码数字：金黄色鲜艳、等宽数字、100% 完整展示绝不截断 */
+/* 筹码数字：暖金压印 + 等宽数字，100% 完整展示绝不截断 */
 .stack {
-  color: #ffd875;
+  color: #ffd98a;
   font-size: clamp(0.70rem, 0.85vw, 0.80rem);
-  font-weight: 700;
+  font-weight: 800;
   white-space: nowrap;
   letter-spacing: -0.01em;
   font-variant-numeric: tabular-nums;
   overflow: visible;
   line-height: 1.15;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  text-shadow: 0 1px 0 #000, 0 0 10px rgba(255, 190, 90, 0.25);
   flex: 1 1 auto;
   min-width: 0;
-}
-
-.stack--compact {
-  font-size: clamp(0.64rem, 0.76vw, 0.72rem);
-  letter-spacing: -0.03em;
-}
-
-.stack--tight {
-  font-size: clamp(0.58rem, 0.68vw, 0.64rem);
-  letter-spacing: -0.04em;
 }
 
 /* 状态标集 */
@@ -437,15 +519,38 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   display: none;
 }
 
-.panel-bet {
-  display: none;
-  position: absolute;
-  right: 3px;
-  bottom: 2px;
-  color: var(--gold);
-  font-size: 0.58rem;
-  line-height: 1.2;
+/* 动作标签：刚做了什么 + 多少；弃牌压暗，加注/全下提亮 */
+.action-label {
+  margin: 0;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: clamp(0.56rem, 0.66vw, 0.64rem);
+  line-height: 1.35;
   font-weight: 700;
+  white-space: nowrap;
+  color: #ffdf9a;
+  background: rgba(0, 0, 0, 0.42);
+  border: 1px solid rgba(138, 106, 50, 0.5);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.8);
+}
+
+.action-label--fold {
+  color: #b9ad95;
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.action-label--check,
+.action-label--call {
+  color: #d9c9a6;
+}
+
+.action-label--raise,
+.action-label--bet,
+.action-label--all_in {
+  color: #2a1c08;
+  background: linear-gradient(180deg, #f4dc9e 0%, #c39a4f 100%);
+  border-color: #7c5c22;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 
 .status {
@@ -456,10 +561,6 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   color: var(--muted);
 }
 
-.state {
-  color: var(--muted);
-}
-
 .seat-timer-capsule {
   position: relative;
   width: 100%;
@@ -467,17 +568,23 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   height: clamp(14px, 1.8vw, 17px);
   border-radius: 999px;
   overflow: hidden;
-  background: rgba(10, 15, 22, 0.9);
-  border: 1px solid rgba(212, 177, 106, 0.35);
+  /* 内凹凹槽 + 黄铜细框：拟物金属仪表 */
+  background: #0c0906;
+  border: 1px solid rgba(165, 128, 60, 0.7);
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  box-shadow:
+    inset 0 2px 5px rgba(0, 0, 0, 0.9),
+    0 1px 0 rgba(255, 255, 255, 0.08),
+    0 3px 8px rgba(0, 0, 0, 0.55);
 }
 
 .seat-timer-capsule.is-urgent {
-  border-color: rgba(239, 68, 68, 0.7);
-  box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
+  border-color: rgba(239, 68, 68, 0.75);
+  box-shadow:
+    inset 0 2px 5px rgba(0, 0, 0, 0.9),
+    0 0 10px rgba(239, 68, 68, 0.55);
 }
 
 .seat-timer-fill {
@@ -486,8 +593,8 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   width: 100%;
   height: 100%;
   transform-origin: left center;
-  background: linear-gradient(90deg, #10b981 0%, #f59e0b 60%, #ef4444 100%);
-  opacity: 0.85;
+  background: linear-gradient(180deg, #9af0a9 0%, #3fae57 70%, #2d8243 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
   transition: transform 0.15s linear;
 }
 
@@ -520,8 +627,17 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
     display: none;
   }
 
-  .panel-bet {
-    display: inline-flex;
+  /* 竖屏座位更矮：动作标签压到单行。 */
+  .action-label {
+    padding: 0 4px;
+    font-size: 0.55rem;
+  }
+}
+
+/* 竖屏窄座位：不画黄铜徽章，把宽度全部留给昵称与筹码。 */
+@media (max-width: 560px) and (orientation: portrait) {
+  .panel::before {
+    display: none;
   }
 }
 </style>

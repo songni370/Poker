@@ -121,15 +121,32 @@ const isTen = computed(() => rank.value === 'T')
   flex: none;
   width: var(--cw);
   height: calc(var(--cw) * 1.4);
-  border-radius: calc(var(--cw) * 0.11);
-  background: var(--card-face);
+  border-radius: calc(var(--cw) * 0.075);
+  /* 象牙纸：三段径向渐变，高光落在左上，右下略微压暗，像一张真的卡纸。 */
+  background: radial-gradient(120% 90% at 30% 12%, #ffffff 0%, #fbf7ec 40%, #efe7d4 100%);
   color: var(--card-black);
-  border: 1px solid rgba(0, 0, 0, 0.45);
-  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(120, 105, 80, 0.35);
+  /* 纸张厚度：两层实色边 + 两层投影，拟物风的关键。 */
+  box-shadow:
+    0 1px 0 #b9ad94,
+    0 2px 0 #9c9078,
+    0 3px 6px rgba(0, 0, 0, 0.55),
+    0 8px 16px rgba(0, 0, 0, 0.45);
   overflow: hidden;
   transition: opacity 0.2s ease-out;
   /* 牌面文字全部用等宽数字，点数变化不跳位。 */
   font-variant-numeric: tabular-nums;
+}
+
+/* 纸面上的斜向反光：只加一薄层，避免整张牌发灰。 */
+.card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.55), transparent 38%);
+  opacity: 0.5;
+  pointer-events: none;
 }
 
 .card--sm {
@@ -161,49 +178,54 @@ const isTen = computed(() => rank.value === 'T')
   display: flex;
   flex-direction: column;
   align-items: center;
-  line-height: 0.92;
-  font-weight: 700;
+  line-height: 0.88;
+  font-weight: 800;
+  /* 印刷压痕：0.5px 白色字影，模拟油墨压在纸面上的凸起。 */
+  text-shadow: 0 0.5px 0 rgba(255, 255, 255, 0.85);
+  z-index: 1;
 }
 
+/* 左上主角标：牌面识别的主角，点数与花色都放大一档。 */
 .corner--tl {
-  top: 5%;
-  left: 8%;
+  top: 4%;
+  left: 7%;
 }
 
-/* 右下角标：缩小并始终保持 180 度倒置 */
+/* 右下角标：倒置的辅助角标，刻意缩小，把视觉重量让给左上。 */
 .corner--br {
-  right: 7%;
-  bottom: 5%;
+  right: 8%;
+  bottom: 4%;
   transform: rotate(180deg);
 }
 
 .corner--br .rank {
-  font-size: calc(var(--cw) * 0.3);
+  font-size: calc(var(--cw) * 0.26);
   letter-spacing: -0.04em;
 }
 
 .is-ten .corner--br .rank {
-  font-size: calc(var(--cw) * 0.26);
+  font-size: calc(var(--cw) * 0.22);
   letter-spacing: -0.06em;
 }
 
 .corner--br .suit {
-  font-size: calc(var(--cw) * 0.21);
+  font-size: calc(var(--cw) * 0.18);
 }
 
 .rank {
   font-family: var(--font-sans);
-  font-size: calc(var(--cw) * 0.46);
+  font-size: calc(var(--cw) * 0.54);
+  font-weight: 800;
   letter-spacing: -0.06em;
 }
 
 .is-ten .rank {
-  font-size: calc(var(--cw) * 0.4);
+  font-size: calc(var(--cw) * 0.46);
   letter-spacing: -0.08em;
 }
 
 .suit {
-  font-size: calc(var(--cw) * 0.32);
+  font-size: calc(var(--cw) * 0.36);
 }
 
 /* 背面。 */

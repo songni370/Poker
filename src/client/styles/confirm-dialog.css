@@ -1,0 +1,63 @@
+/*
+ * 二次确认类弹窗的共用样式（离座 / 退出 / 移除玩家）。
+ *
+ * 底板与按钮在 table-top-bar 之外单独成表：这几类弹窗都通过 :global 命中
+ * （PrimeVue Dialog 会 teleport 到 body），放在 scoped 里永远匹配不到。
+ */
+
+/* 移除玩家：成员列表 */
+.kick-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  max-height: min(50vh, 320px);
+  overflow-y: auto;
+}
+
+/* 凸起皮革行：与站内其他信息分区同一套材质 */
+.kick-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #2a2118 0%, #1b140e 100%);
+  border: 1px solid rgba(138, 106, 50, 0.45);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 230, 170, 0.12),
+    inset 0 -2px 5px rgba(0, 0, 0, 0.55),
+    0 2px 6px rgba(0, 0, 0, 0.45);
+}
+
+.kick-who {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.kick-who b {
+  overflow-wrap: anywhere;
+  color: #f6ecd8;
+}
+
+.kick-who .muted,
+.kick-self {
+  font-size: 0.78rem;
+  color: #8d7d63;
+}
+
+.kick-confirm {
+  min-width: 0;
+  font-size: 0.86rem;
+  color: #e98f8f;
+  font-weight: 700;
+}
+
+.kick-actions {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}

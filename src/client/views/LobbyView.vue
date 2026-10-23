@@ -368,6 +368,8 @@ async function joinRoom(): Promise<void> {
   padding: var(--space-4) var(--space-2) var(--space-5);
   min-height: 100%;
   overflow-x: hidden;
+  /* 拟物：整页是深色胡桃木桌面，顶部一盏台灯打下来。 */
+  background: var(--wood-bg, linear-gradient(180deg, #241a13, #140f0b));
 }
 
 /* 背景氛围与扑克花色浮雕 */
@@ -385,9 +387,10 @@ async function joinRoom(): Promise<void> {
   left: 50%;
   transform: translateX(-50%);
   width: 900px;
-  height: 520px;
-  background: radial-gradient(ellipse 65% 50% at 50% 30%, rgba(22, 75, 64, 0.42) 0%, rgba(16, 21, 27, 0) 70%);
-  filter: blur(48px);
+  height: 560px;
+  /* 台灯暖光：落在木纹上，边缘收敛 */
+  background: radial-gradient(ellipse 62% 52% at 50% 26%, rgba(255, 214, 150, 0.16) 0%, rgba(255, 190, 120, 0.05) 42%, transparent 72%);
+  filter: blur(40px);
 }
 
 .ambient-card-suits {
@@ -397,10 +400,12 @@ async function joinRoom(): Promise<void> {
   transform: translateX(-50%);
   display: flex;
   gap: clamp(60px, 18vw, 220px);
-  opacity: 0.045;
+  /* 木桌上的扑克花色压印：比木纹更暗，像刻进去 */
+  opacity: 0.16;
   font-size: clamp(4rem, 10vw, 8rem);
   user-select: none;
-  color: var(--gold);
+  color: #000;
+  text-shadow: 0 1px 0 rgba(255, 220, 170, 0.08);
 }
 
 /* 主内容容器 */
@@ -428,56 +433,74 @@ async function joinRoom(): Promise<void> {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 14px;
-  font-size: 0.8rem;
+  padding: 5px 16px;
+  font-size: 0.78rem;
+  font-weight: 700;
   letter-spacing: 0.16em;
-  color: var(--gold);
-  background: rgba(212, 177, 106, 0.08);
-  border: 1px solid var(--gold-soft);
+  color: #2a1c08;
+  /* 黄铜压印铭牌 */
+  background: linear-gradient(180deg, #f4dc9e 0%, #c39a4f 100%);
+  border: 1px solid #7c5c22;
   border-radius: 999px;
-  backdrop-filter: blur(8px);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    inset 0 -2px 4px rgba(120, 84, 26, 0.45),
+    0 3px 8px rgba(0, 0, 0, 0.55);
 }
 
 .badge-icon {
   font-size: 0.75rem;
-  opacity: 0.85;
+  opacity: 0.7;
 }
 
 .hero-title {
-  margin: 4px 0 0;
-  font-size: clamp(2.1rem, 6vw, 2.75rem);
+  margin: 8px 0 0;
+  font-family: var(--font-display);
+  font-size: clamp(2.2rem, 6vw, 2.9rem);
   font-weight: 700;
-  color: #ffffff;
-  background: linear-gradient(180deg, #ffffff 30%, #e2e8f0 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  letter-spacing: -0.02em;
-  filter: drop-shadow(0 2px 12px rgba(0, 0, 0, 0.35));
+  color: #f6ecd8;
+  letter-spacing: 0.02em;
+  /* 金属刻字：顶部高光 + 底部深影 */
+  text-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.18),
+    0 3px 0 rgba(0, 0, 0, 0.55),
+    0 8px 24px rgba(0, 0, 0, 0.6);
 }
 
 .hero-lede {
   margin: 0;
   max-width: 46ch;
-  color: var(--muted);
-  font-size: 0.88rem;
+  color: #b9a98c;
+  font-size: 0.86rem;
   line-height: 1.6;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6);
 }
 
 /* 核心磨砂玻璃卡片 */
 .main-card {
   position: relative;
-  background: var(--glass-bg);
-  backdrop-filter: blur(var(--glass-blur));
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-lg);
-  padding: clamp(20px, 4vw, 32px);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  /* 拟物：皮革面板 + 内嵌缝线 + 厚投影 */
+  background: var(--leather-panel-bg, linear-gradient(180deg, #2b2219, #120d09));
+  border: 1px solid #000;
+  border-radius: 20px;
+  padding: clamp(20px, 4vw, 30px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.75),
+    0 3px 0 #0a0705,
+    0 22px 48px rgba(0, 0, 0, 0.75);
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+}
+
+.main-card::before {
+  content: '';
+  position: absolute;
+  inset: 8px;
+  border-radius: 15px;
+  border: 1.4px dashed rgba(232, 204, 150, 0.26);
+  pointer-events: none;
 }
 
 /* Segmented Control 切换组件 */
@@ -488,11 +511,14 @@ async function joinRoom(): Promise<void> {
 .tab-control {
   position: relative;
   display: flex;
-  background: rgba(13, 18, 24, 0.88);
   padding: 4px;
-  border-radius: var(--radius-md);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
+  border-radius: 12px;
+  /* 内凹导轨 */
+  background: linear-gradient(180deg, #171109 0%, #241a10 100%);
+  border: 1px solid #000;
+  box-shadow:
+    inset 0 2px 5px rgba(0, 0, 0, 0.9),
+    0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 .tab-btn {
@@ -515,20 +541,24 @@ async function joinRoom(): Promise<void> {
 }
 
 .tab-btn:hover:not(.is-active) {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.04);
+  color: #f1e6d0;
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .tab-btn.is-active {
-  color: #ffffff;
-  background: linear-gradient(180deg, #243240 0%, #1a2530 100%);
-  border: 1px solid rgba(212, 177, 106, 0.35);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  color: #ffdf9a;
+  /* 凸起的皮革按键 */
+  background: linear-gradient(180deg, #4a3a28 0%, #2b2016 100%);
+  border: 1px solid rgba(0, 0, 0, 0.8);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.6),
+    0 3px 6px rgba(0, 0, 0, 0.55);
 }
 
 .tab-icon {
   font-size: 0.9rem;
-  color: var(--gold);
+  color: #c39a4f;
 }
 
 .tab-btn.is-active .tab-icon {
@@ -561,7 +591,7 @@ async function joinRoom(): Promise<void> {
 
 .nickname-field {
   padding-bottom: 18px;
-  border-bottom: 1px dashed rgba(255, 255, 255, 0.12);
+  border-bottom: 1px dashed rgba(232, 204, 150, 0.2);
   margin-bottom: 8px;
 }
 
@@ -570,8 +600,8 @@ async function joinRoom(): Promise<void> {
   align-items: baseline;
   justify-content: space-between;
   font-size: 0.84rem;
-  font-weight: 500;
-  color: var(--muted);
+  font-weight: 600;
+  color: #cbbd9f;
 }
 
 .label-sub {
@@ -604,39 +634,50 @@ async function joinRoom(): Promise<void> {
 .panel-hint {
   margin: 0;
   font-size: 0.82rem;
-  color: #8c9ba5;
+  color: #a08f74;
   line-height: 1.5;
 }
 
 /* 操作提交按钮 */
 .submit-button {
   width: 100%;
-  min-height: 48px;
+  min-height: 50px;
   margin-top: 6px;
   font-size: 1rem;
-  letter-spacing: 0.02em;
-  border-radius: var(--radius-md);
-  box-shadow: 0 6px 20px rgba(48, 132, 218, 0.28);
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  border-radius: 12px;
+  /* 香槟金立体主键 */
+  background: linear-gradient(180deg, #ffe9ac 0%, #f0c668 45%, #c9973f 100%) !important;
+  border: 1px solid #7c5c22 !important;
+  color: #35230a !important;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 -3px 5px rgba(150, 105, 30, 0.55),
+    0 3px 0 #6a4d1a,
+    0 8px 16px rgba(0, 0, 0, 0.55) !important;
+  transition: transform 0.12s ease, filter 0.12s ease;
 }
 
 .submit-button:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 8px 24px rgba(48, 132, 218, 0.38);
+  filter: brightness(1.05);
 }
 
 .submit-button:active:not(:disabled) {
-  transform: translateY(0);
+  transform: translateY(2px);
 }
 
 .create-btn {
-  background: linear-gradient(135deg, #1b7a63 0%, #135d4b 100%) !important;
-  border-color: #279e81 !important;
-  box-shadow: 0 6px 20px rgba(23, 108, 83, 0.35) !important;
-}
-
-.create-btn:hover:not(:disabled) {
-  box-shadow: 0 8px 26px rgba(23, 108, 83, 0.45) !important;
+  background: linear-gradient(180deg, #2f9a63 0%, #1d7047 55%, #145234 100%) !important;
+  border: 1px solid #0a2a1a !important;
+  color: #f2fff6 !important;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    inset 0 -3px 5px rgba(0, 0, 0, 0.45),
+    0 3px 0 #0d2f1e,
+    0 6px 12px rgba(0, 0, 0, 0.55) !important;
 }
 
 .buyin-hint {
@@ -647,13 +688,16 @@ async function joinRoom(): Promise<void> {
 
 /* 入桌须知规则框 */
 .rules-box {
-  background: rgba(13, 18, 24, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, #1d1610 0%, #120d09 100%);
+  border: 1px solid rgba(0, 0, 0, 0.8);
+  border-radius: 12px;
   padding: 14px 16px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  box-shadow:
+    inset 0 2px 6px rgba(0, 0, 0, 0.8),
+    0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .rules-header {
@@ -661,8 +705,8 @@ async function joinRoom(): Promise<void> {
   align-items: center;
   gap: 6px;
   font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--gold);
+  font-weight: 700;
+  color: #e8cc96;
 }
 
 .rules-icon {
@@ -677,12 +721,108 @@ async function joinRoom(): Promise<void> {
   gap: 4px;
   font-size: 0.78rem;
   line-height: 1.6;
-  color: var(--muted);
+  color: #a08f74;
+}
+
+/*
+ * 输入框统一成「内凹深槽」：深棕底 + 内阴影 + 黄铜细框，聚焦时铜框提亮。
+ * PrimeVue 的 InputText / Password 都会渲染成 .p-inputtext，因此一处覆盖即可。
+ */
+.lobby :deep(.p-inputtext) {
+  min-height: 46px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #120d09 0%, #1d1610 100%);
+  border: 1px solid rgba(0, 0, 0, 0.9);
+  color: #f6ecd8;
+  box-shadow:
+    inset 0 2px 5px rgba(0, 0, 0, 0.85),
+    0 1px 0 rgba(255, 255, 255, 0.06);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.lobby :deep(.p-inputtext::placeholder) {
+  color: #7d6d58;
+}
+
+.lobby :deep(.p-inputtext:enabled:hover) {
+  border-color: rgba(138, 106, 50, 0.7);
+}
+
+.lobby :deep(.p-inputtext:enabled:focus) {
+  border-color: #c39a4f;
+  box-shadow:
+    inset 0 2px 5px rgba(0, 0, 0, 0.85),
+    0 0 0 2px rgba(195, 154, 79, 0.25);
+}
+
+/* 密码框的眼睛按钮保持在槽内，不另起一块底色 */
+.lobby :deep(.p-password-input) {
+  width: 100%;
 }
 
 @media (max-width: 520px) {
   .lobby {
-    padding-top: var(--space-2);
+    /* 拟物版顶部留白收紧：390×844 上大厅要能一屏放下（含入桌须知）。 */
+    padding: 8px var(--space-2) 16px;
+  }
+
+  .page-container {
+    gap: 12px;
+  }
+
+  .hero-title {
+    font-size: 2rem;
+  }
+
+  .hero-lede {
+    font-size: 0.8rem;
+  }
+
+  .main-card {
+    padding: 16px 16px 18px;
+    gap: 12px;
+  }
+
+  .rules-box {
+    padding: 10px 12px;
+  }
+
+  /* 360×740 这类短屏：隐藏入桌须知（大厅只负责开路，规则可在牌桌内查看），
+     保证「昵称 + 房间号 + 密码 + 主按钮」一屏可见。 */
+  @media (max-height: 760px) {
+    .rules-box {
+      display: none;
+    }
+  }
+
+  /* 320×568 超短屏：标题与留白再收一档。 */
+  @media (max-height: 620px) {
+    .lobby {
+      padding-top: 4px;
+      padding-bottom: 8px;
+    }
+
+    .page-container {
+      gap: 8px;
+    }
+
+    .badge-tag {
+      display: none;
+    }
+
+    .hero-title {
+      font-size: 1.7rem;
+      margin-top: 4px;
+    }
+
+    .hero-lede {
+      font-size: 0.74rem;
+    }
+
+    .main-card {
+      padding: 12px 14px 14px;
+      gap: 10px;
+    }
   }
 }
 </style>

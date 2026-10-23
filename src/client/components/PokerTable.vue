@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { Card } from '../../shared/poker.ts'
 import { STREET_NAMES } from '../../shared/poker.ts'
 import type { SeatPublic } from '../../shared/protocol.ts'
@@ -56,6 +56,35 @@ const props = withDefaults(
   },
 )
 
+/**
+ * 紧凑牌桌：超短屏（宽度 ≤360 且高度 ≤620）时桌面只有 ~160px 高，
+ * 环状 9 人座必然压住公共牌，因此改用「左右两列 + 本人桌底」的规整布局。
+ */
+const compact = ref(false)
+
+/** 竖屏（≤560px 宽）：下注筹码的落点半径要收，否则会压住公共牌。 */
+const portrait = ref(false)
+let portraitQuery: MediaQueryList | null = null
+function syncPortrait(e?: MediaQueryListEvent | MediaQueryList): void {
+  portrait.value = e ? e.matches : (portraitQuery?.matches ?? false)
+}
+let compactQuery: MediaQueryList | null = null
+function syncCompact(e?: MediaQueryListEvent | MediaQueryList): void {
+  compact.value = e ? e.matches : (compactQuery?.matches ?? false)
+}
+onMounted(() => {
+  compactQuery = window.matchMedia('(max-width: 360px) and (max-height: 620px)')
+  syncCompact()
+  portraitQuery = window.matchMedia('(max-width: 560px) and (orientation: portrait)')
+  syncPortrait()
+  portraitQuery.addEventListener('change', syncPortrait)
+  compactQuery.addEventListener('change', syncCompact)
+})
+onBeforeUnmount(() => {
+  compactQuery?.removeEventListener('change', syncCompact)
+  portraitQuery?.removeEventListener('change', syncPortrait)
+})
+
 /** 座位锚点：椭圆 + 本人固定在下沿中央。百分比定位，随容器等比缩放。 */
 const RX = 47
 const RY = 41
@@ -84,18 +113,51 @@ function seatStyle(index: number): Record<string, string> {
   }
 }
 
+/**
+ * 紧凑牌桌（超短屏）下的座位定位：
+ * 桌面只有 ~160px 高时 9 人环放不下，改成「整齐两列」——
+ * 左右两列各 4 个对手座位，纵向按序号均分桌面高度，本人座位单独落在桌底中央。
+ * 这样任何两排座位都不会与中央公共牌区在横向上相交（中央列左右各留出 150px）。
+ */
+function compactSeatStyle(index: number): Record<string, string> {
+  const hero = props.heroSeat ?? -1
+  if (index === hero) return { left: '50%', top: 'calc(100% - 2px)' }
+  // 只排「确实有人」的座位，空位不占行，避免 2 人桌也按 9 人桌留出空行。
+  const occupied = props.seats
+    .map((seat, i) => i)
+    .filter((i) => i !== hero && props.seats[i] && !props.seats[i]!.away)
+  const order = Math.max(0, occupied.indexOf(index))
+  const side = order % 2 === 0 ? 'left' : 'right'
+  const row = Math.floor(order / 2)
+  const rows = Math.max(1, Math.ceil(occupied.length / 2))
+  // 纵向均分：上下各留 6%，中间等距
+  const top = rows === 1 ? 50 : 6 + (row * 88) / (rows - 1)
+  return {
+    [side]: '2px',
+    top: `${String(Math.round(top))}%`,
+  }
+}
+
 function chipStyle(index: number): Record<string, string> {
   const { angle } = polarFor(index)
   /*
-   * 下注筹码朝桌心收：横向 30%、纵向 39%。
-   * 纵向比横向收得多，是因为上下两排座位面板（本人 36+47=83px 高）与中央块之间只剩
-   * 这条空隙——单挑时本人的筹码正好落在自己面板下沿下面一点点（实测 25% 半径：
-   * 上面板 2px、下面中央块 2px），多收一点就会压住自己的筹码数字。
-   * 小屏（矮屏横屏 / 竖屏）不画浮动筹码，改由座位面板角标显示（见 PlayerSeat 的 .panel-bet）。
+   * 下注筹码朝桌心收：桌面档横向 70%、纵向 61% 半径。
+   * 纵向比横向收得多，是因为上下两排座位面板与中央块之间只剩这条窄缝。
+   * 竖屏更紧（66% / 52%）：座位面板离桌心更近，不收一点就会压住自己的筹码数字或公共牌。
    */
+  /*
+   * 位置用绝对百分比（相对桌面），半径系数由 JS 传入：
+   * CSS 的 calc() 里 `N% * var(--x)` 的 N% 是相对**元素自身**宽度，不是桌面宽，
+   * 会算到桌子外面去（曾导致筹码飞到座位上方）。
+   */
+  /*
+   * 竖屏座位面板贴着桌沿，筹码要更靠座位（半径更大）才落在「座位与底池之间」的窄带里；
+   * 桌面档空间充足，用 0.7 / 0.61 朝桌心更近一点。
+   */
+  const radius = portrait.value ? { x: 0.79, y: 0.70 } : { x: 0.7, y: 0.61 }
   return {
-    left: `${String(50 + RX * 0.7 * Math.cos(angle))}%`,
-    top: `${String(50 + RY * 0.61 * Math.sin(angle))}%`,
+    left: `${String(50 + RX * radius.x * Math.cos(angle))}%`,
+    top: `${String(50 + RY * radius.y * Math.sin(angle))}%`,
   }
 }
 
@@ -151,7 +213,7 @@ const tableStatus = computed(() => {
 
 <template>
   <div class="table-wrap">
-    <div class="table" :class="{ 'is-full-ring': isFullRing }">
+    <div class="table" :class="{ 'is-full-ring': isFullRing, 'is-compact': compact }">
       <span class="felt-texture" aria-hidden="true" />
       <span class="betting-line" aria-hidden="true" />
 
@@ -188,7 +250,7 @@ const tableStatus = computed(() => {
             'is-side-seat': isSideSeat(index),
             'is-center-top': isCenterTop(index),
           }"
-          :style="seatStyle(index)"
+          :style="compact ? compactSeatStyle(index) : seatStyle(index)"
         >
           <PlayerSeat
             :seat="seat"
@@ -289,48 +351,93 @@ const tableStatus = computed(() => {
   width: 100%;
 }
 
-.table {
+/*
+ * 几何变量的兜底默认值放在 `:where()` 里（零优先级）：
+ * 档位表 table-geometry.css 里 `.table` 的媒体查询覆盖不会被组件内更高优先级的
+ * 类选择器盖掉；变量缺失时也能退化成可用的桌面档。
+ */
+:where(.table) {
   --seat-w: clamp(86px, 11vw, 126px);
+  --seat-w-side: clamp(74px, 9vw, 110px);
+  --seat-padding-block: 4px;
+  --center-inset: 0px;
+  --board-cw: clamp(30px, 4vw, 44px);
+  --center-top: 45%;
+  --center-max-height-inset: 0px;
+}
+
+.table {
   position: relative;
-  width: var(--table-w);
-  height: var(--table-h);
+  width: var(--table-width, var(--table-w));
+  height: var(--table-height, var(--table-h));
+  max-height: var(--table-max-height, none);
   margin-inline: auto;
   border-radius: 50% / 50%;
-  background: radial-gradient(ellipse 76% 66% at 50% 40%, #1c6858 0%, #124d41 42%, #0b3129 78%, #061e19 100%);
-  /* 顶级赛道牌桌：内凹呢绒光影 + 黄铜精铸饰边 + 加厚软包真皮扶手环 + 舞台深远投射 */
+  /* 拟物牌桌：真皮包边（--leather-bg）+ 内侧黄铜压条，呢绒由 .felt-texture 叠上来 */
+  background: var(--leather-bg);
   box-shadow:
-    inset 0 0 0 1px rgba(212, 177, 106, 0.35),
-    inset 0 0 50px rgba(0, 0, 0, 0.65),
-    0 0 0 3px #181614,
-    0 0 0 5px rgba(212, 177, 106, 0.45),
-    0 0 0 13px #192027,
-    0 0 0 15px #0d1217,
-    0 20px 48px rgba(0, 0, 0, 0.8),
-    0 6px 20px rgba(0, 0, 0, 0.5);
+    inset 0 2px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.75),
+    inset 0 0 0 1px rgba(232, 204, 150, 0.22),
+    0 2px 0 rgba(0, 0, 0, 0.9),
+    0 4px 2px rgba(0, 0, 0, 0.65),
+    0 26px 56px rgba(0, 0, 0, 0.8);
+}
+
+/* 缝线：贴着皮革内侧一圈虚线，拟物风最关键的工艺细节。 */
+.table::before {
+  content: '';
+  position: absolute;
+  inset: 7px;
+  border-radius: 50% / 50%;
+  border: 1.6px dashed var(--stitch, rgba(232, 204, 150, 0.32));
+  pointer-events: none;
+  z-index: 1;
 }
 
 .felt-texture {
   position: absolute;
-  inset: 0;
-  border-radius: inherit;
+  inset: 16px;
+  border-radius: 50% / 50%;
   overflow: hidden;
-  /* 德州皇家呢绒暗纹：四色扑克花色浮印微光 */
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'%3E%3Cg fill='%23ffffff' fill-opacity='0.025'%3E%3Cpath d='M16 10c-2 0-4 2-4 4 0 3 4 7 4 7s4-4 4-7c0-2-2-4-4-4zm32 0c0 2-2 4-4 4s-4-2-4-4 2-4 4-4 4 2 4 4zm-16 28c-3 0-5 2.5-5 5 0 3.5 5 7 5 7s5-3.5 5-7c0-2.5-2-5-5-5zm0-18l3 5-3 5-3-5 3-5z'/%3E%3C/g%3E%3C/svg%3E");
+  /* 呢绒：光池 + 织物交叉纹理 + 深绿径向，边缘内阴影做出「凹陷下去」的体感 */
+  background: var(--felt-skeuo);
+  box-shadow:
+    inset 0 0 0 2px rgba(0, 0, 0, 0.55),
+    inset 0 0 0 3px rgba(255, 255, 255, 0.06),
+    inset 0 10px 26px rgba(0, 0, 0, 0.55),
+    inset 0 -14px 34px rgba(0, 0, 0, 0.6);
   pointer-events: none;
+  z-index: 0;
 }
 
-/* 下注线：把公共牌区与座位区分开的结构线，带内敛柔和金色微光 */
+/* 中央暗刻徽标：比呢绒更暗的一行字 + 1px 亮边，像压进布面。 */
+.felt-texture::after {
+  content: 'FSPOKE';
+  position: absolute;
+  left: 50%;
+  top: 58%;
+  transform: translate(-50%, -50%);
+  font-size: clamp(22px, 6vw, 38px);
+  font-weight: 800;
+  letter-spacing: 0.34em;
+  color: rgba(0, 0, 0, 0.13);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.06);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* 下注线：呢绒上的细圈，压暗而不是发光。 */
 .betting-line {
   position: absolute;
-  inset: 16% 13%;
+  inset: 16% 12%;
   border-radius: 50% / 50%;
-  border: 1px solid rgba(212, 177, 106, 0.22);
-  box-shadow: inset 0 0 16px rgba(212, 177, 106, 0.06), 0 0 14px rgba(212, 177, 106, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   pointer-events: none;
 }
 
 /*
- * 中央信息区：两行（底池+边池 / 公共牌），整体居中。
+ * 中央信息区：底池铭牌 + 街名 + 公共牌，整体居中的一列。
  */
 .center {
   position: absolute;
@@ -342,6 +449,7 @@ const tableStatus = computed(() => {
   gap: 8px;
   width: max-content;
   transform: translate(-50%, -50%);
+  z-index: 4;
 }
 
 /* 底池与边池同行 */
@@ -352,34 +460,46 @@ const tableStatus = computed(() => {
   gap: 8px;
 }
 
+/* 黄铜嵌框底池铭牌：内凹深棕底 + 1.5px 铜框 + 外投影。 */
 .pot {
   display: flex;
   align-items: center;
   gap: 8px;
   margin: 0;
-  padding: 5px 18px;
-  border-radius: 999px;
-  background: linear-gradient(180deg, rgba(26, 35, 45, 0.9) 0%, rgba(13, 18, 24, 0.95) 100%);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(212, 177, 106, 0.45);
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  padding: 5px 18px 6px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #241c13 0%, #130e09 100%);
+  border: 1.5px solid var(--brass, #8a6a32);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -2px 6px rgba(0, 0, 0, 0.8),
+    0 4px 10px rgba(0, 0, 0, 0.65),
+    0 0 0 1px rgba(0, 0, 0, 0.8);
 }
 
 .pot-label {
-  font-size: 0.74rem;
-  font-weight: 600;
-  letter-spacing: 0.12em;
-  color: var(--muted);
-  text-transform: uppercase;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  color: #b39a6c;
 }
 
 .pot b {
-  font-size: 1.18rem;
+  font-family: var(--font-display);
+  font-size: 1.5rem;
   font-weight: 700;
-  color: #ffe394;
-  text-shadow: 0 0 12px rgba(212, 177, 106, 0.5);
-  letter-spacing: 0.04em;
+  color: #ffdf9a;
+  line-height: 1.05;
+  text-shadow: 0 1px 0 #000, 0 0 16px rgba(255, 190, 90, 0.35);
+  letter-spacing: 0.01em;
+}
+
+.pots .num {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #a08f74;
 }
 
 .empty-state {
@@ -411,7 +531,8 @@ const tableStatus = computed(() => {
 
 .seat-slot {
   position: absolute;
-  z-index: 2;
+  /* 必须高于 .felt-texture（z-index:1）与 .table::before 缝线层：同层级时后出现的呢绒会压住座位。 */
+  z-index: 5;
   transform: translate(-50%, -50%);
 }
 
@@ -558,12 +679,17 @@ const tableStatus = computed(() => {
   display: none;
 }
 
+/* 赌场筹码：白边 + 黄铜环 + 中心色块 + 顶部高光 + 落地阴影。 */
 .chip {
   width: 11px;
   height: 11px;
   border-radius: 50%;
-  background: var(--gold);
-  box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.35);
+  background:
+    radial-gradient(circle at 50% 50%, #b8262e 0 38%, #f3ead6 38% 62%, #c9a24b 62% 78%, #8a6a32 78% 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -1px 2px rgba(0, 0, 0, 0.55),
+    0 1px 2px rgba(0, 0, 0, 0.7);
 }
 
 @media (max-width: 1100px) {
@@ -572,17 +698,8 @@ const tableStatus = computed(() => {
   }
 }
 
-@media (max-width: 560px) {
-  .table {
-    /* 竖屏窄屏：桌面不抢高度，优先保证操作区完整可见。 */
-    --table-h: min(33vh, 252px);
-    --seat-anchor-y: 45%;
-    /* 椭圆横向半径收窄，座位面板不越出屏幕（无横向滚动）。 */
-    --seat-anchor-x: 43%;
-    /* 座位面板自适应收窄，9 人桌在竖屏下小巧精致、不互相压住。 */
-    --seat-w: clamp(82px, 20vw, 96px);
-  }
-}
+/* 竖屏的尺寸/锚点/公共牌/中央净宽全部来自 table-geometry.ts 的档位表，
+   .table 只保留材质与「撑满舞台」的结构规则。 */
 
 /*
  * 竖屏（≤560px 宽）：桌面高度跟着视口走（390×844 时 310px），公共牌缩到 34px 上下，
@@ -597,51 +714,58 @@ const tableStatus = computed(() => {
     display: none;
   }
 
-  .table {
-    /*
-     * 竖屏桌面高度 = **flex 布局算出来的剩余空间**，不再猜数值。
-     *
-     * 竖屏固定占用是「顶栏 53 + 提示条 22 + 通知槽 26 + 舞台内边距 8 + 底部区」，
-     * 底部区随状态变化（等待时 ~180px，「轮到自己 + 额度台」时 ~296px）。
-     * 早先按 dvh 推公式（`min(0.275×dvh, dvh - 536px)`）仍会溢出 9px——dvh 与 innerHeight
-     * 在某些环境下并不相等。现在改成：`.stage`（flex: 1）拿到剩余高度，`.table` 用
-     * `height: 100%` 精确填满它。390×844 得到 232px、360×740 得到 204px，
-     * 任何牌局状态下都不会把页面顶出纵向滚动（e2e 有「竖屏一屏放下」的守卫断言）。
-     * max-height 给桌面档（≥561px 宽，走固定 --table-h）之外的情况兜底。
-     */
-    /*
-     * 用公式定高，**不要**用 `height: 100% / auto`：
-     *   竖屏下 `.table` 的子元素全是绝对定位，`height: auto` 会让桌面高度直接归零
-     *   （实测踩到：桌面 0px、公共牌跑到桌面外）；`height: 100%` 又会被基础规则里的
-     *   `height: var(--table-h)` 覆盖。
-     * 公式本身：0.275×dvh 是「桌面该占多少」，dvh-526px 是「除桌面外还剩多少」，取小的那个。
-     * 526 = 顶栏 53 + 通知槽 26 + 舞台内边距 8 + 最高一档底部区 422 + 余量 17。
-     * 390×844 → 232px，360×740 → 192px。下限 190px 兜底更小的机器（那些本来就会滚动）。
-     */
-    --table-h: clamp(190px, min(calc(100dvh * 0.275), calc(100dvh - 526px)), 320px);
-    /*
-     * 纵向半径 44% → 48%：桌面高度按 dvh 重标定后（390×844 时 226px、360×740 时 198px），
-     * 9 人桌顶部那一排（±50° 位，面板高约 47px）会与中央块/公共牌重叠。
-     * 这个半径是「离桌心多远」：调大 = 座位更贴边、面板离中央块更远（调小反而更糟）。
-     * `npm run probe:table` 实测：44% 时 360×740 压 5.2×46.3px、40% 时压 11.3×46.3px，
-     * 48% 时两个规格档（390×844 / 360×740）都全绿；再往上只多 1px 余量，意义不大。
-     * 竖屏座位面板本来就会溢出桌面椭圆（桌面只有 198px 高），这与「公共牌必须落在桌面内」不冲突。
-     */
-    --seat-anchor-y: 48%;
+  /*
+   * 竖屏桌面重构（2026-10）：
+   * 旧方案把桌面压到 232px 给底部座舱让路，结果桌面又小又空。现在改成
+   * 「舞台剩余高度全部给桌面」——`.table-wrap` 撑满 `.stage`，`.table` 用 100% 填满，
+   * 底部操作区另行压缩（见 TableView / ActionBar 的竖屏规则）。
+   * 顶部 50px / 底部 38px 的舞台内边距由 TableView 提供：上方给 HUD 浮动胶囊让位，
+   * 下方给本人座位面板 + 英雄手牌区留呼吸空间。
+   */
+  .table-wrap {
+    height: 100%;
   }
 
-  /* 中央块（底池/边池 + 轮次 + 公共牌）竖排居中：宽度只由公共牌决定，左右两侧留给贴边座位。 */
+  .table {
+    /* 更深的翡翠毡面 + 更细的黄铜围边：向「私室牌桌」靠拢。 */
+    background:
+      radial-gradient(ellipse 62% 52% at 50% 38%, #1b5a4b 0%, #12493d 38%, #0a332a 70%, #06201a 100%);
+    box-shadow:
+      inset 0 0 0 1px rgba(212, 177, 106, 0.28),
+      inset 0 0 80px rgba(0, 0, 0, 0.55),
+      inset 0 2px 24px rgba(255, 255, 255, 0.04),
+      0 0 0 2px #14110d,
+      0 0 0 4px rgba(212, 177, 106, 0.55),
+      0 0 0 6px rgba(212, 177, 106, 0.12),
+      0 0 0 14px #121820,
+      0 0 0 16px #0a0f14,
+      0 24px 60px rgba(0, 0, 0, 0.85);
+  }
+
+  /* 中央块（底池/边池 + 轮次 + 公共牌）竖排居中偏下：顶部一排座位带着黄铜徽章，
+     会向左探出 12px，信息列下移 4% 才彻底让开。 */
   .center {
-    top: 50%;
+    top: var(--center-top, 45%);
+    /* 侧边座位面板左右各占一段宽度，中央列只能落在中间净宽里，否则会与侧边座位相碰。 */
+    max-width: calc(100% - var(--center-inset, 190px));
+    /* 纵向安全边距：中央列最多占「桌面高 - 2×inset」，给上下两排座位留净空 */
+    max-height: calc(100% - var(--center-max-height-inset, 0px) * 2);
+  }
+
+  /* 正对本人（环的最上沿）的座位：向上提一点，骑在黄铜护栏上，而不是缩进毡面里。 */
+  .seat-slot.is-center-top {
+    transform: translateY(-6px);
   }
 
   /* 贴边座位与常规座位自适应宽度：保证昵称与筹码信息全部完整展示且卡片不笨重 */
-  .seat-slot {
-    --seat-w: clamp(80px, 22vw, 94px);
-  }
-
+  /*
+   * 座位宽度：普通座位直接继承 .table 上的 --seat-w（档位表注入）；
+   * 侧边座位再用 --seat-w-side 收窄一档。
+   * 注意不要写成 `var(--seat-w-side, var(--seat-w))`——在同一个元素上引用自身的
+   * --seat-w 会造成循环引用，变量变成无效值，宽度回退到 `.seat-slot` 的 126px。
+   */
   .seat-slot.is-side-seat {
-    --seat-w: clamp(74px, 19vw, 84px);
+    --seat-w: var(--seat-w-side);
   }
 
   .seat-slot.is-side-seat :deep(.panel) {
@@ -655,20 +779,63 @@ const tableStatus = computed(() => {
    * `npm run probe:table` 实测：360×740 上 4px 还剩 1.2×2px、3px 完全干净。
    */
   .seat-slot :deep(.panel) {
-    padding-block: 4px;
+    padding-block: var(--seat-padding-block, 4px);
   }
 
-  /* 更矮的竖屏手机（如 740 高）：面板再收 1px/边，换掉最后那点互压。 */
-  @media (max-height: 780px) {
-    .seat-slot :deep(.panel) {
-      padding-block: 3px;
+  /*
+   * 超短屏（如 320×568）：桌面只有 120px 高，9 人环在纵向上必然与中央块相交。
+   * 这一档只收紧「本人座位那张卡片」与中央块之间的重叠：中央列整体上移、本人座位下移，
+   * 其余座位靠 .center 的净宽约束横向让开。
+   */
+  /*
+   * 320×568 的超短屏（老款 iPhone SE 一代等）：桌面只剩约 120px 高，9 人环在纵向
+   * 必然与中央块相交。这里的策略是「环压缩 + 中央列居中」：
+   *   1. 座位椭圆纵向半径压到 30%，把上下两排拉回桌内；
+   *   2. 中央列按座位面板净宽收窄，居中显示底池与公共牌；
+   *   3. 本人座位保持在下沿（e2e 断言要求居中且在桌面下半部分）。
+   */
+  /* 紧凑牌桌：座位改由 compactSeatStyle 左右两列排布，中央列回到桌面正中。 */
+  .table.is-compact .center {
+    transform: translate(-50%, -50%);
+  }
+
+  .table.is-compact .seat-slot {
+    transform: translate(0, -50%);
+  }
+
+  .table.is-compact .seat-slot.is-hero-slot {
+    transform: translate(-50%, -100%);
+    z-index: 6;
+  }
+
+  @media (max-width: 340px) {
+    /* 桌面撑满舞台可用高度（舞台本身只有 ~208px，再扣掉状态条等，靠 height:100% 吃满）。 */
+    /* 超短屏只剩排版微调：几何尺寸统一来自 table-geometry.ts 的 compact 档位。 */
+    .center {
+      gap: 5px;
+    }
+
+    .pot {
+      padding: 3px 12px 4px;
+    }
+
+    .pot b {
+      font-size: 1.15rem;
+    }
+
+    .pot-label {
+      font-size: 0.56rem;
+    }
+
+    .pots {
+      display: none;
     }
   }
 
   /* 公共牌宽度跟着视口走：两侧贴边座位各占 64px + 4px 边距后剩下的横向空间，
-     五张牌加牌距必须全部装下（390px 宽时 34px，360px 宽时 30px，320px 宽时 24px）。 */
+     五张牌加牌距必须全部装下。390px 宽时 36px（旧 34px），360px 宽时 30px，320px 宽时 24px。 */
   .center :deep(.board) {
-    --board-cw: clamp(24px, calc((100vw - 210px) / 5), 34px);
+    --board-cw: clamp(24px, calc((100vw - 210px) / 5), 38px);
   }
 
   .center :deep(.board .card--md) {
@@ -695,13 +862,28 @@ const tableStatus = computed(() => {
   }
 
   /*
-   * 下注筹码：竖屏座位面板很窄，默认 70% 半径的落点必然压住东西——
-   * 压自己的筹码数字（实测 15×16px）、压公共牌最外侧那张牌，二者之间没有净空
-   * （公共牌宽度与贴边座位面板内沿在竖屏基本贴合）。
-   * 因此竖屏不画浮动筹码，改由座位面板右下角的角标显示本轮下注（见 PlayerSeat 的 .panel-bet）。
+   * 竖屏也要显示本轮下注，但要比桌面档更紧凑：
+   * 座位面板很窄，默认尺寸的筹码会压住自己的筹码数字与公共牌最外侧那张。
+   * 缩小字号/内边距，并把落点半径收一点（见 chipStyle 的 --bet-radius），
+   * 让筹码落在「座位面板与底池之间」那条窄带里。
    */
+  .table {
+    /* 筹码更靠近座位（远离桌心）：58% / 46% 仍会压到中央区的公共牌 */
+    --bet-radius-x: 0.76;
+    --bet-radius-y: 0.64;
+  }
+
   .bet {
-    display: none;
+    gap: 1px;
+    padding: 0 3px 0 2px;
+    font-size: 0.58rem;
+    line-height: 1.25;
+    border-radius: 999px;
+  }
+
+  .bet .chip {
+    width: 7px;
+    height: 7px;
   }
 }
 

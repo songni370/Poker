@@ -37,13 +37,18 @@ test('计分板累计买入、参局与离桌筹码，并保存进房间快照',
   await a.waitFor((m) => m.type === 'hand.started', 5000, fromStart)
   assert.deepEqual(a.lastState()?.scores.map((score) => score.handsPlayed), [1, 1])
 
+  const beforeRebuy = a.messages.length
+  a.send({ type: 'seat.rebuy', requestId: rid(), buyIn: 2000 })
+  await a.waitFor((m) => 'state' in m && m.state.seats[0]?.pendingBuyIn === 2000, 5000, beforeRebuy)
+  const chipsBeforeLeave = a.lastState()!.seats[0]!.stack + 2000
+
   const fromLeave = b.messages.length
   a.send({ type: 'room.leave', requestId: rid() })
   await b.waitFor((m) => 'state' in m && m.state.scores.some((score) => score.playerId === host.playerId && !score.seated), 5000, fromLeave)
   const departed = b.lastState()!.scores.find((score) => score.playerId === host.playerId)!
   assert.equal(departed.seated, false)
   assert.equal(departed.net, departed.banked + departed.stack - departed.totalBuyIn, '离桌带走的筹码仍计入净筹码')
-  assert.ok(departed.banked > 0)
+  assert.equal(departed.banked, chipsBeforeLeave, '离桌带走当前余额和待入账买入')
   const saved = server.handle.db.prepare('SELECT state_json FROM room_snapshots WHERE room_id = ?').get(host.roomId) as { state_json: string }
   assert.equal(JSON.parse(saved.state_json).scores.length, 2)
   const recovered = RoomRuntime.fromSnapshot(JSON.parse(saved.state_json) as RoomSnapshot)
@@ -431,7 +436,9 @@ test('自动下一手人数不足时不发牌；有人重新买入后重新计�
   assert.equal(server.rooms.get(host.roomId)!.table.publicState().handNo, 1)
 
   const busted = bustedSeat === 0 ? a : b
-  await takeSeat(busted, bustedSeat, 300)
+  const rebuyFrom = busted.messages.length
+  busted.send({ type: 'seat.rebuy', requestId: rid(), buyIn: 300 })
+  await busted.waitFor((message) => 'state' in message && message.state.seats[bustedSeat]?.stack === 300, 5000, rebuyFrom)
   assert.ok(busted.lastState()!.nextHandDeadlineAt, '重新买入后重新计时')
   const next = await a.waitFor((message) => message.type === 'hand.started' && message.state.handNo === 2,
     3000, a.messages.length)
@@ -924,7 +931,7 @@ test('落座买入：买入额按房主上限/下限/步进收敛，离座保留
   assert.equal(c.lastState()!.seats[1]!.playerId, late.playerId)
 })
 
-test('筹码归零后可在原座位重新买入，但手牌未结束时不能补筹码', async (t) => {
+test('全下中可买入并恢复待入账筹码，结算后有筹码及离座也可追加买入', async (t) => {
   const server = await startTestServer()
   t.after(server.stop)
   const host = (await postJson<RoomCredentials>(`${server.base}/api/rooms`, {
@@ -948,29 +955,35 @@ test('筹码归零后可在原座位重新买入，但手牌未结束时不能�
     expectedVersion: a.lastState()!.version, action: 'all_in' })
   await a.waitFor((message) => message.type !== 'room.error' && 'state' in message &&
     message.state.phase === 'preflop' && message.state.seats[0]?.stack === 0)
-  const beforeError = a.messages.length
-  a.send({ type: 'seat.take', requestId: rid(), seat: 0, buyIn: 500 })
-  const early = await a.waitFor((message) => message.type === 'room.error', 5000, beforeError)
-  assert.ok(early.type === 'room.error')
-  assert.equal(early.error?.code, 'bad_request')
-  assert.equal(server.rooms.get(host.roomId)!.table.seatOf(host.playerId)!.stack, 0)
+  const beforeRebuy = a.messages.length
+  const rebuyId = rid()
+  a.send({ type: 'seat.rebuy', requestId: rebuyId, buyIn: 500 })
+  await a.waitFor((message) => 'state' in message && message.state.seats[0]?.pendingBuyIn === 500, 5000, beforeRebuy)
+  const room = server.rooms.get(host.roomId)!
+  assert.equal(room.table.seatOf(host.playerId)!.stack, 0)
+  assert.equal(room.table.seatOf(host.playerId)!.allIn, true)
+  assert.equal(RoomRuntime.fromSnapshot(room.serialize()).table.seatOf(host.playerId)!.pendingBuyIn, 500)
+  a.send({ type: 'seat.rebuy', requestId: rebuyId, buyIn: 500 })
+  await delay(100)
+  assert.equal(room.scores.get(host.playerId)!.totalBuyIn, 700, '重复请求不重复买入')
 
   b.send({ type: 'game.action', requestId: rid(), handId: b.lastState()!.handId!,
-    expectedVersion: b.lastState()!.version, action: 'call' })
+    expectedVersion: a.lastState()!.version, action: 'call' })
   const settled = await a.waitFor((message) => message.type === 'hand.settled')
   assert.ok(settled.type === 'hand.settled')
-  const bustedSeat = settled.state.seats[0]?.stack === 0 ? 0 : 1
-  const busted = bustedSeat === 0 ? a : b
-  await takeSeat(busted, bustedSeat, 505)
-  assert.equal(busted.lastState()!.seats[bustedSeat]!.stack, 510, '重新买入仍按小盲步进取整')
-  assert.equal(busted.lastState()!.seats[bustedSeat]!.away, false)
-  assert.equal(server.rooms.get(host.roomId)!.table.canStartHand(), true)
-
-  const beforeDuplicate = busted.messages.length
-  busted.send({ type: 'seat.take', requestId: rid(), seat: bustedSeat, buyIn: 500 })
-  const duplicate = await busted.waitFor((message) => message.type === 'room.error', 5000, beforeDuplicate)
-  assert.ok(duplicate.type === 'room.error')
-  assert.equal(duplicate.error?.code, 'bad_request', '有筹码时不能重复买入')
+  assert.equal(room.table.totalChips(), 900)
+  assert.equal(room.table.seatOf(host.playerId)!.pendingBuyIn, 0)
+  const stackBefore = room.table.seatOf(host.playerId)!.stack
+  await takeSeat(a, 0, 505)
+  assert.equal(a.lastState()!.seats[0]!.stack, stackBefore + 510, '有筹码也能追加，仍按小盲步进取整')
+  const leaveFrom = a.messages.length
+  a.send({ type: 'seat.leave', requestId: rid() })
+  await a.waitFor((message) => 'state' in message && message.state.seats[0]?.away === true, 5000, leaveFrom)
+  const awayFrom = a.messages.length
+  a.send({ type: 'seat.rebuy', requestId: rid(), buyIn: 500 })
+  await a.waitFor((message) => 'state' in message && message.state.seats[0]?.stack === stackBefore + 1010, 5000, awayFrom)
+  assert.equal(room.table.seatOf(host.playerId)!.away, true)
+  assert.equal(room.scores.get(host.playerId)!.buyInCount, 4)
 })
 
 test('离座/退出发生在手牌中：先自动弃牌并结算，筹码留在池里，退出等本手结束才移除', async (t) => {

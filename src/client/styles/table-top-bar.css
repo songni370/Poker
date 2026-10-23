@@ -1,0 +1,292 @@
+/*
+ * 牌桌顶栏（房间信息 + 配置/声音/分享）样式。
+ *
+ * 顶栏已拆成 TableTopBar.vue；因为要覆盖 PrimeVue 的 Button 与浮层动画，
+ * 样式量较大，统一放在这里由 main.ts 引入。
+ */
+/* ═══════════════ 顶栏 HUD 贵宾指挥区 ═══════════════ */
+.hud-header {
+  /* 拟物：顶部皮革压印条，与牌桌木纹同一套材质语言。 */
+  background:
+    repeating-linear-gradient(115deg, rgba(255, 255, 255, 0.012) 0 3px, transparent 3px 9px),
+    linear-gradient(180deg, #2a2118 0%, #1b150f 55%, #120e0a 100%);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.75);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 1px 0 rgba(255, 255, 255, 0.06),
+    0 10px 24px rgba(0, 0, 0, 0.55);
+  padding: 8px var(--space-2);
+  display: flex;
+  align-items: center;
+  /* 覆盖 theme.css 里 .bar 的全局 flex-wrap: wrap——顶栏必须在任何宽度下都只有一行。 */
+  flex-wrap: nowrap;
+  z-index: 10;
+}
+
+.hud-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* 顶栏必须单行：房间名过长时由 .bar-title 省略，而不是把右侧按钮挤到第二行。 */
+  flex-wrap: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* 房间名贵宾勋章 */
+.room-badge {
+  min-width: 0;
+  flex: 0 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  /* 压印皮革铭牌：深棕底 + 内高光 + 深投影。 */
+  background:
+    repeating-linear-gradient(105deg, rgba(255, 255, 255, 0.015) 0 2px, transparent 2px 6px),
+    linear-gradient(180deg, #2b231a 0%, #1b150f 60%, #120e0a 100%);
+  border: 1px solid rgba(0, 0, 0, 0.8);
+  border-radius: 9px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.7),
+    0 4px 10px rgba(0, 0, 0, 0.55);
+}
+
+.room-badge-icon {
+  font-size: 0.88rem;
+  color: #e8cc96;
+  filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.8));
+}
+
+.host-label {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(212, 177, 106, 0.2);
+  color: #ffe19a;
+  font-size: 0.68rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.bar-title {
+  font-family: var(--font-display);
+  /* 给房间名一个可读的最小宽度：空间紧张时优先压缩它，但不能压到看不见名字 */
+  min-inline-size: 5.5em;
+  font-size: 1.02rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #ffffff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  /* 窄屏房间名过长时单行省略，保证顶栏不折行；
+     给一个可读的最小宽度，空间不够时优先压缩胶囊而不是房间名本身。 */
+  min-width: 4.5em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 盲注 / 手数 / 阶段钛金微晶胶囊 */
+.meta-capsules {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  flex: none;
+}
+
+.meta-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 3px 10px;
+  background: rgba(22, 29, 38, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  font-size: 0.82rem;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.meta-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+.meta-pill--blind .num {
+  color: #ffd875;
+  font-weight: 700;
+}
+
+.meta-pill--hand .num {
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.stage-name {
+  color: var(--gold);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.stage--flop .stage-name {
+  color: #38bdf8;
+  text-shadow: 0 0 8px rgba(56, 189, 248, 0.4);
+}
+
+.stage--turn .stage-name {
+  color: #c084fc;
+  text-shadow: 0 0 8px rgba(192, 132, 252, 0.4);
+}
+
+.stage--river .stage-name {
+  color: #fb7185;
+  text-shadow: 0 0 8px rgba(251, 113, 133, 0.4);
+}
+
+.stage--showdown .stage-name {
+  color: #facc15;
+  text-shadow: 0 0 8px rgba(250, 204, 21, 0.4);
+}
+
+/* 网络连接状态 */
+.link-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.76rem;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  /* 不被压缩换行：「已连接」三个字必须在一行里 */
+  flex: none;
+  white-space: nowrap;
+}
+
+.link-state.is-online {
+  color: #34d399;
+}
+
+.link-state.is-online i {
+  filter: drop-shadow(0 0 4px #34d399);
+}
+
+.link-state.is-offline {
+  color: var(--danger);
+}
+
+.bar-spacer {
+  flex: 1;
+}
+
+
+/* 顶栏快捷金标按钮栏 */
+.bar-right {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 4px 12px;
+  border-radius: 9px;
+  /* 凸起的皮革按键：与操作区的立体按键同一套光影。 */
+  background: linear-gradient(180deg, #3a2d20 0%, #1d150f 100%);
+  border: 1px solid rgba(0, 0, 0, 0.7);
+  color: #f1e6d0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.65),
+    0 3px 6px rgba(0, 0, 0, 0.5);
+}
+
+.bar-btn:hover {
+  background: rgba(212, 177, 106, 0.16);
+  border-color: var(--gold);
+  color: #ffffff;
+  box-shadow: 0 0 12px rgba(212, 177, 106, 0.25);
+  transform: translateY(-1px);
+}
+
+.bar-btn--chat.has-unread {
+  border-color: #38bdf8;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.35);
+}
+
+.bar-btn--chat.has-mention {
+  border-color: #ffd875;
+  box-shadow: 0 0 14px rgba(212, 177, 106, 0.5);
+}
+
+.bar-btn-text {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.count-chip {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: rgba(212, 177, 106, 0.2);
+  color: #ffd875;
+  font-size: 0.68rem;
+  line-height: 1;
+  font-weight: 700;
+}
+
+.count-chip--unread {
+  background: #2563eb;
+  color: #ffffff;
+  box-shadow: 0 0 6px rgba(37, 99, 235, 0.6);
+}
+/* 竖屏窄屏：顶栏压缩为单行——隐藏阶段/手数胶囊与按钮文字，只留图标 */
+@media (orientation: portrait) and (max-width: 560px) {
+  .bar {
+    gap: 6px;
+    padding: 4px 8px;
+  }
+
+  .bar-title {
+    font-size: 0.92rem;
+  }
+
+  .meta-pill--stage,
+  .meta-pill--hand {
+    display: none;
+  }
+
+  /* 盲注胶囊只留数字（「10/20」），把省下的宽度让给房间名 */
+  .meta-pill--blind .meta-label {
+    display: none;
+  }
+
+  /* 房主多出「配置 / 成员」两个按钮，窄屏下连接状态只留图标，避免文字被压到重叠 */
+  .link-state span {
+    display: none;
+  }
+
+  .link-state {
+    padding: 3px 7px;
+  }
+
+  .bar-btn-text {
+    display: none;
+  }
+
+  .bar-btn {
+    padding: 4px 8px;
+    min-width: 34px;
+  }
+}

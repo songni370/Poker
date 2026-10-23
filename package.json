@@ -8,9 +8,10 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "node scripts/dev.mjs",
+    "dev": "npm run gen:geometry && node scripts/dev.mjs",
     "build": "npm run build:client && npm run build:server",
-    "build:client": "vite build",
+    "build:client": "npm run gen:geometry && vite build",
+    "gen:geometry": "node scripts/gen-table-geometry.mjs",
     "build:server": "tsc -p tsconfig.server.json",
     "start": "node dist/server/index.js",
     "typecheck": "vue-tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
@@ -28,6 +29,7 @@
     "@fastify/websocket": "^11.3.1",
     "@primeuix/themes": "2.0.3",
     "fastify": "^5.12.5",
+    "phaser": "^4.2.1",
     "pinia": "^4.0.3",
     "primeicons": "^7.0.0",
     "primevue": "^4.5.5",

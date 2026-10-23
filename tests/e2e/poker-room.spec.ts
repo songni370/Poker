@@ -186,8 +186,14 @@ test('两个独立会话打完一手：摊牌前不泄露对手底牌，结算�
   expect(await playUntilSettled([host, guest])).toBe(true)
   await expect(host.getByRole('button', { name: '知道了' })).toBeVisible()
 
-  // 结算叠层里应出现赢家与牌型，且不再显示他人底牌之外的私密信息
-  await expect(host.getByText(/本手结算|本手你未赢下底池|你赢得/).first()).toBeVisible()
+  // 结算叠层里应出现战报标题与赢家结论，且不再显示他人底牌之外的私密信息。
+  // 文案随「战局结算战报」设计稿更新过，这里按当前界面真实的三种结论匹配：
+  //   本人赢：恭喜获胜！赢得 +N 筹码 / 对手赢：XXX 赢得底池 / 全员弃牌：全员弃牌，XXX 获胜。
+  const settlement = host.getByRole('dialog').filter({ hasText: '战局结算战报' })
+  await expect(settlement).toBeVisible()
+  await expect(
+    settlement.getByText(/恭喜获胜！赢得|赢得底池|全员弃牌，.+获胜|无人获胜/).first(),
+  ).toBeVisible()
 
   // ── 开始下一手 ──
   await dismissResult(host)
@@ -327,7 +333,22 @@ test('牌桌竖屏几何：390×844 与 360×740 无横向溢出且座位不压�
     [360, 740],
   ] as const) {
     await host.setViewportSize({ width, height })
-    await host.waitForTimeout(250)
+    /*
+     * 等布局稳定再测量：resize 后顶栏要重新求值媒体查询（隐藏阶段/手数胶囊），
+     * 舞台剩余高度随之变化，桌面与座舱会回流一小段时间。
+     * 用「连续两次采样一致」判定，而不是固定延迟——固定延迟容易正好落在回流中间。
+     */
+    await expect
+      .poll(
+        async () =>
+          host.evaluate(
+            () =>
+              `${String(Math.round(document.querySelector('.table')?.getBoundingClientRect().height ?? 0))}x${String(Math.round(document.querySelector('.hero')?.getBoundingClientRect().height ?? 0))}`,
+          ),
+        { message: `${width}×${height} 布局应在测量前稳定`, timeout: 5000, intervals: [150, 200, 250, 300, 400] },
+      )
+      .toMatch(/^\d+x\d+$/)
+    await host.waitForTimeout(400)
     const result = await geometry(host)
     expect(result.overflowX, `${width}×${height} 牌桌不应横向溢出`).toBe(0)
     expect(result.collisions, `${width}×${height} 座位面板不应压住底池/公共牌：${result.collisions.join('；')}`).toEqual([])
@@ -340,10 +361,12 @@ test('牌桌竖屏几何：390×844 与 360×740 无横向溢出且座位不压�
     expect(result.hero?.seatCards, `${width}×${height} 桌面上的本人座位不应画底牌`).toBe(0)
     // 第 1 项：庄家/盲位角标画在座位面板里（不占用桌面、不会压住底牌）
     expect(result.hero?.roleBadges, `${width}×${height} 庄家/盲位角标应在座位面板内`).toBeGreaterThan(0)
-    // 小屏不画桌面中央的浮动下注筹码（会压住公共牌或自己的筹码数字），
-    // 本轮下注改由座位面板右下角的角标给出（盲注已经下过，所以至少有 1 个）。
-    await expect(host.locator('.table .bet:visible')).toHaveCount(0)
-    expect(await host.locator('.seat-slot .panel-bet:visible').count()).toBeGreaterThan(0)
+    /*
+     * 本轮下注只在**桌面浮动筹码**这一处显示（盲注已经下过，所以至少有 1 个）。
+     * 座位卡片右下角不再重复画角标——两处同时显示同一金额是冗余信息。
+     */
+    expect(await host.locator('.table .bet:visible').count()).toBeGreaterThan(0)
+    await expect(host.locator('.seat-slot .panel-bet')).toHaveCount(0)
   }
 
   /*

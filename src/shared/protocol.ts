@@ -81,6 +81,8 @@ export interface LegalAction {
 }
 
 export interface SeatPublic {
+  /** 本手结束后可用的新增筹码。 */
+  pendingBuyIn?: number
   playerId: string
   seat: number
   nickname: string
@@ -317,8 +319,14 @@ export const TakeSeatCommandSchema = z.object({
   type: z.literal('seat.take'),
   requestId,
   seat: z.number().int().min(0).max(TABLE_RULES.maxSeats - 1),
-  /** 首次入座或结算后 0 筹码重新买入；坐回有筹码的保留座位时忽略。 */
+  /** 首次入座或在原座位追加买入；坐回有筹码的保留座位时忽略。 */
   buyIn: z.number().int().positive().max(TABLE_RULES.maxBuyInLimit).optional(),
+})
+
+export const RebuyCommandSchema = z.object({
+  type: z.literal('seat.rebuy'),
+  requestId,
+  buyIn: z.number().int().positive().max(TABLE_RULES.maxBuyInLimit),
 })
 
 export const LeaveSeatCommandSchema = z.object({
@@ -392,6 +400,7 @@ export const HeartbeatCommandSchema = z.object({
 export const ClientCommandSchema = z.discriminatedUnion('type', [
   JoinCommandSchema,
   TakeSeatCommandSchema,
+  RebuyCommandSchema,
   LeaveSeatCommandSchema,
   LeaveRoomCommandSchema,
   KickPlayerCommandSchema,

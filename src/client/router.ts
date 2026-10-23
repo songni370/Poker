@@ -34,6 +34,22 @@ export const routes: RouteRecordRaw[] = [
     meta: { title: '无法进入房间 · Poker Room' },
   },
   {
+    // 动效对比 Demo：纯前端假数据，不连服务端，用于评估动效方案。
+    // 不参与任何对局逻辑，也不向服务端发请求；决定动效方案后可整页删除。
+    path: '/demo/motion',
+    name: 'motion-demo',
+    component: () => import('./views/MotionDemo.vue'),
+    meta: { title: '动效 Demo · Poker Room' },
+  },
+  {
+    // Phaser 牌桌 Demo：验证 Vue + Phaser 混合架构（物理落桌 + WebGL 粒子）。
+    // 同样只在前端跑假数据，不影响真实牌桌。
+    path: '/demo/phaser',
+    name: 'phaser-demo',
+    component: () => import('./views/PhaserDemo.vue'),
+    meta: { title: 'Phaser 牌桌 Demo · Poker Room' },
+  },
+  {
     path: '/:pathMatch(.*)*',
     name: 'not-found',
     component: () => import('./views/ErrorView.vue'),

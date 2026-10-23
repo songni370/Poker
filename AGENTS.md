@@ -4,6 +4,7 @@
 - 禁止实现真钱赌博、充值、提现或可兑换筹码。
 - 每个阶段开始前：检查当前项目，列出实际发现的适用技能（Skill），并给出简短实施计划。
 - 界面设计使用 `ui-ux-pro-max` 与 `frontend-design`；界面检查使用 `web-design-guidelines`。
+- 浏览器操作、看页面、界面验收与对局流程 dogfooding 一律使用 `ego-browser` 技能（本机 ego lite，先执行 `ego-browser skill` 获取当前版本用法），不要调用 Google Chrome 或 Playwright 截图。
 - 只有在确认 CSS/SVG 无法满足需求时才引入 PixiJS。
 - 扑克规则必须放在 `src/engine` 中的纯 TypeScript 模块；牌堆、手牌与筹码均由服务端统一裁定。
 - 只保留一个 `package.json`、一个 Fastify 生产进程、一个端口和一次部署；由 Fastify 提供构建后的 Vue 页面。

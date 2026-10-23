@@ -802,10 +802,14 @@ export class RoomManager {
       }
 
       switch (command.type) {
+        case 'seat.rebuy':
         case 'seat.take': {
           const seated = room.table.seatOf(playerId)
+          const rebuy = command.type === 'seat.rebuy' || Boolean(seated && !seated.away)
+          if (command.type === 'seat.rebuy' && !seated) throw new CommandError('bad_request', '请先入座')
+          const seatNumber = command.type === 'seat.rebuy' ? seated!.seat : command.seat
           const wasAway = seated?.away ?? false
-          const needsBuyIn = !seated || seated.stack <= 0
+          const needsBuyIn = rebuy || !seated || seated.stack <= 0
           // 买入区间 = 房主设定的「初始筹码 ~ 买入上限」，缺省买入额取上限（一次带够）。
           const buyIn = normalizeBuyIn(
             command.buyIn ?? room.buyInMax,
@@ -813,27 +817,25 @@ export class RoomManager {
             room.buyInMax,
             room.smallBlind,
           )
-          if (wasAway) {
+          if (rebuy) {
+            if (seated!.seat !== seatNumber) throw new CommandError('bad_request', '请在原座位重新买入')
+            room.table.rebuy(playerId, buyIn)
+          } else if (wasAway) {
             /*
              * 离座玩家换座位（第 4 项需求）：任意空位都能坐，筹码跟人走、不用再买入——
              * 原座位腾空，原筹码原样带到新座位（只有原筹码为 0 时才用本次买入额补充）。
              */
-            const previousStack = room.table.reSit(playerId, member.nickname, command.seat, buyIn)
+            const previousStack = room.table.reSit(playerId, member.nickname, seatNumber, buyIn)
             if (previousStack <= 0) {
               // 输光了重新买入：仍受房主设定的买入区间约束。
               room.table.seatOf(playerId)!.stack = buyIn
             }
-          } else if (seated) {
-            if (seated.seat !== command.seat || seated.stack !== 0 || room.table.isHandRunning()) {
-              throw new CommandError('bad_request', '只有本手结束后筹码归零的玩家可以在原座位重新买入')
-            }
-            room.table.sit(playerId, member.nickname, command.seat, buyIn)
-          } else if (!room.table.isSeatAvailable(command.seat)) {
+          } else if (!room.table.isSeatAvailable(seatNumber)) {
             throw new CommandError('seat_taken', '这个座位已经有人了')
           } else {
-            room.table.sit(playerId, member.nickname, command.seat, buyIn)
+            room.table.sit(playerId, member.nickname, seatNumber, buyIn)
           }
-          member.seat = command.seat
+          member.seat = seatNumber
           member.ready = true
           const score = room.scores.get(playerId) ?? {
             playerId, nickname: member.nickname, totalBuyIn: 0, buyInCount: 0,
@@ -845,10 +847,12 @@ export class RoomManager {
           }
           score.seated = true
           room.scores.set(playerId, score)
-          this.clearAwayTimer(room, playerId)
-          notice = wasAway
-            ? `${member.nickname} 回到 ${command.seat + 1} 号位（筹码 ${String(room.table.seatOf(playerId)?.stack ?? 0)} 原样带走）`
-            : seated ? `${member.nickname} 重新买入 ${buyIn} 筹码` : `${member.nickname} 买入 ${buyIn} 入座 ${command.seat + 1} 号位`
+          if (!wasAway || !rebuy) this.clearAwayTimer(room, playerId)
+          notice = rebuy
+            ? `${member.nickname} 重新买入 ${buyIn} 筹码${seated?.pendingBuyIn ? '（本手结束后可用）' : ''}`
+            : wasAway
+            ? `${member.nickname} 回到 ${seatNumber + 1} 号位（筹码 ${String(room.table.seatOf(playerId)?.stack ?? 0)} 原样带走）`
+            : seated ? `${member.nickname} 重新买入 ${buyIn} 筹码` : `${member.nickname} 买入 ${buyIn} 入座 ${seatNumber + 1} 号位`
           eventType = 'room.player_joined'
           break
         }
@@ -1038,7 +1042,7 @@ export class RoomManager {
       this.bumpVersion(room)
       this.scheduleTurn(room, command.type === 'room.configure')
       if (result && revealSteps.length === 0) this.scheduleNextHand(room)
-      if (command.type === 'seat.take' && room.nextHandDeadlineAt === null && !room.pendingSettlement &&
+      if ((command.type === 'seat.take' || command.type === 'seat.rebuy') && room.nextHandDeadlineAt === null && !room.pendingSettlement &&
         room.table.publicState().phase === 'settlement' && room.table.canStartHand()) this.scheduleNextHand(room)
       this.repo.transaction(() => {
         this.repo.saveReceipt(command.requestId, room.id, playerId, command.type, '{"ok":true}')
@@ -1395,7 +1399,8 @@ export class RoomManager {
   private freezeScore(room: RoomRuntime, playerId: string): void {
     const score = room.scores.get(playerId)
     if (!score) return
-    score.banked += room.table.seatOf(playerId)?.stack ?? score.stack
+    const seat = room.table.seatOf(playerId)
+    score.banked += seat ? seat.stack + (seat.pendingBuyIn ?? 0) : score.stack
     score.stack = 0
     score.net = score.banked - score.totalBuyIn
     score.seated = false
@@ -1416,7 +1421,7 @@ export class RoomManager {
       const seat = room.table.seatOf(score.playerId)
       const member = room.members.get(score.playerId)
       score.seated = Boolean(member && !member.pendingKickRemoval && member.seat !== null && seat)
-      if (score.seated && seat) score.stack = seat.stack
+      if (score.seated && seat) score.stack = seat.stack + (seat.pendingBuyIn ?? 0)
       score.net = score.banked + score.stack - score.totalBuyIn
     }
   }
@@ -1436,6 +1441,7 @@ export class RoomManager {
         seat: member.seat,
         nickname: member.nickname,
         stack: engineSeat.stack,
+        pendingBuyIn: engineSeat.pendingBuyIn ?? 0,
         committedStreet: engineSeat.committedStreet,
         committedHand: engineSeat.committedHand,
         folded: engineSeat.folded,

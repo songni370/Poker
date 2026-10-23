@@ -140,7 +140,7 @@ const contendersList = computed(() => {
     modal
     :draggable="false"
     :block-scroll="true"
-    class="vip-dialog result-dialog"
+    class="vip-dialog result-dialog result-skin"
     :style="{ width: 'min(94vw, 560px)' }"
     @update:visible="(value: boolean) => !value && emit('close')"
   >
@@ -300,6 +300,38 @@ const contendersList = computed(() => {
 </template>
 
 <style scoped>
+/* ═══════ 拟物风结算面板：皮革框 + 黄铜铭牌 + 内凹信息槽 ═══════ */
+.p-dialog.result-skin {
+  background:
+    repeating-linear-gradient(115deg, rgba(255, 255, 255, 0.012) 0 3px, transparent 3px 9px),
+    linear-gradient(180deg, #2a2118 0%, #1b150f 55%, #120e0a 100%);
+  border: 1px solid #000;
+  border-radius: 20px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.75),
+    0 0 0 1.5px rgba(138, 106, 50, 0.7),
+    0 24px 60px rgba(0, 0, 0, 0.8);
+}
+
+/* 内嵌缝线 */
+.p-dialog.result-skin .p-dialog-content,
+.p-dialog.result-skin .p-dialog-header,
+.p-dialog.result-skin .p-dialog-footer {
+  background: transparent;
+  color: #f1e6d0;
+}
+
+.p-dialog.result-skin .p-dialog-header {
+  padding: 14px 16px 10px;
+  border-bottom: 1px dashed rgba(232, 204, 150, 0.22);
+}
+
+.p-dialog.result-skin .p-dialog-footer {
+  padding: 10px 16px 14px;
+  border-top: 1px dashed rgba(232, 204, 150, 0.22);
+}
+
 .result-header {
   display: flex;
   align-items: center;
@@ -311,25 +343,28 @@ const contendersList = computed(() => {
 .result-header-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 
+/* 黄铜手数徽章 */
 .result-title-tag {
-  font-size: 0.95rem;
+  font-size: 0.92rem;
   font-weight: 800;
-  color: #ffd875;
-  background: rgba(255, 216, 117, 0.14);
-  padding: 2px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(255, 216, 117, 0.3);
+  color: #2a1c08;
+  padding: 2px 9px;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #f4dc9e 0%, #c39a4f 100%);
+  border: 1px solid #7c5c22;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75), 0 2px 5px rgba(0, 0, 0, 0.55);
 }
 
 .result-title-text {
   margin: 0;
-  font-size: 1.1rem;
+  font-size: 1.08rem;
   font-weight: 700;
-  color: #f1f5f9;
+  color: #f6ecd8;
   letter-spacing: 0.02em;
+  text-shadow: 0 1px 0 #000;
 }
 
 .result-header-pot {
@@ -339,88 +374,120 @@ const contendersList = computed(() => {
 }
 
 .pot-label {
-  font-size: 0.78rem;
-  color: var(--muted);
+  font-size: 0.76rem;
+  color: #a08f74;
 }
 
 .pot-value {
-  font-size: 1.15rem;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
   font-weight: 800;
-  color: #ffd875;
+  color: #ffdf9a;
+  text-shadow: 0 1px 0 #000, 0 0 12px rgba(255, 190, 90, 0.3);
 }
 
 .result-body {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   max-height: min(72vh, 600px);
   overflow-y: auto;
   padding-right: 4px;
 }
 
-/* 战报胜负横幅 */
+/* 胜负横幅：赢=香槟金压印，其余=内凹深槽 */
 .result-banner {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
-  border-radius: var(--radius-md);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.03);
+  border-radius: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.8);
+  background: linear-gradient(180deg, #241c13 0%, #130e09 100%);
+  box-shadow:
+    inset 0 2px 6px rgba(0, 0, 0, 0.85),
+    0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .banner-win {
-  background: linear-gradient(135deg, rgba(212, 177, 106, 0.22) 0%, rgba(180, 138, 56, 0.12) 100%);
-  border-color: rgba(212, 177, 106, 0.45);
-  box-shadow: 0 4px 18px rgba(212, 177, 106, 0.12);
+  background: linear-gradient(180deg, #3a2e1c 0%, #241a10 60%, #160f09 100%);
+  border-color: #8a6a32;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 230, 170, 0.25),
+    inset 0 -2px 6px rgba(0, 0, 0, 0.7),
+    0 4px 14px rgba(0, 0, 0, 0.55);
 }
 
 .banner-icon-box {
   width: 40px;
   height: 40px;
   border-radius: 999px;
-  background: rgba(0, 0, 0, 0.25);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  background: radial-gradient(circle at 32% 26%, #f6e2b4 0%, #d3b070 45%, #8c6c33 100%);
+  border: 1px solid #6d5325;
+  box-shadow:
+    inset 0 -2px 3px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    0 2px 4px rgba(0, 0, 0, 0.6);
+}
+
+.banner-neutral .banner-icon-box {
+  background: linear-gradient(180deg, #3b2f22 0%, #241b12 100%);
+  border-color: rgba(0, 0, 0, 0.8);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 2px 4px rgba(0, 0, 0, 0.5);
 }
 
 .banner-emoji {
-  font-size: 1.4rem;
+  font-size: 1.3rem;
+  filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.5));
 }
 
 .banner-content {
   flex: 1;
+  min-width: 0;
 }
 
 .banner-title {
   margin: 0 0 2px;
-  font-size: 1.05rem;
-  font-weight: 700;
-  color: #ffd875;
+  font-size: 1.04rem;
+  font-weight: 800;
+  color: #ffdf9a;
+  text-shadow: 0 1px 0 #000;
 }
 
 .banner-neutral .banner-title {
-  color: #e2e8f0;
+  color: #f1e6d0;
 }
 
 .banner-desc {
   margin: 0;
-  font-size: 0.8rem;
-  color: var(--muted);
-  line-height: 1.35;
+  font-size: 0.78rem;
+  color: #a08f74;
+  line-height: 1.4;
 }
 
-/* 模块区域卡片 */
+/* 信息分区：内凹皮革槽 */
 .result-section {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  background: #111722;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, #1d1610 0%, #120d09 100%);
+  border: 1px solid rgba(0, 0, 0, 0.8);
+  border-radius: 12px;
   padding: 10px 14px;
+  box-shadow:
+    inset 0 2px 6px rgba(0, 0, 0, 0.8),
+    0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.hero-hand-section {
+  border-color: #8a6a32;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 230, 170, 0.18),
+    inset 0 -2px 6px rgba(0, 0, 0, 0.7);
 }
 
 .section-title-row {
@@ -431,22 +498,22 @@ const contendersList = computed(() => {
 }
 
 .section-title {
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   font-weight: 700;
-  color: #94a3b8;
-  letter-spacing: 0.02em;
+  color: #cbbd9f;
+  letter-spacing: 0.04em;
 }
 
 .section-badge {
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   font-weight: 700;
-  color: #cbd5e1;
-  background: rgba(255, 255, 255, 0.06);
-  padding: 1px 6px;
+  color: #e8cc96;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(138, 106, 50, 0.6);
+  padding: 1px 7px;
   border-radius: 999px;
 }
 
-/* 卡牌横排容器 */
 .cards-flex {
   display: flex;
   align-items: center;
@@ -459,15 +526,9 @@ const contendersList = computed(() => {
 }
 
 .board-empty-hint {
-  font-size: 0.8rem;
-  color: var(--muted);
+  font-size: 0.78rem;
+  color: #a08f74;
   font-style: italic;
-}
-
-/* 你的底牌专区 */
-.hero-hand-section {
-  background: #16202e;
-  border-color: rgba(96, 165, 250, 0.3);
 }
 
 .hero-title-group {
@@ -476,34 +537,39 @@ const contendersList = computed(() => {
   gap: 8px;
 }
 
+/* 状态胶囊：黄铜刻字 / 冷钢 / 灰皮 */
 .hero-status-chip {
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   font-weight: 700;
-  padding: 1px 7px;
+  padding: 1px 8px;
   border-radius: 999px;
+  border: 1px solid transparent;
 }
 
 .chip-win {
-  background: rgba(212, 177, 106, 0.25);
-  color: #ffd875;
-  border: 1px solid rgba(212, 177, 106, 0.4);
+  color: #2a1c08;
+  background: linear-gradient(180deg, #f4dc9e 0%, #c39a4f 100%);
+  border-color: #7c5c22;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
 }
 
 .chip-showdown {
-  background: rgba(96, 165, 250, 0.2);
-  color: #93c5fd;
-  border: 1px solid rgba(96, 165, 250, 0.35);
+  color: #dbe7f3;
+  background: linear-gradient(180deg, #3a4a5c 0%, #222d3a 100%);
+  border-color: #16202b;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
 }
 
 .chip-fold {
-  background: rgba(148, 163, 184, 0.14);
-  color: #94a3b8;
+  color: #b9ad95;
+  background: linear-gradient(180deg, #3b2f22 0%, #241b12 100%);
+  border-color: rgba(0, 0, 0, 0.8);
 }
 
 .hero-hand-type {
-  font-size: 0.84rem;
-  font-weight: 700;
-  color: #ffd875;
+  font-size: 0.82rem;
+  font-weight: 800;
+  color: #ffdf9a;
 }
 
 .hero-cards-box {
@@ -522,21 +588,21 @@ const contendersList = computed(() => {
 }
 
 .eval-label {
-  font-size: 0.72rem;
-  color: var(--muted);
+  font-size: 0.7rem;
+  color: #a08f74;
 }
 
 .eval-name {
-  font-size: 0.92rem;
-  font-weight: 700;
-  color: #60a5fa;
+  font-size: 0.9rem;
+  font-weight: 800;
+  color: #e8cc96;
 }
 
 .hero-win-card {
-  box-shadow: 0 0 10px rgba(212, 177, 106, 0.35) !important;
+  box-shadow: 0 0 10px rgba(255, 190, 90, 0.35) !important;
 }
 
-/* 摊牌开牌玩家列表 */
+/* 摊牌玩家行：凸起的皮革小条 */
 .contenders-list {
   display: flex;
   flex-direction: column;
@@ -550,24 +616,30 @@ const contendersList = computed(() => {
   justify-content: space-between;
   gap: 10px;
   padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: var(--radius-sm);
-  transition: all 0.2s ease;
+  border-radius: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.8);
+  background: linear-gradient(180deg, #2b231a 0%, #1b150f 60%, #120e0a 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.65),
+    0 3px 8px rgba(0, 0, 0, 0.5);
 }
 
 .contender-row.is-winner {
-  background: rgba(212, 177, 106, 0.09);
-  border-color: rgba(212, 177, 106, 0.4);
-  box-shadow: 0 2px 10px rgba(212, 177, 106, 0.08);
+  border-color: #8a6a32;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 230, 170, 0.28),
+    0 0 0 1px rgba(255, 210, 130, 0.3),
+    0 0 18px rgba(255, 190, 90, 0.18),
+    0 3px 8px rgba(0, 0, 0, 0.5);
 }
 
 .contender-row.is-hero {
-  border-left: 3px solid #60a5fa;
+  border-left: 3px solid #5b8bbf;
 }
 
 .contender-row.is-hero.is-winner {
-  border-left: 3px solid #ffd875;
+  border-left: 3px solid #c39a4f;
 }
 
 .contender-info {
@@ -586,43 +658,45 @@ const contendersList = computed(() => {
 }
 
 .crown-badge {
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   font-weight: 800;
-  color: #ffd875;
-  background: rgba(212, 177, 106, 0.2);
-  padding: 1px 6px;
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(212, 177, 106, 0.35);
+  color: #2a1c08;
+  padding: 1px 7px;
+  border-radius: 6px;
+  background: linear-gradient(180deg, #f4dc9e 0%, #c39a4f 100%);
+  border: 1px solid #7c5c22;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
 }
 
 .contender-nickname {
   font-size: 0.88rem;
   font-weight: 600;
-  color: #e2e8f0;
+  color: #f1e6d0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .contender-nickname.is-hero-nick {
-  color: #93c5fd;
+  color: #cfe3ff;
   font-weight: 700;
 }
 
 .contender-award {
-  font-size: 0.88rem;
+  font-size: 0.9rem;
   font-weight: 800;
-  color: #ffd875;
+  color: #ffdf9a;
+  text-shadow: 0 1px 0 #000;
 }
 
 .contender-hand-name {
-  font-size: 0.78rem;
-  color: var(--muted);
+  font-size: 0.76rem;
+  color: #a08f74;
 }
 
 .badge-gold-text {
-  color: #fcd34d !important;
-  font-weight: 600;
+  color: #ffdf9a !important;
+  font-weight: 700;
 }
 
 .contender-cards-flex {
@@ -632,7 +706,7 @@ const contendersList = computed(() => {
 }
 
 .winner-card-border {
-  box-shadow: 0 0 8px rgba(212, 177, 106, 0.4) !important;
+  box-shadow: 0 0 8px rgba(255, 190, 90, 0.4) !important;
 }
 
 /* 未摊牌独赢 */
@@ -646,66 +720,85 @@ const contendersList = computed(() => {
   gap: 8px;
   flex-wrap: wrap;
   padding: 8px 10px;
-  background: rgba(255, 255, 255, 0.02);
-  border-radius: var(--radius-sm);
+  border-radius: 10px;
+  background: linear-gradient(180deg, #241c13 0%, #130e09 100%);
+  border: 1px solid rgba(0, 0, 0, 0.75);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.8);
 }
 
 .crown-icon {
-  font-size: 1.1rem;
+  font-size: 1.05rem;
 }
 
 .uncontested-winner-name {
-  font-size: 0.92rem;
-  font-weight: 700;
-  color: #ffd875;
+  font-size: 0.9rem;
+  font-weight: 800;
+  color: #ffdf9a;
 }
 
 .uncontested-winner-name.is-hero-nick {
-  color: #60a5fa;
+  color: #cfe3ff;
 }
 
 .uncontested-win-chip {
-  font-size: 0.95rem;
+  font-size: 0.92rem;
   font-weight: 800;
-  color: #34d399;
+  color: #8fe0a8;
 }
 
 .uncontested-note {
-  font-size: 0.75rem;
-  color: var(--muted);
+  font-size: 0.74rem;
+  color: #a08f74;
 }
 
-/* Footer 操作栏 */
+/* Footer */
 .result-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   width: 100%;
-  gap: 12px;
+  gap: 10px;
 }
 
-.result-next-hand { flex-basis: 100%; color: #ffd875; font-size: 0.8rem; text-align: center; }
-.result-next-hand i { margin-right: 4px; }
+.result-next-hand {
+  flex-basis: 100%;
+  color: #e8cc96;
+  font-size: 0.78rem;
+  text-align: center;
+}
+
+.result-next-hand i {
+  margin-right: 4px;
+}
 
 .history-quick-btn {
-  color: var(--muted) !important;
-  font-size: 0.88rem !important;
+  color: #cbbd9f !important;
+  font-size: 0.86rem !important;
 }
 
 .history-quick-btn:hover {
-  color: #ffd875 !important;
+  color: #ffdf9a !important;
 }
 
+/* 主按钮：香槟金立体按键 */
 .confirm-btn {
-  min-width: 110px;
-  background: linear-gradient(135deg, #d4b16a 0%, #b48a38 100%) !important;
-  border-color: #d4b16a !important;
-  color: #0f141b !important;
-  font-weight: 700 !important;
+  min-width: 116px;
+  height: 46px;
+  border-radius: 12px !important;
+  background: linear-gradient(180deg, #ffe9ac 0%, #f0c668 45%, #c9973f 100%) !important;
+  border: 1px solid #7c5c22 !important;
+  color: #35230a !important;
+  font-weight: 800 !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 -3px 5px rgba(150, 105, 30, 0.55),
+    0 3px 0 #6a4d1a,
+    0 8px 16px rgba(0, 0, 0, 0.55) !important;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
 }
 
 .confirm-btn:hover {
-  filter: brightness(1.1);
+  filter: brightness(1.05);
 }
 </style>

@@ -21,6 +21,35 @@ function makeTable(players: [id: string, seat: number, stack: number][], config:
 
 const stackOf = (table: HoldemTable, playerId: string): number => table.seatOf(playerId)!.stack
 
+test('随时买入不改变当前行动、边池或底牌，恢复后结算只入账一次', () => {
+  const table = makeTable([['a', 0, 200], ['b', 1, 400], ['c', 2, 600]])
+  table.rebuy('a', 200)
+  assert.equal(stackOf(table, 'a'), 400, '等待开局时即时可用')
+  table.startHand({ handId: 'rebuy', rng: seededRng(17), buttonSeat: 0 })
+  const baseline = HoldemTable.restore(table.serialize())
+  const actions = table.legalActions('a')
+  table.rebuy('a', 500)
+  table.rebuy('a', 200)
+  assert.deepEqual(table.legalActions('a'), actions)
+  assert.deepEqual(table.holeCardsOf('a'), baseline.holeCardsOf('a'))
+  table.act('a', 'all_in')
+  table.leave('a')
+  table.rebuy('a', 300)
+  assert.equal(table.seatOf('a')!.allIn, true)
+  const recovered = HoldemTable.restore(table.serialize())
+  baseline.act('a', 'all_in')
+  baseline.leave('a')
+  for (const current of [baseline, recovered]) {
+    current.act('b', 'all_in')
+    current.act('c', 'call')
+  }
+  assert.deepEqual(recovered.publicState().result, baseline.publicState().result)
+  assert.equal(stackOf(recovered, 'a'), stackOf(baseline, 'a') + 1000)
+  assert.equal(recovered.totalChips(), baseline.totalChips() + 1000)
+  assert.equal(recovered.seatOf('a')!.pendingBuyIn, 0)
+  assert.equal(HoldemTable.restore(recovered.serialize()).totalChips(), recovered.totalChips())
+})
+
 /* ───────────────────────────── 牌堆与牌型 ───────────────────────────── */
 
 test('牌堆：52 张不重复，洗牌只是重排', () => {

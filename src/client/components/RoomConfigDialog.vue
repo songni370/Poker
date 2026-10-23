@@ -60,6 +60,7 @@ function save(): void {
     :visible="visible"
     modal
     header="牌局配置"
+    class="vip-dialog config-dialog"
     :style="{ width: 'min(92vw, 440px)' }"
     @update:visible="emit('update:visible', $event)"
   >

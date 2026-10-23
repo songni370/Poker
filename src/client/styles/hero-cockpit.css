@@ -1,0 +1,801 @@
+/*
+ * 牌桌底部「玩家座舱」（Hero Cockpit）与观战 / 离座面板的样式。
+ *
+ * 组件已拆成 HeroCockpit.vue，但样式量很大（约 540 行）且与 ActionBar 的 `:deep` 选择器交织，
+ * 放在组件里会让组件文件难以阅读；统一放这里、由 main.ts 引入。
+ */
+/* ═══════════════ 一体化玩家座舱（Hero Cockpit） ═══════════════ */
+.hero {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 6px var(--space-2) 10px;
+  background: linear-gradient(180deg, rgba(14, 19, 26, 0.88) 0%, rgba(8, 11, 15, 0.98) 100%);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-top: 1px solid rgba(212, 177, 106, 0.25);
+  box-shadow: 0 -10px 32px rgba(0, 0, 0, 0.6);
+  z-index: 8;
+}
+
+/* 核心座舱外壳（继承原 .hero-cards 保证 E2E 选择器完全兼容）。
+ * 拟物版：外壳本身不再铺深蓝渐变，只留一圈黄铜内描边 + 内凹阴影，
+ * 让底下的木纹底板透出来。 */
+.hero-cockpit {
+  display: flex;
+  align-items: stretch;
+  gap: 20px;
+  width: 100%;
+  max-width: 1080px;
+  margin-inline: auto;
+  padding: 10px 18px;
+  border-radius: var(--radius-lg);
+  background: transparent;
+  border: 1px solid rgba(232, 204, 150, 0.22);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 -2px 6px rgba(0, 0, 0, 0.55);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* 座舱左翼：底牌展示与牌力资产 */
+.cockpit-wing--hero {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 0 0 auto;
+}
+
+.cockpit-cards-group {
+  display: flex;
+  align-items: center;
+}
+
+/* 扇形交叠底牌容器 */
+.fan-cards {
+  display: flex;
+  align-items: center;
+  padding: 4px 6px;
+}
+
+/* 3D 翻转底牌卡槽 */
+.hero-card-flipper {
+  position: relative;
+  width: var(--cw, 58px);
+  height: calc(var(--cw, 58px) * 1.4);
+  perspective: 1000px;
+  flex: none;
+}
+
+.hero-card-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  transition: transform 0.65s cubic-bezier(0.34, 1.45, 0.64, 1);
+}
+
+.hero-card-flipper.is-flipped .hero-card-inner {
+  transform: rotateY(180deg);
+}
+
+/* 左右两张底牌依次翻开的真实发牌时差（左牌先翻，右牌随后） */
+.hero-card-flipper.fan-card--0 .hero-card-inner {
+  transition-delay: 0ms;
+}
+
+.hero-card-flipper.fan-card--1 .hero-card-inner {
+  transition-delay: 140ms;
+}
+
+.hero-card-face {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  border-radius: calc(var(--cw, 58px) * 0.11);
+}
+
+.hero-card-face .card {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.hero-card-face--back {
+  transform: rotateY(0deg);
+  z-index: 1;
+}
+
+.hero-card-flipper.is-flipped .hero-card-face--back {
+  z-index: 0;
+}
+
+.hero-card-face--front {
+  transform: rotateY(180deg);
+  z-index: 2;
+  overflow: hidden;
+}
+
+.hero-card-flipper:not(.is-flipped) .hero-card-face--front {
+  z-index: 0;
+}
+
+/* 翻牌瞬间金色微光掠过动效 */
+.hero-card-face--front::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(105deg, transparent 20%, rgba(255, 255, 255, 0.35) 45%, rgba(212, 177, 106, 0.45) 55%, transparent 75%);
+  background-size: 200% 200%;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.hero-card-flipper.is-flipped .hero-card-face--front::after {
+  animation: card-gleam 0.75s 0.2s cubic-bezier(0.2, 0.8, 0.25, 1) forwards;
+}
+
+@keyframes card-gleam {
+  0% {
+    opacity: 0;
+    background-position: 200% 0;
+  }
+  35% {
+    opacity: 0.85;
+  }
+  100% {
+    opacity: 0;
+    background-position: -200% 0;
+  }
+}
+
+.hero-card-flipper.is-dim {
+  opacity: 0.45;
+  filter: grayscale(0.5) drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5));
+}
+
+.fan-card--0 {
+  transform: rotate(-8deg) translateX(3px) translateY(-2px);
+  transform-origin: 50% 100%;
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  filter: drop-shadow(-2px 6px 12px rgba(0, 0, 0, 0.7));
+}
+
+.fan-card--1 {
+  transform: rotate(8deg) translateX(-14px) translateY(-2px);
+  transform-origin: 50% 100%;
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  filter: drop-shadow(4px 6px 14px rgba(0, 0, 0, 0.75));
+}
+
+.hero-cockpit:hover .fan-card--0 {
+  transform: rotate(-11deg) translateX(4px) translateY(-5px);
+}
+
+.hero-cockpit:hover .fan-card--1 {
+  transform: rotate(11deg) translateX(-12px) translateY(-5px);
+}
+
+/* 左翼状态与徽章 */
+.cockpit-meta-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 170px;
+}
+
+.cockpit-badge-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 牌型勋章高亮 */
+/* 本人本轮已投入：与筹码胶囊同排的小标签 */
+.hero-bet {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(138, 106, 50, 0.55);
+  color: #cbbd9f;
+  font-size: 0.62rem;
+  font-weight: 600;
+}
+
+.hero-bet b {
+  color: #ffdf9a;
+  font-weight: 800;
+}
+
+.hero-hand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 9px;
+  /* 拟物：绿色皮革勋章，压印金线边框 */
+  background: linear-gradient(180deg, #2f7f63 0%, #1b5642 60%, #123d2e 100%);
+  border: 1px solid #0a2a1a;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.5),
+    0 3px 8px rgba(0, 0, 0, 0.5);
+}
+
+.hand-icon {
+  color: #ffd875;
+  font-size: 0.82rem;
+  filter: drop-shadow(0 0 4px rgba(212, 177, 106, 0.6));
+}
+
+.hand-name {
+  color: #fff6dc;
+  font-size: 0.94rem;
+  font-weight: 700;
+  white-space: nowrap;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.8);
+  letter-spacing: 0.02em;
+}
+
+/* 筹码资产槽位 */
+.hero-stack {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 9px;
+  /* 拟物：内凹深槽，数字是压进去的 */
+  background: linear-gradient(180deg, #171109 0%, #241a10 100%);
+  border: 1px solid rgba(0, 0, 0, 0.8);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.85), 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+.stack-label {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.stack-num {
+  color: #ffdf9a;
+  font-size: 1.12rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 0 #000, 0 0 10px rgba(255, 190, 90, 0.25);
+}
+
+.rebuy-btn {
+  min-height: 32px;
+  margin-left: 4px;
+  padding: 4px 8px !important;
+  white-space: nowrap;
+}
+
+/* 席位动作（开局、离座、退出） */
+.hero-seat-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.hero-start-btn {
+  flex-shrink: 0;
+  padding: 5px 16px !important;
+  font-size: 0.86rem !important;
+  font-weight: 700 !important;
+  white-space: nowrap;
+  color: #ffffff !important;
+  background: linear-gradient(135deg, #1f8d72 0%, #115745 100%) !important;
+  border: 1px solid #2bc9a3 !important;
+  border-radius: var(--radius-sm) !important;
+  box-shadow: 0 2px 12px rgba(27, 141, 114, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.25) !important;
+  transition: all 0.2s ease !important;
+}
+
+.hero-start-btn:hover {
+  background: linear-gradient(135deg, #26a989 0%, #156d57 100%) !important;
+  box-shadow: 0 4px 18px rgba(27, 141, 114, 0.7) !important;
+  transform: translateY(-1px);
+}
+
+.sub-action-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+  padding: 4px 10px !important;
+  font-size: 0.8rem !important;
+  font-weight: 600 !important;
+  color: #cbd5e1 !important;
+  background: rgba(15, 23, 42, 0.7) !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  border-radius: var(--radius-sm) !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+  transition: all 0.18s ease !important;
+  white-space: nowrap !important;
+}
+
+.sub-action-btn:hover {
+  color: #ffffff !important;
+  background: rgba(30, 41, 59, 0.9) !important;
+  border-color: rgba(212, 177, 106, 0.45) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.12) !important;
+  transform: translateY(-1px);
+}
+
+.sub-action-btn:active {
+  transform: translateY(0);
+}
+
+.sub-action-btn .btn-action-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  stroke: currentColor;
+}
+
+.sub-btn-text {
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+/* 纵向微金拉线 */
+.cockpit-divider {
+  width: 1px;
+  background: linear-gradient(180deg, transparent, rgba(212, 177, 106, 0.35) 20%, rgba(212, 177, 106, 0.35) 80%, transparent);
+  margin-block: 4px;
+}
+
+/* 座舱右翼：战术操作融入台 */
+.cockpit-wing--action {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.hero-actions {
+  width: 100%;
+}
+
+/* ═══════════════ 贵宾观战与离座座舱 ═══════════════ */
+.hero-spectator {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  max-width: 820px;
+  margin-inline: auto;
+}
+
+.spectator-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  width: 100%;
+  padding: 14px 24px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, rgba(22, 30, 40, 0.94) 0%, rgba(13, 18, 24, 0.98) 100%);
+  border: 1px solid rgba(212, 177, 106, 0.32);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 0 16px rgba(0, 0, 0, 0.4);
+}
+
+.hero-spectator--away .spectator-card {
+  border-color: rgba(255, 215, 0, 0.45);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.6),
+    0 0 20px rgba(212, 177, 106, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.spectator-info {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.spectator-icon {
+  font-size: 1.8rem;
+  color: var(--gold);
+  filter: drop-shadow(0 0 8px rgba(212, 177, 106, 0.5));
+}
+
+.spectator-texts {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.spectator-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.spectator-badge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(52, 211, 153, 0.4);
+  background: rgba(16, 185, 129, 0.12);
+  color: #6ee7b7;
+  font-size: 0.68rem;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.spectator-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.02em;
+}
+
+.spectator-desc {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.spectator-copy-mobile {
+  display: none;
+}
+
+.spectator-desc .num {
+  color: var(--gold);
+  font-weight: 700;
+}
+
+.spectator-desc .empty-num {
+  color: #34d399;
+  font-size: 0.95rem;
+}
+
+.spectator-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.return-seat-btn {
+  background: linear-gradient(135deg, #10b981, #059669) !important;
+  border-color: #10b981 !important;
+  color: #fff !important;
+  font-weight: 600 !important;
+  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.35) !important;
+}
+
+.return-seat-btn .btn-action-icon {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  stroke: currentColor;
+  margin-right: 2px;
+}
+
+/* 观战栏「入座」主按钮：香槟金立体键（与买入/结算的主操作一致） */
+.quick-sit-btn {
+  min-height: 44px;
+  padding: 0 20px !important;
+  border-radius: 12px !important;
+  background: linear-gradient(180deg, #ffe9ac 0%, #f0c668 45%, #c9973f 100%) !important;
+  border: 1px solid #7c5c22 !important;
+  color: #35230a !important;
+  font-weight: 800 !important;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.55) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 -3px 5px rgba(150, 105, 30, 0.55),
+    0 3px 0 #6a4d1a,
+    0 8px 16px rgba(0, 0, 0, 0.55) !important;
+}
+
+.spectator-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 观战栏次级按钮（返回大厅）：皮革键，与主按钮形成层级 */
+.spectator-actions .p-button.p-button-secondary {
+  min-height: 44px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #3b2f22 0%, #241b12 100%);
+  border: 1px solid rgba(0, 0, 0, 0.75);
+  color: #e5d6b8;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.6),
+    0 2px 4px rgba(0, 0, 0, 0.5);
+}
+
+.resit-btn {
+  background: rgba(212, 177, 106, 0.2) !important;
+  color: #ffd875 !important;
+  border: 1px solid var(--gold) !important;
+}
+
+.resit-btn:hover {
+  background: rgba(212, 177, 106, 0.35) !important;
+}
+
+.exit-btn {
+  border-color: rgba(255, 255, 255, 0.2) !important;
+  color: var(--muted) !important;
+}
+
+.exit-btn:hover {
+  color: var(--text) !important;
+  border-color: var(--danger) !important;
+}
+
+/* ═══════════════ 竖屏（≤560px）：座舱压缩为纵向流 ═══════════════ */
+@media (orientation: portrait) and (max-width: 560px) {
+  .hero-spectator .spectator-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  .hero-spectator .spectator-info {
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .hero-spectator .spectator-icon {
+    margin-top: 2px;
+    font-size: 1.25rem;
+  }
+
+  .hero-spectator .spectator-title {
+    font-size: 0.92rem;
+  }
+
+  .hero-spectator .spectator-desc {
+    font-size: 0.76rem;
+    line-height: 1.4;
+  }
+
+  .spectator-copy-desktop {
+    display: none;
+  }
+
+  .spectator-copy-mobile {
+    display: inline;
+  }
+
+  .hero-spectator .spectator-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    gap: 8px;
+  }
+
+  .hero-spectator .spectator-actions .p-button {
+    justify-content: center;
+    min-width: 0;
+    min-height: 44px;
+    padding: 6px 8px;
+    font-size: 0.78rem;
+    white-space: nowrap;
+  }
+
+  .hero-spectator .spectator-actions > :only-child {
+    grid-column: 1 / -1;
+  }
+
+  .hero {
+    padding: 2px 6px 4px;
+  }
+
+  .hero {
+    background:
+      repeating-linear-gradient(96deg, rgba(255, 255, 255, 0.02) 0 2px, transparent 2px 7px),
+      repeating-linear-gradient(3deg, rgba(0, 0, 0, 0.2) 0 3px, transparent 3px 11px),
+      linear-gradient(180deg, #3a2b1f 0%, #241a13 55%, #150f0b 100%);
+    border-top: 1px solid rgba(0, 0, 0, 0.85);
+    box-shadow:
+      inset 0 1px 0 rgba(232, 204, 150, 0.28),
+      0 -10px 26px rgba(0, 0, 0, 0.7);
+  }
+
+  .hero-cockpit {
+    padding: 4px 8px;
+    gap: 4px;
+  }
+
+  .cockpit-wing--action {
+    position: relative;
+    padding: 9px 10px;
+    border-radius: 16px;
+    background: var(--leather-panel-bg, linear-gradient(180deg, #2b2219, #120d09));
+    border: 1px solid #000;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.16),
+      inset 0 -2px 6px rgba(0, 0, 0, 0.75),
+      0 2px 0 #0a0705,
+      0 12px 26px rgba(0, 0, 0, 0.65);
+  }
+
+  .cockpit-wing--action::before {
+    content: '';
+    position: absolute;
+    inset: 5px;
+    border-radius: 12px;
+    border: 1.3px dashed var(--stitch, rgba(232, 204, 150, 0.26));
+    pointer-events: none;
+  }
+
+  .cockpit-wing--action > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  .hero-cockpit .card--lg {
+    --cw: 56px;
+  }
+
+  .fan-card--0 {
+    transform: rotate(-15deg) translateX(3px) translateY(-1px);
+  }
+
+  .fan-card--1 {
+    transform: rotate(15deg) translateX(-10px) translateY(-1px);
+  }
+
+  .hero-seat-actions .sub-action-btn {
+    padding: 3px 5px !important;
+    font-size: 0.74rem !important;
+  }
+
+  .hero-seat-actions .hero-start-btn {
+    padding: 5px 8px !important;
+    font-size: 0.76rem !important;
+  }
+
+  .cockpit-badge-row {
+    align-items: center;
+    gap: 4px;
+  }
+
+  .hero-hand {
+    padding: 2px 8px;
+  }
+
+  .hero-stack {
+    flex-wrap: nowrap;
+    gap: 4px;
+    padding: 2px 6px;
+  }
+
+  .hero-stack .rebuy-btn {
+    min-height: 26px;
+    margin-left: 0;
+    padding: 1px 5px !important;
+    border-radius: 6px !important;
+    background: linear-gradient(180deg, #3b2f22 0%, #241b12 100%) !important;
+    border: 1px solid rgba(0, 0, 0, 0.75) !important;
+    color: #ffdf9a !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 2px 4px rgba(0, 0, 0, 0.5) !important;
+  }
+
+  .hero-stack .rebuy-btn span {
+    display: none;
+  }
+
+  .hero-seat-actions {
+    margin-top: 0;
+    gap: 4px;
+  }
+
+  .hero-seat-actions .sub-action-btn {
+    min-height: 34px;
+    padding: 3px 7px !important;
+  }
+
+  .hero-seat-actions .sub-btn-text {
+    display: none;
+  }
+
+  .hero-seat-actions .hero-start-btn {
+    min-height: 34px;
+    padding: 3px 10px !important;
+    font-size: 0.74rem !important;
+  }
+
+    .hero-cockpit .card--lg {
+      --cw: 44px;
+    }
+
+    .cockpit-wing--action {
+      padding: 7px 8px;
+    }
+}
+
+/* ═══════════════ 竖屏窄屏（≤768px）：座舱由左右两翼改为纵向流 ═══════════════ */
+@media (max-width: 768px) {
+  .hero-cockpit {
+    flex-direction: column;
+    gap: 10px;
+    padding: 8px 12px;
+  }
+
+  .cockpit-divider {
+    display: none;
+  }
+
+  .cockpit-wing--hero {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    width: 100%;
+    column-gap: 12px;
+    row-gap: 8px;
+  }
+
+  .cockpit-meta-group {
+    display: contents;
+  }
+
+  .cockpit-badge-row {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .hero-seat-actions {
+    grid-column: 1 / -1;
+    flex-wrap: nowrap;
+    width: 100%;
+  }
+}
+
+/*
+ * 超短屏（320×568 这类）：桌面只剩 ~110px，座舱必须让高度。
+ * 底牌缩到 --cw 36px，操作区与横幅去掉多余留白，把省下的高度全部给牌桌。
+ */
+@media (max-height: 620px) {
+  .hero {
+    padding: 4px 6px 6px;
+  }
+
+  .hero-cockpit {
+    padding: 4px 8px;
+    gap: 6px;
+  }
+
+  .cockpit-wing--hero {
+    column-gap: 8px;
+    row-gap: 4px;
+  }
+
+  .hero-cockpit .card--lg,
+  .hero-cockpit :where(.card--lg) {
+    --cw: 36px;
+  }
+
+  .cockpit-wing--action {
+    padding: 6px 8px;
+    border-radius: 12px;
+  }
+
+  .hero-spectator .spectator-card {
+    padding: 8px 10px;
+    gap: 6px;
+  }
+}

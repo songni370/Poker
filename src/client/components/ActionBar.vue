@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import Button from 'primevue/button'
 import Dialog from 'primevue/dialog'
 import type { LegalAction } from '../../shared/protocol.ts'
@@ -167,6 +167,28 @@ const isAtMinAmount = computed(() => amount.value <= minAmount.value)
 
 const confirmAllIn = ref(false)
 
+/**
+ * 竖屏紧凑操作区开关：CSS 只负责视觉，模板分支负责「只渲染一套按钮」，
+ * 避免同一动作在 DOM 里出现两次（读屏会重复、e2e 也会点错）。
+ * 断点与 TableView 的竖屏布局保持一致：≤560px 宽且竖屏。
+ */
+const isCompact = ref(false)
+let compactQuery: MediaQueryList | null = null
+
+function syncCompact(event?: MediaQueryList | MediaQueryListEvent): void {
+  isCompact.value = event ? event.matches : (compactQuery?.matches ?? false)
+}
+
+onMounted(() => {
+  compactQuery = window.matchMedia('(max-width: 560px) and (orientation: portrait)')
+  syncCompact()
+  compactQuery.addEventListener('change', syncCompact)
+})
+
+onBeforeUnmount(() => {
+  compactQuery?.removeEventListener('change', syncCompact)
+})
+
 function sendAction(action: LegalAction['action'], value?: number): void {
   if (!canAct.value) return
   emit('action', value === undefined ? { action } : { action, amount: value })
@@ -284,8 +306,136 @@ const liveText = computed(() => {
       </div>
     </div>
 
+    <!-- 竖屏紧凑操作区：一行注码控制 + 一行四个动作，替代竖屏下的双舱布局。 -->
+    <div v-if="isCompact" class="compact-dock">
+      <template v-if="canAct && legalActions.length > 0">
+        <div class="compact-sizing-row">
+          <div class="compact-stepper">
+            <button
+              type="button"
+              class="compact-stepper-btn"
+              :disabled="!canAct || isAtMinAmount"
+              aria-label="减少下注金额"
+              @click="stepDown"
+            >
+              <i class="pi pi-minus" aria-hidden="true" />
+            </button>
+            <input
+              type="number"
+              class="compact-amount num"
+              :value="amount"
+              :min="minAmount"
+              :max="maxAmount"
+              aria-label="下注金额"
+              @change="onAmountInput"
+            />
+            <button
+              type="button"
+              class="compact-stepper-btn"
+              :disabled="!canAct || isAtMaxAmount"
+              aria-label="增加下注金额"
+              @click="stepUp"
+            >
+              <i class="pi pi-plus" aria-hidden="true" />
+            </button>
+          </div>
+
+          <div class="compact-chips" role="group" aria-label="注码快捷比例">
+            <button
+              type="button"
+              class="compact-chip"
+              :class="{ 'is-selected': isAtMinAmount }"
+              :disabled="!canAct"
+              @click="applyMin"
+            >
+              MIN <b class="num">{{ minAmount }}</b>
+            </button>
+            <button
+              v-for="q in quickAmounts"
+              :key="q.key"
+              type="button"
+              class="compact-chip"
+              :class="{ 'is-selected': amount === q.value && !q.disabled }"
+              :disabled="!canAct || q.disabled"
+              :title="q.title"
+              :aria-label="q.desc"
+              @click="applyQuick(q)"
+            >
+              {{ q.label === 'OVERBET' ? '1.5x' : q.label }} <b class="num">{{ q.value }}</b>
+            </button>
+          </div>
+        </div>
+
+        <div class="compact-actions" role="group" aria-label="行动">
+          <Button
+            v-if="foldAction"
+            class="compact-btn compact-btn--fold"
+            :disabled="!canAct"
+            :title="reasonFor || '弃牌'"
+            aria-label="弃牌"
+            @click="sendAction('fold')"
+          >
+            <span class="compact-btn-title">弃牌</span>
+            <small>FOLD</small>
+          </Button>
+
+          <Button
+            v-if="checkAction"
+            class="compact-btn compact-btn--call"
+            :disabled="!canAct"
+            :title="reasonFor || '过牌'"
+            aria-label="过牌"
+            @click="sendAction('check')"
+          >
+            <span class="compact-btn-title">过牌</span>
+            <small>CHECK</small>
+          </Button>
+          <Button
+            v-else-if="callAction"
+            class="compact-btn compact-btn--call"
+            :disabled="!canAct"
+            :title="reasonFor || `跟注 ${String(callAmount)}`"
+            :aria-label="`跟注 ${String(callAmount)}`"
+            @click="sendAction('call')"
+          >
+            <span class="compact-btn-title">跟注 <b class="num">{{ callAmount }}</b></span>
+            <small>CALL</small>
+          </Button>
+
+          <Button
+            v-if="sizing"
+            class="compact-btn compact-btn--raise"
+            :disabled="!canAct"
+            :title="reasonFor || `${sizingAction === 'bet' ? '下注' : '加注'} ${String(amount)}`"
+            :aria-label="`${sizingAction === 'bet' ? '下注' : '加注'} ${String(amount)}`"
+            @click="submitSizing"
+          >
+            <span class="compact-btn-title">{{ sizingAction === 'bet' ? '下注' : '加注' }} <b class="num">{{ amount }}</b></span>
+            <small>{{ sizingAction === 'bet' ? 'BET' : 'RAISE' }}</small>
+          </Button>
+
+          <Button
+            v-if="allInAction"
+            class="compact-btn compact-btn--allin"
+            :disabled="!canAct"
+            :title="reasonFor || `全下 ${String(allInAmount)}`"
+            :aria-label="`全下 ${String(allInAmount)}`"
+            @click="askAllIn"
+          >
+            <span class="compact-btn-title">全下</span>
+            <small>{{ allInAmount }}</small>
+          </Button>
+        </div>
+      </template>
+
+      <div v-else class="compact-standby">
+        <i class="pi pi-spin pi-spinner" aria-hidden="true" />
+        <span>{{ blockedReason || (isMyTurn ? '处理中…' : '等待对手行动…') }}</span>
+      </div>
+    </div>
+
     <!-- 2. 全新双舱协同布局 -->
-    <div class="actions-dock">
+    <div v-if="!isCompact" class="actions-dock">
       <!-- 轮到本人且存在可用动作 -->
       <div v-if="canAct && legalActions.length > 0" class="dock-layout">
         <!-- 【左舱：防守与跟随组 (CHECK / CALL 与 FOLD)】 -->
@@ -531,9 +681,13 @@ const liveText = computed(() => {
   height: 26px;
   border-radius: 999px;
   overflow: hidden;
-  background: rgba(10, 15, 22, 0.92);
-  border: 1px solid rgba(212, 177, 106, 0.35);
-  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.8), 0 2px 8px rgba(0, 0, 0, 0.5);
+  /* 拟物：内凹金属凹槽 + 黄铜细框，填充层带顶部高光 */
+  background: #0c0906;
+  border: 1px solid rgba(165, 128, 60, 0.75);
+  box-shadow:
+    inset 0 2px 5px rgba(0, 0, 0, 0.9),
+    0 1px 0 rgba(255, 255, 255, 0.08),
+    0 3px 8px rgba(0, 0, 0, 0.55);
   display: flex;
   align-items: center;
   user-select: none;
@@ -571,13 +725,14 @@ const liveText = computed(() => {
   width: 100%;
   height: 100%;
   transform-origin: left center;
-  background: linear-gradient(90deg, #059669 0%, #10b981 50%, #f59e0b 80%, #d97706 100%);
+  background: linear-gradient(180deg, #9af0a9 0%, #4fbf67 55%, #2d8243 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
   border-radius: inherit;
   will-change: transform;
 }
 
 .turn-timer-integrated.is-urgent .timer-progress-fill {
-  background: linear-gradient(90deg, #b91c1c 0%, #dc2626 40%, #ef4444 80%, #f97316 100%);
+  background: linear-gradient(180deg, #ff8a8a 0%, #d63a3a 55%, #9e1f1f 100%);
 }
 
 .timer-ambient-glow {
@@ -607,14 +762,14 @@ const liveText = computed(() => {
   font-size: 0.72rem;
   font-weight: 800;
   letter-spacing: 0.08em;
-  color: #f8fafc;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), 0 0 6px rgba(0, 0, 0, 0.9);
+  color: #f6ecd8;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.95);
 }
 
 .timer-lead-icon {
   font-size: 0.8rem;
-  color: #ffd875;
-  filter: drop-shadow(0 0 4px rgba(255, 216, 117, 0.6));
+  color: #ffdf9a;
+  filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.8));
 }
 
 .is-urgent .timer-lead-icon {
@@ -640,7 +795,8 @@ const liveText = computed(() => {
 .timer-digits {
   font-size: 0.98rem;
   letter-spacing: 0.02em;
-  color: #ffe394;
+  color: #ffdf9a;
+  text-shadow: 0 1px 0 #000;
 }
 
 .is-urgent .timer-digits {
@@ -1237,6 +1393,267 @@ const liveText = computed(() => {
 }
 
 /* ───────────── 响应式布局自适应 ───────────── */
+/* ───────────── 竖屏紧凑操作区（isCompact 时才渲染） ─────────────
+ * 拟物：黄铜压花面板 + 内嵌缝线 + 立体皮革/金属按键。
+ * 面板材质见 .cockpit-wing--action 的竖屏覆盖规则（TableView.vue）。 */
+.compact-dock {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  width: 100%;
+}
+
+.compact-sizing-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+/* 金额步进：内凹深槽 + 黄铜细框 */
+.compact-stepper {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 34px;
+  padding: 0 2px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #171109 0%, #241a10 100%);
+  border: 1px solid #000;
+  box-shadow:
+    inset 0 2px 5px rgba(0, 0, 0, 0.9),
+    0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+.compact-stepper-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #e5d6b8;
+  font-size: 0.9rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.compact-stepper-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.compact-stepper-btn:active:not(:disabled) {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.compact-amount {
+  width: 58px;
+  height: 30px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #ffdf9a;
+  font-size: 1rem;
+  font-weight: 800;
+  text-align: center;
+  outline: none;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 0 #000;
+}
+
+.compact-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.compact-chips::-webkit-scrollbar {
+  display: none;
+}
+
+/* 快捷注码芯片：凸起的深棕皮按钮，选中态变成香槟金压印 */
+.compact-chip {
+  flex: none;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.75);
+  background: linear-gradient(180deg, #3b2f22 0%, #241b12 100%);
+  color: #d7c9ad;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.6),
+    0 2px 4px rgba(0, 0, 0, 0.5);
+}
+
+.compact-chip b {
+  margin-left: 3px;
+  color: #fff1d2;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.compact-chip.is-selected {
+  color: var(--champagne-text, #2a1c08);
+  background: var(--champagne, linear-gradient(180deg, #ffe9ac 0%, #f0c668 45%, #c9973f 100%));
+  border-color: #7c5c22;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    inset 0 -2px 4px rgba(120, 84, 26, 0.5),
+    0 2px 6px rgba(0, 0, 0, 0.5);
+}
+
+.compact-chip.is-selected b {
+  color: var(--champagne-text, #2a1c08);
+}
+
+.compact-chip:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.compact-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+  height: 50px;
+}
+
+/* 立体按键：顶部高光 + 底部内阴影 + 3px 实色底座，模拟按键厚度 */
+.compact-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 50px !important;
+  min-height: 50px !important;
+  padding: 2px 4px !important;
+  display: flex !important;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  border-radius: 12px !important;
+  transition: transform 0.1s ease, box-shadow 0.1s ease;
+}
+
+.compact-btn:active:not(:disabled) {
+  transform: translateY(2px);
+}
+
+.compact-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.compact-btn-title {
+  font-size: 0.92rem;
+  font-weight: 800;
+  line-height: 1.05;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+
+.compact-btn-title b {
+  font-size: 1.05rem;
+  font-weight: 900;
+  letter-spacing: -0.01em;
+}
+
+.compact-btn small {
+  font-size: 0.52rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  line-height: 1;
+  opacity: 0.6;
+}
+
+/* 弃牌：酒红皮革 */
+.compact-btn--fold {
+  color: #f0cdc9 !important;
+  background: linear-gradient(180deg, #6e2c30 0%, #4a191d 55%, #351013 100%) !important;
+  border: 1px solid #20090b !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    inset 0 -3px 5px rgba(0, 0, 0, 0.55),
+    0 3px 0 #1c0809,
+    0 6px 12px rgba(0, 0, 0, 0.55) !important;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6);
+}
+
+/* 跟注：深绿皮革 */
+.compact-btn--call {
+  color: #f2fff6 !important;
+  background: linear-gradient(180deg, #2f9a63 0%, #1d7047 55%, #145234 100%) !important;
+  border: 1px solid #0a2a1a !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    inset 0 -3px 5px rgba(0, 0, 0, 0.45),
+    0 3px 0 #0d2f1e,
+    0 6px 12px rgba(0, 0, 0, 0.55) !important;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
+}
+
+/* 加注：香槟金压花（主操作） */
+.compact-btn--raise {
+  color: #35230a !important;
+  background: linear-gradient(180deg, #ffe9ac 0%, #f0c668 45%, #c9973f 100%) !important;
+  border: 1px solid #7c5c22 !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 -3px 5px rgba(150, 105, 30, 0.55),
+    0 3px 0 #6a4d1a,
+    0 8px 16px rgba(0, 0, 0, 0.55) !important;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+.compact-btn--raise small {
+  opacity: 0.72;
+}
+
+/* 全下：深红金属 */
+.compact-btn--allin {
+  flex: 0 0 66px;
+  color: #ffe4e6 !important;
+  background: linear-gradient(180deg, #b8242e 0%, #7f141c 100%) !important;
+  border: 1px solid #3d0a0e !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    inset 0 -3px 5px rgba(0, 0, 0, 0.5),
+    0 3px 0 #2a0508,
+    0 6px 12px rgba(0, 0, 0, 0.55) !important;
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.5);
+}
+
+.compact-standby {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 50px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #241c13 0%, #130e09 100%);
+  border: 1px solid rgba(0, 0, 0, 0.8);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.85), 0 1px 0 rgba(255, 255, 255, 0.07);
+  color: #a08f74;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+/* ───────────── 旧版双舱的响应式断点 ───────────── */
 @media (max-width: 820px) {
   .dock-layout {
     flex-direction: column;
@@ -1268,6 +1685,110 @@ const liveText = computed(() => {
 
   .action-btn--allin {
     flex: 0 0 80px;
+  }
+}
+
+/*
+ * 竖屏紧凑操作区（2026-10 重构）：
+ * 牌桌已经吃满舞台剩余高度，操作区必须收口。目标是把 182px 压到 ~150px：
+ * 计时条 26→22、防守按钮 50→44、进攻舱内边距与快捷芯片各收一档。
+ * 桌面端（≥960px）与横屏不受影响。
+ */
+@media (max-width: 560px) and (orientation: portrait) {
+  .action-console {
+    gap: 4px;
+  }
+
+  .turn-timer-integrated {
+    height: 22px;
+  }
+
+  .timer-overlay-content {
+    padding: 0 10px;
+  }
+
+  .timer-lead {
+    font-size: 0.66rem;
+    gap: 4px;
+  }
+
+  .timer-lead-icon {
+    font-size: 0.72rem;
+  }
+
+  .timer-digits {
+    font-size: 0.86rem;
+  }
+
+  .timer-unit {
+    font-size: 0.6rem;
+  }
+
+  .actions-dock {
+    width: 100%;
+  }
+
+  .dock-layout {
+    gap: 4px;
+  }
+
+  .panel--defend {
+    gap: 4px;
+  }
+
+  .panel--defend .action-btn {
+    height: 44px !important;
+    min-height: 44px !important;
+  }
+
+  .panel--attack {
+    gap: 4px;
+    padding: 4px 6px;
+  }
+
+  .quick-chips-strip {
+    gap: 4px;
+  }
+
+  .chip-tag {
+    min-height: 24px;
+    padding: 2px 6px;
+  }
+
+  .chip-label {
+    font-size: 0.6rem;
+  }
+
+  .chip-val {
+    font-size: 0.69rem;
+  }
+
+  .attack-controls-row {
+    gap: 4px;
+  }
+
+  .stepper-action-btn {
+    width: 32px;
+    min-width: 32px;
+    height: 40px;
+  }
+
+  .stepper-center-screen {
+    height: 40px;
+  }
+
+  .stepper-digit-input {
+    width: 50px;
+    height: 34px;
+  }
+
+  .action-btn {
+    height: 44px;
+    min-height: 44px;
+  }
+
+  .action-btn--allin {
+    flex: 0 0 74px;
   }
 }
 </style>

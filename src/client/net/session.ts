@@ -11,7 +11,8 @@ import type {
   ServerMessage,
 } from '../../shared/protocol.ts'
 import { ERROR_MESSAGES } from '../../shared/protocol.ts'
-import { playPing, playYourTurn, soundEnabled } from '../sound.ts'
+import { playChips, playCheck, playDeal, playFold, playPing, playWin, playYourTurn } from '../sound/index.ts'
+import { resolveCues } from '../sound/cues.ts'
 import { useChatStore } from '../stores/chat.ts'
 import { useConnectionStore } from '../stores/connection.ts'
 import { useGameStore } from '../stores/game.ts'
@@ -339,7 +340,7 @@ function handleMessage(text: string): void {
   if (message.type === 'chat.message') {
     const chat = useChatStore()
     chat.append(message.message)
-    if (soundEnabled.value && message.message.kind === 'user') playPing()
+    if (message.message.kind === 'user') playPing()
     return
   }
 
@@ -375,13 +376,44 @@ function handleMessage(text: string): void {
   if (message.handHistory) game.setHistory(message.handHistory)
 
   const wasMyTurn = game.isMyTurn
+  // 快照 diff 需要在 applySnapshot 之前拿到上一份状态，否则会丢掉「发生了什么」。
+  const prevState = game.state
   game.applySnapshot(message.state, message.self)
   if (message.type === 'hand.settled' && message.result) game.appendHistory(message.result)
 
-  // 提示音：轮到自己行动、以及本手结算。
-  if (soundEnabled.value) {
-    if (!wasMyTurn && game.isMyTurn) playYourTurn()
-    else if (message.type === 'hand.settled') playPing()
+  // 对局音效：按快照 diff 判定（发牌、下注、弃牌、过牌、轮到自己、结算）。
+  // 判定逻辑在 sound/cues.ts 里保持纯函数，这里只负责把结果映射成实际播放。
+  const cues = resolveCues({
+    eventType: message.type,
+    next: message.state,
+    self: message.self,
+    prev: prevState,
+    wasMyTurn,
+  })
+  for (const cue of cues) {
+    switch (cue.kind) {
+      case 'deal':
+        playDeal()
+        break
+      case 'chips':
+        playChips(cue.amount)
+        break
+      case 'check':
+        playCheck()
+        break
+      case 'fold':
+        playFold()
+        break
+      case 'yourTurn':
+        playYourTurn()
+        break
+      case 'win':
+        playWin()
+        break
+      case 'ping':
+        playPing()
+        break
+    }
   }
   const updatedCredentials = {
     ...(useRoomStore().credentials ?? (activeCredentials as RoomCredentials)),
