@@ -95,6 +95,8 @@ export interface SeatPublic {
   /** 是否参与当前这手牌（未入座/已离座/等待下一手为 false）。 */
   inHand: boolean
   isHost: boolean
+  /** 机器人陪练（没有真人连接，由服务端自动出牌）。前端据此显示机器人标记。 */
+  isBot?: boolean
   /** 已准备（保留字段：现在由主持人直接开局，客户端不再发送 room.ready）。 */
   ready: boolean
   /** 已离座但座位与筹码仍为本人保留（只有本人能坐回）。 */

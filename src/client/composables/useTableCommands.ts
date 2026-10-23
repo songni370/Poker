@@ -244,31 +244,6 @@ export function useTableCommands(options: TableCommandsOptions) {
     return options.isHost() && Boolean(current) && (current?.phase === 'waiting' || current?.phase === 'settlement')
   })
 
-  /**
-   * 添加机器人陪练（仅房主）。
-   *
-   * 机器人由服务端在本进程内驱动：没有 socket，轮到他时自动出牌。
-   * 放在服务端的好处是它和真人走完全一样的规则路径（筹码守恒、边池、亮牌），
-   * 也方便单机验证「下注 → 摊牌 → 结算」整条链路。
-   */
-  function addBot(): void {
-    if (!options.isHost()) return
-    if (!options.sendCommand({ type: 'room.add_bot', requestId: options.nextRequestId() })) {
-      options.announce('尚未连接到服务器，机器人没有添加。')
-      return
-    }
-    options.announce('已添加一个机器人陪练。')
-  }
-
-  /** 能否加机器人：房主 + 已连接 + 没在打牌 + 还有空位。 */
-  const canAddBot = computed(
-    () =>
-      options.isHost() &&
-      options.isOnline() &&
-      !(state()?.phase === 'preflop' || state()?.phase === 'flop' || state()?.phase === 'turn' || state()?.phase === 'river') &&
-      (state()?.maxSeats ?? 0) > 0,
-  )
-
   function startNextHand(): void {
     if (!options.sendCommand({ type: 'game.start', requestId: options.nextRequestId() })) {
       options.announce('尚未连接到服务器，无法开始下一手。')
@@ -337,8 +312,6 @@ export function useTableCommands(options: TableCommandsOptions) {
     hasPlayedHand,
     canStartNextHand,
     startNextHand,
-    addBot,
-    canAddBot,
     // 成员
     kickOpen,
     requestMembers,

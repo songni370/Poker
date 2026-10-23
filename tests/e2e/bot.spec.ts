@@ -22,19 +22,30 @@ test('机器人陪练：单人加机器人后能自动打完一手并结算', as
 
   await takeSeat(host, 1)
 
-  // ① 加机器人：按钮只在房主 + 未开局时出现。
-  const addBot = host.getByTestId('add-bot-btn')
-  await expect(addBot).toBeVisible()
+  /*
+   * ① 加机器人：入口在房主的「配置」弹窗里（不放操作区，
+   *    免得把手机上本来就挤的一排按钮再撑宽）。
+   */
+  await host.getByRole('button', { name: '牌局配置' }).click()
+  const configDialog = host.getByRole('dialog').filter({ hasText: '机器人陪练' })
+  await expect(configDialog).toBeVisible()
 
-  await addBot.click()
+  const addBalanced = host.getByTestId('add-bot-balanced')
+  await expect(addBalanced).toBeVisible()
+
+  await addBalanced.click()
   // 服务端会广播「XXX（机器人）加入了牌桌」，座位随之多一个人。
   await expect
     .poll(async () => host.locator('.seat-slot article').count(), { timeout: 10_000 })
     .toBeGreaterThanOrEqual(2)
 
-  // 再加一个，凑成 3 人桌（更接近真实牌局，也验证可以加多个）。
-  await addBot.click()
+  // 再加一个（换成「紧手」性格，验证性格可切换），凑成 3 人桌。
+  await host.getByTestId('add-bot-tight').click()
   await expect.poll(async () => host.locator('.seat-slot article').count(), { timeout: 10_000 }).toBe(3)
+
+  // 关掉配置弹窗再开局。
+  await host.getByRole('button', { name: '取消' }).click()
+  await expect(configDialog).toBeHidden()
 
   // ② 开局：机器人会自己行动，不需要第二个浏览器。
   await startHand(host)

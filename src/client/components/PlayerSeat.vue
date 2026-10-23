@@ -64,10 +64,12 @@ const roleText = computed(() => {
  * 没有角色时整块不渲染也不占位（昵称与筹码因此拿到更多宽度）。
  */
 const roleBadges = computed(() => {
-  const badges: { key: string; label: string; tone: 'dealer' | 'blind' }[] = []
+  const badges: { key: string; label: string; tone: 'dealer' | 'blind' | 'bot' }[] = []
   if (props.seat.isDealer) badges.push({ key: 'dealer', label: 'D', tone: 'dealer' })
   if (props.seat.isSmallBlind) badges.push({ key: 'sb', label: 'SB', tone: 'blind' })
   if (props.seat.isBigBlind) badges.push({ key: 'bb', label: 'BB', tone: 'blind' })
+  // 机器人标记：一眼看出这个位置不是真人，避免误以为有人在跟你打。
+  if (props.seat.isBot) badges.push({ key: 'bot', label: 'BOT', tone: 'bot' })
   return badges
 })
 
@@ -455,6 +457,12 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   background: linear-gradient(135deg, #ffd875 0%, #cb9b51 100%);
   color: #0b0f14;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.role-badge--bot {
+  background: linear-gradient(180deg, #2f3944 0%, #1d242c 100%);
+  color: #b8c8d6;
+  border-color: rgba(150, 178, 200, 0.5);
 }
 
 .role-badge--blind {

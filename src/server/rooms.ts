@@ -1598,6 +1598,8 @@ export class RoomManager {
         connected: this.isConnected(member),
         inHand: engineSeat.inHand,
         isHost: member.isHost,
+        // 前端用它显示「机器人」标记，也用来算「已有几个机器人」。
+        isBot: member.isBot === true,
         ready: member.ready,
         isDealer: table.buttonSeat === member.seat,
         isSmallBlind: table.smallBlindSeat === member.seat,

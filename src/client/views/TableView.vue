@@ -364,8 +364,6 @@ const {
   hasPlayedHand,
   canStartNextHand,
   startNextHand,
-  addBot,
-  canAddBot,
   kickOpen,
   requestMembers,
   confirmKick,
@@ -565,7 +563,6 @@ onBeforeUnmount(() => {
       :has-played-hand="hasPlayedHand"
       :is-host="room.isHost"
       :can-rebuy="canRebuy"
-      :can-add-bot="canAddBot"
       :occupied-count="occupiedCount"
       :max-seats="maxSeats"
       :empty-count="emptyCount"
@@ -579,7 +576,6 @@ onBeforeUnmount(() => {
       @rebuy="openRebuy"
       @resit="resit"
       @sit="openBuyIn"
-      @add-bot="addBot"
     />
     <!-- 专属邀请朋友弹窗 -->
     <RoomConfigDialog v-if="room.isHost && game.state" v-model:visible="configDialogOpen" :state="game.state" />
