@@ -797,3 +797,76 @@
     gap: 6px;
   }
 }
+
+/*
+ * 座舱里的次级小按钮（离座 / 退出房间）。
+ * 只放图标：这两个是低频操作，不该和「开始牌局」抢注意力，
+ * 也不该在 390px 下把这一行撑到换行。
+ */
+.seat-mini-btn {
+  flex: none;
+  width: 34px;
+  min-width: 34px;
+  /* 与「开始牌局」同高（34px）：PrimeVue 的 size="small" 自带 min-height，必须一起压掉，
+     否则两者高度不一致、垂直中心对不齐，看起来像错行。 */
+  height: 34px !important;
+  min-height: 34px !important;
+  max-height: 34px !important;
+  padding: 0 !important;
+  border-radius: 10px !important;
+  background: linear-gradient(180deg, #3b2f22 0%, #241b12 100%) !important;
+  border: 1px solid rgba(0, 0, 0, 0.75) !important;
+  color: #cbbd9f !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.6),
+    0 2px 4px rgba(0, 0, 0, 0.5) !important;
+}
+
+.seat-mini-btn:hover {
+  color: #ffdf9a !important;
+}
+
+.seat-mini-btn .btn-action-icon {
+  width: 15px;
+  height: 15px;
+}
+
+/* 操作行统一单排、垂直居中，按钮之间留一点呼吸 */
+.hero-seat-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+
+/* 统一这一行所有按钮的高度，避免不同 size 带来 34/44 混排 */
+.hero-seat-actions .p-button {
+  height: 34px;
+  min-height: 34px;
+  max-height: 34px;
+  align-items: center;
+}
+
+/*
+ * 超短屏（320px）：三个按钮（开始牌局 + 离座 + 退出）必须挤在一排，
+ * 否则座舱会多出一行、把牌桌压得更矮。这里让「开始牌局」可以收缩，
+ * 文字单行不换行，图标按钮保持固定 34px。
+ */
+@media (max-width: 360px) {
+  .hero-seat-actions {
+    gap: 4px;
+  }
+
+  .hero-seat-actions .hero-start-btn {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding-inline: 8px !important;
+  }
+
+  .hero-seat-actions .hero-start-btn span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}

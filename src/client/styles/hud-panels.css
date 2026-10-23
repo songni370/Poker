@@ -267,10 +267,6 @@
  * 并且固定在底部（拇指够得到、不遮住牌桌主体的底池与公共牌）。
  */
 @media (max-width: 560px) and (orientation: portrait) {
-  .hud-history-anchor {
-    position: static;
-  }
-
   .hud-history-popover {
     position: fixed;
     left: 0;

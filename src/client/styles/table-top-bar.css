@@ -272,13 +272,28 @@
     display: none;
   }
 
-  /* 房主多出「配置 / 成员」两个按钮，窄屏下连接状态只留图标，避免文字被压到重叠 */
+  /* 房主有「配置 / 成员」两个按钮，窄屏下连接状态只留图标，避免文字被压成两行 */
   .link-state span {
     display: none;
   }
 
   .link-state {
     padding: 3px 7px;
+    flex: none;
+  }
+
+  /* 房间名与盲注胶囊之间留出明确的间隙，避免视觉上粘成「我 的牌10/20」 */
+  .hud-left {
+    gap: 6px;
+  }
+
+  .room-badge {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .meta-capsules {
+    flex: none;
   }
 
   .bar-btn-text {
