@@ -26,7 +26,7 @@
     --seat-w: clamp(80px, 21vw, 92px);
     --seat-w-side: clamp(74px, 19vw, 84px);
     --seat-padding-block: 4px;
-    --center-inset: 176px;
+    --center-inset: 258px;
     --board-cw: clamp(24px, calc((100vw - 210px) / 5), 38px);
     --center-top: 45%;
     --center-max-height-inset: 86px;
@@ -49,7 +49,7 @@
     --seat-w: clamp(80px, 21vw, 92px);
     --seat-w-side: clamp(74px, 19vw, 84px);
     --seat-padding-block: 3px;
-    --center-inset: 176px;
+    --center-inset: 258px;
     --board-cw: clamp(24px, calc((100vw - 210px) / 5), 38px);
     --center-top: 45%;
     --center-max-height-inset: 82px;

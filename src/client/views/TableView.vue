@@ -536,7 +536,39 @@ onBeforeUnmount(() => {
         :can-pick-seat="canPickSeat"
         :reserved-seat="myReservedSeat"
         @pick-seat="onPickSeat"
-      />
+      >
+        <!-- 牌桌右下角的席位操作：离座 / 退出房间 -->
+        <template #corner-actions>
+          <button
+            v-if="!mySeatAway"
+            type="button"
+            class="seat-corner-btn"
+            aria-label="离座"
+            title="离座（座位与筹码为你保留）"
+            @click="requestLeaveSeat"
+          >
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="13" cy="4" r="1.8" />
+              <line x1="7" y1="21" x2="10" y2="17" />
+              <path d="M16 21l-2-4-3-3 1-6" />
+              <path d="M6 12l2-3 4-1 3 3 3 1" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            class="seat-corner-btn"
+            aria-label="退出房间"
+            title="退出房间（释放座位）"
+            @click="exitRoomOpen = true"
+          >
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+              <polyline points="16 17 21 12 16 7" />
+              <line x1="21" y1="12" x2="9" y2="12" />
+            </svg>
+          </button>
+        </template>
+      </PokerTable>
       <!-- 加载中 / 场景不可用。 -->
       <p v-else-if="!unavailable" class="loading" role="status">
         <i class="pi pi-spin pi-spinner" aria-hidden="true" />

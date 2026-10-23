@@ -79,7 +79,13 @@ export const TABLE_GEOMETRY: readonly TableGeometryTier[] = [
     seatWidth: 'clamp(80px, 21vw, 92px)',
     sideSeatWidth: 'clamp(74px, 19vw, 84px)',
     seatPaddingBlock: '4px',
-    centerInset: 176,
+    /*
+     * 对称槽位下左右座位锚在 8% / 92%，但座位面板是固定像素宽（~82px）。
+     * 桌面宽 374px 时，8% ≈ 30px，面板右沿到 71px —— 中央列必须从 71px 之后开始。
+     * centerInset 是「左右各留多少」，所以取值要覆盖 面板半宽 + 锚点偏移：
+     * 实测 208px 时中央区左沿仍在 112px、被座位压住 23px，这里加大到 236px。
+     */
+    centerInset: 258,
     boardCardWidth: 'clamp(24px, calc((100vw - 210px) / 5), 38px)',
     centerTop: '45%',
     centerMaxHeightInset: 86,
@@ -100,7 +106,13 @@ export const TABLE_GEOMETRY: readonly TableGeometryTier[] = [
     seatWidth: 'clamp(80px, 21vw, 92px)',
     sideSeatWidth: 'clamp(74px, 19vw, 84px)',
     seatPaddingBlock: '3px',
-    centerInset: 176,
+    /*
+     * 对称槽位下左右座位锚在 8% / 92%，但座位面板是固定像素宽（~82px）。
+     * 桌面宽 374px 时，8% ≈ 30px，面板右沿到 71px —— 中央列必须从 71px 之后开始。
+     * centerInset 是「左右各留多少」，所以取值要覆盖 面板半宽 + 锚点偏移：
+     * 实测 208px 时中央区左沿仍在 112px、被座位压住 23px，这里加大到 236px。
+     */
+    centerInset: 258,
     boardCardWidth: 'clamp(24px, calc((100vw - 210px) / 5), 38px)',
     centerTop: '45%',
     centerMaxHeightInset: 82,
