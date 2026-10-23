@@ -183,6 +183,21 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
           </span>
           <span v-if="isHero" class="tag tag--hero">你</span>
         </div>
+      </div>
+
+      <!--
+        第二行：筹码 + 角色徽章 + 状态标。
+        角色徽章（D/SB/BB/B）放在这一行而不是昵称行：
+        座位面板只有 ~80px 宽，徽章挤在昵称旁边会把「小美」压成「小…」。
+      -->
+      <div class="seat-row seat-row--bottom">
+        <span
+          class="stack num"
+          :class="fitClass(String(seat.stack))"
+          :title="`筹码：${seat.stack}`"
+        >
+          {{ seat.stack }}
+        </span>
         <div v-if="roleBadges.length > 0" class="roles" aria-hidden="true">
           <span
             v-for="badge in roleBadges"
@@ -193,19 +208,12 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
             {{ badge.label }}
           </span>
         </div>
-      </div>
-
-      <!-- 第二行：筹码金额（等宽鲜艳、100% 完整无截断） + 右侧状态标（ALL IN / 离座 / 弃牌 / 断线） -->
-      <div class="seat-row seat-row--bottom">
-        <span
-          class="stack num"
-          :class="fitClass(String(seat.stack))"
-          :title="`筹码：${seat.stack}`"
-        >
-          {{ seat.stack }}
-        </span>
         <div class="seat-flags">
-          <span v-if="!seat.connected" class="flag flag--off" aria-hidden="true" title="已断线">
+          <!--
+            机器人没有 WebSocket，connected 恒为 false——
+            对它显示「断线」图标既是误导，也白占座位面板里本就紧张的宽度。
+          -->
+          <span v-if="!seat.connected && !seat.isBot" class="flag flag--off" aria-hidden="true" title="已断线">
             <i class="pi pi-wifi" />
           </span>
           <span v-else-if="seat.allIn" class="flag flag--allin" aria-hidden="true">ALL IN</span>
@@ -455,12 +463,16 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
 .roles {
   display: flex;
   align-items: center;
-  gap: 2px;
-  flex: none;
+  gap: 1px;
+  /* 徽章让位给筹码数字：数字是玩家最关心的信息，被截成「498」就没意义了 */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .role-badge {
-  min-width: 11px;
+  flex: none;
+  min-width: 9px;
   padding: 0 2px;
   border-radius: 2px;
   font-size: clamp(0.48rem, 0.56vw, 0.54rem);
@@ -497,8 +509,11 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
   overflow: visible;
   line-height: 1.15;
   text-shadow: 0 1px 0 #000, 0 0 10px rgba(255, 190, 90, 0.25);
-  flex: 1 1 auto;
+  /* 筹码数字不收缩：宁可挤掉徽章，也不能把 4980 显示成 498 */
+  flex: 0 1 auto;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 状态标集 */
@@ -728,6 +743,17 @@ const percent = computed(() => Math.round(Math.min(1, Math.max(0, props.remainin
     padding: 0 4px;
     font-size: 0.55rem;
   }
+}
+
+/*
+ * 窄座位（侧边）：筹码数字优先。
+ * 座位上同时有「筹码 + D/SB/BB + B + 状态标」时，80px 内放不下，
+ * 结果是筹码被截成「4…」。这里按重要性取舍：D（庄家位）保留，
+ * 盲注与机器人标记在窄座位隐藏——它们不影响判断怎么打，筹码数字影响。
+ */
+.is-side-seat .role-badge--blind,
+.is-side-seat .role-badge--bot {
+  display: none;
 }
 
 /* 竖屏窄座位：不画黄铜徽章，把宽度全部留给昵称与筹码。 */

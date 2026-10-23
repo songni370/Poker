@@ -197,6 +197,8 @@
   display: inline-flex;
   align-items: baseline;
   gap: 2px;
+  white-space: nowrap;
+  flex: none;
   padding: 1px 6px;
   border-radius: 999px;
   background: rgba(0, 0, 0, 0.45);
@@ -244,9 +246,13 @@
 /* 筹码资产槽位 */
 .hero-stack {
   display: inline-flex;
-  flex-wrap: wrap;
+  /* 不换行：换行会把「筹码」标签压成竖排的「筹 / 码」两行（实际发生过） */
+  flex-wrap: nowrap;
   align-items: center;
   gap: 6px;
+  /* 内容超长时内部横向滚动而不是撑破/折行 */
+  min-width: 0;
+  max-width: 100%;
   padding: 4px 12px;
   border-radius: 9px;
   /* 拟物：内凹深槽，数字是压进去的 */
@@ -258,6 +264,8 @@
 .stack-label {
   color: var(--muted);
   font-size: 0.74rem;
+  white-space: nowrap;
+  flex: none;
 }
 
 .stack-num {
@@ -265,6 +273,8 @@
   font-size: 1.12rem;
   font-weight: 800;
   letter-spacing: 0.02em;
+  white-space: nowrap;
+  flex: none;
   text-shadow: 0 1px 0 #000, 0 0 10px rgba(255, 190, 90, 0.25);
 }
 
