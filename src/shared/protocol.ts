@@ -351,6 +351,19 @@ export const KickPlayerCommandSchema = z.object({
   playerId: z.string().min(1).max(64),
 })
 
+/**
+ * 主持人添加一个机器人陪练（未联机的虚拟玩家）。
+ *
+ * 机器人是本进程内的特殊成员：没有 WebSocket 连接，由服务端在轮到他时自动出牌。
+ * 只在没有真人对手时才有意义——一个人也能把「下注 → 摊牌 → 结算」整条流程跑通。
+ */
+export const AddBotCommandSchema = z.object({
+  type: z.literal('room.add_bot'),
+  requestId,
+  /** 机器人的性格，决定激进度；缺省 balanced。 */
+  style: z.enum(['tight', 'loose', 'balanced']).optional(),
+})
+
 /** 取房间成员名单（含旁观者）；只有主持人会收到内容，其他成员收到 not_host。 */
 export const ListMembersCommandSchema = z.object({
   type: z.literal('room.members'),
@@ -404,6 +417,7 @@ export const ClientCommandSchema = z.discriminatedUnion('type', [
   LeaveSeatCommandSchema,
   LeaveRoomCommandSchema,
   KickPlayerCommandSchema,
+  AddBotCommandSchema,
   ListMembersCommandSchema,
   ConfigureRoomCommandSchema,
   ReadyCommandSchema,

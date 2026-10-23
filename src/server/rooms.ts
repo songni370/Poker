@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { decideBotAction, type BotStyle } from './bot.ts'
 import { EngineError, HoldemTable, cryptoRng, type TableSnapshot } from '../engine/index.ts'
 import { TABLE_RULES, normalizeBuyIn } from '../shared/poker.ts'
 import {
@@ -45,6 +46,12 @@ export class CommandError extends Error {
   }
 }
 
+/** 机器人昵称池：按加入顺序取名，一桌不会被叫成同一个名字。 */
+const BOT_NAMES = ['阿飞', '小美', '老张', '莉莉', '大熊', '阿珍'] as const
+/** 机器人「思考」停顿（毫秒）：太短看不清过程，太长拖节奏。 */
+const BOT_THINK_MIN_MS = 600
+const BOT_THINK_MAX_MS = 1200
+
 export interface RoomMember {
   playerId: string
   nickname: string
@@ -60,6 +67,13 @@ export interface RoomMember {
    * 提前删掉会让那个座位在桌面上凭空消失。
    */
   pendingKickRemoval?: boolean
+  /**
+   * 机器人陪练（没有 WebSocket，由服务端在轮到他时自动出牌）。
+   * `socket` 恒为 null；超时判定、掉线释放等真人逻辑都要按这个标记跳过。
+   */
+  isBot?: boolean
+  /** 机器人性格（决定激进度），仅 isBot 成员有值。 */
+  botStyle?: BotStyle
 }
 
 /** 只依赖 WebSocket 的最小结构，避免为一个类型引入额外依赖。 */
@@ -195,6 +209,8 @@ export class RoomRuntime {
   pendingSettlement: { result: HandResultPublic; notice?: string } | null = null
   /** 聊天限流用的时间戳。 */
   readonly chatRate = new Map<string, number[]>()
+  /** 机器人思考定时器：轮到机器人时用它延迟出牌（null 表示当前不是机器人的回合）。 */
+  botTimer: NodeJS.Timeout | null = null
   /** 掉线宽限定时器：超时后释放该成员的座位（键为 playerId）。 */
   readonly seatReleaseTimers = new Map<string, NodeJS.Timeout>()
 
@@ -658,6 +674,7 @@ export class RoomManager {
     for (const room of this.rooms.values()) {
       if (room.turnTimer) clearTimeout(room.turnTimer)
       if (room.nextHandTimer) clearTimeout(room.nextHandTimer)
+      if (room.botTimer) clearTimeout(room.botTimer)
       room.clearRevealTimers()
       for (const member of room.members.values()) member.socket?.close(1001, 'server shutting down')
     }
@@ -715,6 +732,7 @@ export class RoomManager {
       if (!empty && !nobodySeatedAndGone && !abandoned) continue
       if (room.turnTimer) clearTimeout(room.turnTimer)
       if (room.nextHandTimer) clearTimeout(room.nextHandTimer)
+      if (room.botTimer) clearTimeout(room.botTimer)
       room.clearRevealTimers()
       for (const timer of room.seatReleaseTimers.values()) clearTimeout(timer)
       room.seatReleaseTimers.clear()
@@ -907,6 +925,11 @@ export class RoomManager {
           if (room.table.publicState().phase === 'settlement' && !room.pendingSettlement) this.scheduleNextHand(room)
           notice = `${member.nickname} 更新了思考时间和下一手等待时间`
           eventType = 'room.configured'
+          break
+        }
+        case 'room.add_bot': {
+          if (playerId !== room.hostPlayerId) throw new CommandError('not_host')
+          this.addBot(room, command.style ?? 'balanced')
           break
         }
         case 'room.kick': {
@@ -1281,6 +1304,130 @@ export class RoomManager {
    * keepPersistedDeadline=true 用于重启恢复：沿用快照里的截止时间，
    * 若它已经过期则 delay=0，超时动作会立即被判定执行（而不是重新给满 20 秒）。
    */
+  /* ───────────────────────── 机器人陪练 ───────────────────────── */
+
+  /**
+   * 加一个机器人：建房后一个人也能把整条流程跑通。
+   *
+   * 机器人是**本进程内的特殊成员**：没有 socket，靠 `driveBot` 在轮到他时自动出牌。
+   * 座位与买入走和真人完全一样的引擎路径（seat.take），所以筹码守恒、边池、
+   * 摊牌亮牌这些规则对它同样生效——不会出现「机器人有特殊待遇」的分叉。
+   */
+  private addBot(room: RoomRuntime, style: BotStyle): void {
+    if (room.table.isHandRunning()) {
+      throw new CommandError('bad_request', '本手进行中，等这手结束后再添加机器人')
+    }
+    // 找一个空座位：从 0 号位开始找第一个可用的。
+    const totalSeats = room.maxSeats
+    let seat: number | null = null
+    for (let index = 0; index < totalSeats; index += 1) {
+      if (room.table.isSeatAvailable(index)) {
+        seat = index
+        break
+      }
+    }
+    if (seat === null) throw new CommandError('room_full', '牌桌已经坐满了')
+
+    const count = [...room.members.values()].filter((member) => member.isBot).length + 1
+    const playerId = `bot-${randomUUID()}`
+    const nickname = `${BOT_NAMES[(count - 1) % BOT_NAMES.length] ?? '机器人'}${String(count)}`
+    const member: RoomMember = {
+      playerId,
+      nickname,
+      seat: null,
+      ready: false,
+      isHost: false,
+      // 机器人不需要重连：给一个永远匹配不上的哈希，任何人都无法冒用它的身份。
+      reconnectHash: hashToken(randomUUID()),
+      socket: null,
+      disconnectedAt: null,
+      isBot: true,
+    }
+    member.botStyle = style
+    room.members.set(playerId, member)
+
+    // 走和真人一样的入座路径：买入额取上限（房主设定的范围由引擎再校验一次）。
+    const buyIn = normalizeBuyIn(room.buyInMax, room.minBuyIn, room.buyInMax, room.smallBlind)
+    room.table.sit(playerId, nickname, seat, buyIn)
+    member.seat = seat
+
+    this.publishSystemChat(room, `${nickname}（机器人）加入了牌桌`)
+    this.bumpVersion(room)
+    this.scheduleTurn(room)
+    this.repo.transaction(() => {
+      this.repo.upsertPlayer(this.playerRecord(room, member))
+      this.writeState(room)
+    })
+    for (const other of room.members.values()) {
+      if (other.socket) this.sendSnapshot(room, other.playerId, 'room.snapshot')
+    }
+  }
+
+  /**
+   * 轮到机器人时自动出牌。
+   *
+   * 必须在 `room.run()` 里跑（房间命令是串行的），否则会和真人命令交错、
+   * 版本号与状态更新撞车。决策只喂「机器人自己能看到的信息」——
+   * 它的底牌与公共牌，看不到别人的牌，从根上杜绝作弊。
+   */
+  private driveBot(room: RoomRuntime): void {
+    const state = room.table.publicState()
+    if (!room.table.isHandRunning() || state.actingSeat === null) return
+    const member = room.memberAtSeat(state.actingSeat)
+    if (!member?.isBot) return
+
+    const legal = room.table.legalActions(member.playerId)
+    if (legal.length === 0) return
+
+    const seatInfo = room.table.seatOf(member.playerId)
+    const decision = decideBotAction({
+      // 只喂机器人自己能看到的信息：自己的底牌 + 公共牌。
+      holeCards: room.table.holeCardsOf(member.playerId),
+      board: state.board,
+      legalActions: legal,
+      stack: seatInfo?.stack ?? 0,
+      potTotal: state.potTotal,
+      callAmount: state.currentBet - (seatInfo?.committedStreet ?? 0),
+      style: member.botStyle ?? 'balanced',
+      random: Math.random,
+    })
+
+    // 交给正常的执行路径：版本校验、广播、持久化、结算都复用真人那一套。
+    this.execute(room, member.playerId, {
+      type: 'game.action',
+      requestId: randomUUID(),
+      handId: state.handId ?? '',
+      expectedVersion: room.version,
+      action: decision.action,
+      ...(decision.amount === undefined ? {} : { amount: decision.amount }),
+    })
+  }
+
+  /**
+   * 在行动计时器之外再挂一个「机器人思考」定时器。
+   *
+   * 不能直接在 scheduleTurn 里同步出牌：那会让一桌机器人在同一次调用栈里
+   * 瞬间打完一手，观感上什么都看不到。给一个 600–1200ms 的停顿，
+   * 玩家能看清「张三 加注到 200」这类过程。
+   */
+  private scheduleBot(room: RoomRuntime): void {
+    if (room.botTimer) {
+      clearTimeout(room.botTimer)
+      room.botTimer = null
+    }
+    const state = room.table.publicState()
+    if (!room.table.isHandRunning() || state.actingSeat === null) return
+    const member = room.memberAtSeat(state.actingSeat)
+    if (!member?.isBot) return
+    const delay = BOT_THINK_MIN_MS + Math.floor(Math.random() * (BOT_THINK_MAX_MS - BOT_THINK_MIN_MS))
+    room.botTimer = setTimeout(() => {
+      void room.run(() => {
+        if (this.rooms.get(room.id) !== room) return
+        this.driveBot(room)
+      })
+    }, delay)
+  }
+
   private scheduleTurn(room: RoomRuntime, keepPersistedDeadline = false): void {
     if (room.turnTimer) {
       clearTimeout(room.turnTimer)
@@ -1301,6 +1448,8 @@ export class RoomManager {
       },
       Math.max(0, deadline - now),
     )
+    // 轮到机器人时，在玩家超时之前先自己出牌（否则会一直被超时兜底）。
+    this.scheduleBot(room)
   }
 
   /** 超时以服务端为准：无需跟注则自动过牌，否则自动弃牌；断线不暂停全桌。 */

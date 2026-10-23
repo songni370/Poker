@@ -120,8 +120,13 @@ test('手机端开局、离座和退出按钮保持同一排，开局文字不�
         overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
       }
     })
+    /*
+     * 房主的操作行有 4 个按钮：开始牌局 / 加机器人 / 离座 / 退出房间。
+     * 「加机器人」是单人测试用的入口，只在房主 + 未开局时出现——
+     * 这里顺带守住它不会把这一行挤到两行（手机 320px 是最窄的一档）。
+     */
     expect(layout, `${width}px 手机端开局按钮布局`).toEqual({
-      buttonCount: 3,
+      buttonCount: 4,
       sameRow: true,
       insideRow: true,
       startLabelLines: 1,

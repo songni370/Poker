@@ -62,6 +62,8 @@ defineProps<{
   isHost: boolean
   /** 是否可重新买入（在座 + 已连接）。 */
   canRebuy: boolean
+  /** 是否还能加机器人（房主 + 未开局 + 还有空位）。 */
+  canAddBot: boolean
 }>()
 
 const emit = defineEmits<{
@@ -72,6 +74,7 @@ const emit = defineEmits<{
   (event: 'rebuy'): void
   (event: 'resit'): void
   (event: 'sit', seat: number): void
+  (event: 'addBot'): void
 }>()
 </script>
 
@@ -161,6 +164,22 @@ const emit = defineEmits<{
             >
               <i class="pi pi-play" aria-hidden="true" />
               <span>{{ hasPlayedHand ? '开始下一手' : '开始牌局' }}</span>
+            </Button>
+            <!--
+              房主专属：加一个机器人陪练。一个人也能把整条流程跑通（下注/摊牌/结算）。
+              本手进行中不可加，服务端会拒绝并给出提示。
+            -->
+            <Button
+              v-if="isHost && canAddBot"
+              size="small"
+              class="sub-action-btn sub-action-btn--bot"
+              data-testid="add-bot-btn"
+              title="添加一个机器人陪练（单人也能测试完整流程）"
+              aria-label="添加机器人"
+              @click="emit('addBot')"
+            >
+              <i class="pi pi-android" aria-hidden="true" />
+              <span class="sub-btn-text">加机器人</span>
             </Button>
             <Button size="small" class="sub-action-btn sub-action-btn--leave" :title="'离座（座位与筹码为你保留）'" @click="emit('leave')">
               <svg class="btn-action-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
